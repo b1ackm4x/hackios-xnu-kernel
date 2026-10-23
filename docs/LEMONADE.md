@@ -1,6 +1,10 @@
 # OnePlus 9 / HackiOS bring-up
 
-2026-10-24 图形增量见 [Metal 与硬件刷新实机验收](LEMONADE-DISPLAY.md)：包含光栅/复制兼容修复、TE 硬件通知及当前性能边界。
+2026-10-24 图形增量见 [Metal 与硬件刷新实机验收](LEMONADE-DISPLAY.md)：包含光栅/复制兼容修复、TE 硬件通知、DPU 独立双缓冲的 1,000 次实机切换及当前性能边界。
+
+当前阶段状态（2026-10-24）：DPU 实验的中断退出测试进入 Qualcomm `900e` 调试模式，
+待物理重启。退出竞争修复候选已构建并通过主机检查，尚未真机复测；下文历史 Android
+恢复记录均早于这次失败，不能当作当前恢复证明。
 
 这是本地一加 9 LE2110 的移植工作记录，不是已经验证可用的 ROM。
 
@@ -258,6 +262,9 @@ python3 tools/lemonade-verify-android.py
 
 
 ## 长期显示方案调研（2026-10-23；尚未作为驱动实现）
+
+以下为 10 月 23 日的设计记录。10 月 24 日已实现硬件刷新同步和独立双缓冲映射/切换，
+实测结果与仍未接入的桌面路径见 [显示增量验收](LEMONADE-DISPLAY.md#dpu-映射和独立双缓冲)。
 
 当前 Adreno 驱动负责执行 GLES/Mesa 的渲染命令。默认的 `blit_targets` 路径先在 Mesa 私有纹理中绘图，再由 `target_to_surface()` 用 GPU blit 导出到 IOSurface。`MiniIOMobileFramebuffer::show()` 等待 GPU fence 后，仍调用 `drawLayer()/drawRows()`，把 iOS 的 1125×2436 缩放成面板的 1080×2400，写入固件 GOP 缓冲区。GPU 负责画图和显示控制器负责送屏是两件独立的工作。正常的硬件呈现路径可以让显示控制器直接 DMA 读取渲染缓冲区，再按同步信号切换；[Android HWC](https://source.android.com/docs/core/graphics/implement-hwc) 与 [Linux KMS](https://docs.kernel.org/gpu/drm-kms.html) 的接口都以这种缓冲区、图层和同步模型组织。
 

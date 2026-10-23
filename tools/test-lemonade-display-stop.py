@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Execute the display driver's return transactions with native host mocks.
+
+The actual C driver is compiled. Only kernel services and ARM barrier/cache
+instructions are substituted. Pending return callbacks run at the first IRQ
+reenable; inaccessible memory detects any resumed MMIO access after quiesce.
+This checks CPU sequencing, not SMMU hardware, panel timing, or multiple CPUs.
+"""
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+STUBS = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <string.h>
+#include <sys/mman.h>
+typedef uintptr_t vm_offset_t;
+typedef size_t vm_size_t;
+typedef int kern_return_t;
+typedef void *DTEntry;
+typedef void *thread_call_t;
+#ifndef __printflike
+#define __printflike(a,b)
+#endif
+#define SIMPLE_LOCK_DECLARE(n,x) int n
+#define LCK_GRP_NULL 0
+#define KERN_SUCCESS 0
+#define kSuccess 0
+#define KMA_KOBJECT 1
+#define KMA_ZERO 2
+#define KMA_DATA 4
+#define VM_KERN_MEMORY_IOKIT 0
+#define kernel_map 0
+#define round_page(n) (((n) + 16383) & ~16383u)
+#define NSEC_PER_MSEC 1000000ull
+#define NSEC_PER_USEC 1000ull
+#define NSEC_PER_SEC 1000000000ull
+#define os_atomic_load(p,o) __atomic_load_n(p,__ATOMIC_SEQ_CST)
+#define os_atomic_store(p,v,o) __atomic_store_n(p,v,__ATOMIC_SEQ_CST)
+static bool host_interrupts = true;
+static void (*host_pending)(void);
+static unsigned host_callbacks;
+static uint64_t host_now;
+static uint32_t host_mdp[0x90000/4], host_smmu[0x100000/4], host_clocks[2];
+static char host_log[32768];
+static unsigned host_log_used;
+static bool ml_set_interrupts_enabled(bool value) {
+    bool previous = host_interrupts;
+    host_interrupts = value;
+    if (!previous && value && host_pending) {
+        void (*callback)(void) = host_pending;
+        host_pending = NULL;
+        host_callbacks++;
+        callback();
+    }
+    return previous;
+}
+static bool ml_get_interrupts_enabled(void) { return host_interrupts; }
+static void simple_lock(int *lock, int group) { (void)lock; (void)group; }
+static void simple_unlock(int *lock) { (void)lock; }
+static void thread_call_enter(thread_call_t call) { (void)call; }
+static uint64_t mach_absolute_time(void) { return host_now; }
+static void absolutetime_to_nanoseconds(uint64_t t, uint64_t *n) { *n=t; }
+static void nanoseconds_to_absolutetime(uint64_t n, uint64_t *t) { *t=n; }
+static void clock_delay_until(uint64_t t) { host_now=t; }
+static void delay(unsigned us) {
+    host_now += (uint64_t)us*1000;
+    host_mdp[0x350ac/4]++;
+    host_mdp[0x350b0/4]=1;
+    host_mdp[0x352b0/4]=2400;
+    if (host_mdp[0x4014/4]==0xe4d00000 && host_mdp[0x6014/4]==0xe4d00000) {
+        host_mdp[0x44314/4]=0x12345678;
+        host_mdp[0x45314/4]=0x87654321;
+    }
+}
+static int SecureDTLookupEntry(void *a, const char *b, DTEntry *c) { return -1; }
+static int SecureDTGetProperty(DTEntry a, const char *b, const void **c, unsigned *d) { return -1; }
+static bool PE_parse_boot_argn(const char *n, void *p, int s) { return false; }
+static int kmem_alloc(int m, vm_offset_t *p, unsigned n, int flags, int tag) { return 1; }
+vm_offset_t ml_io_map(vm_offset_t p, vm_size_t n) { return 0; }
+vm_offset_t pe_arm_get_soc_base_phys(void) { return 0; }
+uint64_t kvtophys(vm_offset_t p) { return 0x92345000; }
+void loader_log_putc(char c) { assert(host_log_used+1<sizeof(host_log)); host_log[host_log_used++]=c; }
+kern_return_t gic_v3_spi_attach(uint32_t n, bool edge, void (*cb)(void*,uint32_t), void *p) { return 0; }
+void gic_v3_spi_mask(uint32_t n) {}
+void gic_v3_spi_detach(uint32_t n) {}
+'''
+
+CASES = r'''
+static void reset_fixture(void) {
+    memset(&display_map,0,sizeof(display_map));
+    memset(&irq,0,sizeof(irq));
+    memset(votes,0,sizeof(votes));
+    memset(host_mdp,0,sizeof(host_mdp));
+    memset(host_smmu,0,sizeof(host_smmu));
+    memset(host_log,0,sizeof(host_log)); host_log_used=0;
+    host_clocks[0]=host_clocks[1]=0;
+    display_stopping=display_restoring=false;
+    host_interrupts=true; host_pending=NULL; host_callbacks=0; host_now=0;
+    display_map.mdp=(uintptr_t)host_mdp;
+    display_map.smmu=(uintptr_t)host_smmu;
+    display_map.cb=(uintptr_t)host_smmu+0x85000;
+    display_map.saved[0]=0xe0; display_map.saved[1]=0x60;
+    for (unsigned i=0;i<9;i++)
+        *(uint32_t *)(display_map.cb+display_cb_offsets[i])=display_map.saved[i];
+    *(uint32_t *)(display_map.cb+0x58)=0x400;
+    display_map.baseline[0]=0x12345678; display_map.baseline[1]=0x87654321;
+    display_map.source[0]=display_map.source[1]=0xe4d00000;
+    display_map.flush=0x20000000;
+    host_mdp[0x4014/4]=host_mdp[0x6014/4]=0xe4d00000;
+    host_mdp[0x15018/4]=display_map.flush;
+}
+static void assert_context_restored(void) {
+    for (unsigned i=0;i<9;i++)
+        assert(*(uint32_t *)(display_map.cb+display_cb_offsets[i])==display_map.saved[i]);
+    assert(!display_map.active && !display_map.flip_active && !display_map.misr_active);
+    assert(!display_restoring);
+}
+static void return_after_complete_flip(void) {
+    assert(host_mdp[0x4014/4]==0x12000000);
+    assert(host_mdp[0x6014/4]==0x12000000);
+    assert(host_mdp[0x15018/4]==3);
+    assert(display_map.flip_active);
+    lemonade_display_quiesce();
+}
+static void return_after_complete_context(void) {
+    assert(display_map.active);
+    assert(*(uint32_t *)(display_map.cb+0x20)==0x92345000);
+    assert(*(uint32_t *)(display_map.cb+0x30)==0x803519);
+    assert(*(uint32_t *)(display_map.cb+0x38)==0xf404ff44);
+    lemonade_display_quiesce();
+}
+static void return_after_complete_vote(void) {
+    assert(votes[0].changed && host_clocks[0]==1);
+    lemonade_display_quiesce();
+}
+static void return_after_complete_restore(void) {
+    assert_context_restored();
+    lemonade_display_quiesce();
+}
+int main(void) {
+    reset_fixture();
+    display_map.active=display_map.flip_active=display_map.misr_active=true;
+    *(uint32_t *)(display_map.cb)=0x1127;
+    host_pending=return_after_complete_flip;
+    assert(!display_flip_buffer(1));
+    assert(host_callbacks==1 && host_interrupts && display_stopping);
+    assert_context_restored();
+    assert(host_mdp[0x4014/4]==0xe4d00000 && host_mdp[0x6014/4]==0xe4d00000);
+    assert(host_mdp[0x15018/4]==0x20000000);
+    char *pixels=strstr(host_log,"source restore pixels=1");
+    char *unmap=strstr(host_log,"mapping restore registers=1");
+    assert(pixels && unmap && pixels<unmap);
+    puts("PASS: pending return observes a complete source pair and restores pixels before unmapping");
+
+    reset_fixture();
+    uint32_t baseline[2]={0x12345678,0x87654321};
+    host_pending=return_after_complete_context;
+    assert(!display_map_configure(baseline));
+    assert(host_callbacks==1 && display_stopping);
+    assert_context_restored();
+    puts("PASS: context setup and journal finish before pending return can restore them");
+
+    reset_fixture();
+    host_pending=return_after_complete_vote;
+    (void)bus_clock(0,(uintptr_t)&host_clocks[0],2,true);
+    assert(host_callbacks==1 && host_clocks[0]==0 && !votes[0].changed);
+    puts("PASS: pending return cannot leave an unjournaled clock vote");
+
+    reset_fixture();
+    display_map.active=true;
+    *(uint32_t *)display_map.cb=0x1127;
+    *(uint32_t *)(display_map.cb+0x20)=0x92345000;
+    host_pending=return_after_complete_restore;
+    display_map_restore();
+    assert(host_callbacks==1 && display_stopping);
+    assert_context_restored();
+    puts("PASS: normal restoration cannot be interrupted halfway by a second restoration");
+
+    reset_fixture();
+    lemonade_display_quiesce();
+    void *forbidden=mmap(NULL,4096,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+    assert(forbidden!=MAP_FAILED);
+    assert(rd((uintptr_t)forbidden,0)==0);
+    wr((uintptr_t)forbidden,1);
+    display_map.mdp=(uintptr_t)forbidden;
+    assert(!display_flip_buffer(0));
+    assert(!bus_clock(0,(uintptr_t)forbidden,2,true));
+    assert(!display_map_configure(baseline));
+    assert(!display_misr_sample(baseline));
+    display_map.active=true; display_map.cb=(uintptr_t)forbidden;
+    display_map_restore();
+    lemonade_display_quiesce();
+    assert(host_interrupts);
+    munmap(forbidden,4096);
+    puts("PASS: resumed reads, writes, configuration and repeated cleanup never touch inaccessible MMIO");
+
+    reset_fixture();
+    host_interrupts=false;
+    assert(bus_clock(0,(uintptr_t)&host_clocks[0],2,true));
+    assert(!host_interrupts);
+    lemonade_display_quiesce();
+    assert(!host_interrupts && host_clocks[0]==0 && display_stopping);
+    puts("PASS: return preserves an already disabled interrupt state");
+    return 0;
+}
+'''
+
+
+def main():
+    compiler = shutil.which('clang') or shutil.which('cc')
+    if not compiler:
+        raise SystemExit('A native C compiler is required')
+    source = (ROOT / 'xnu/files/bsd/dev/lemonade_display.c').read_text()
+    header = (ROOT / 'xnu/files/bsd/sys/lemonade_display.h').read_text()
+    source = re.sub(r'^#include [^\n]+\n', '', source, flags=re.M)
+    header = re.sub(r'^#include [^\n]+\n', '', header, flags=re.M)
+    source = re.sub(r'__asm__ volatile\([^;]+;', '(void)0;', source)
+    with tempfile.TemporaryDirectory(prefix='lemonade-display-stop-') as directory:
+        folder = Path(directory)
+        (folder / 'test.c').write_text(STUBS + header + source + CASES)
+        subprocess.run([compiler, '-std=gnu11', '-O1', '-g', '-Wno-format',
+                        '-fsanitize=address,undefined', str(folder / 'test.c'),
+                        '-o', str(folder / 'test')], check=True)
+        subprocess.run([str(folder / 'test')], check=True)
+
+
+if __name__ == '__main__':
+    main()

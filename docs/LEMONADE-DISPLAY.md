@@ -144,6 +144,70 @@ GPU 两路传感器最高 57.6 / 56.9°C，退出时显示中断与两项时钟�
 这组连续工作负载不同于早先 11 手势或 GLES 的 96 秒场景，不能混算提升百分比。
 它也未达到 30 分钟验收，持续动态温控及日常使用仍未确认。
 
+## DPU 映射和独立双缓冲
+
+`--display smmu` 的只读实机记录 `1792789501-run-cp0.log` 确认，Apps SMMU 的
+SMR 6 为 `SID 0x820 / mask 0x402`，四个非安全显示流进入 context 5。
+固件把这个 AArch64 context 的地址翻译关闭，直接读取 `0xe4d00000` 的 GOP；
+`SCTLR=0xe0`，两个 TTBR 和 TCR 均为零。原始 FSR `0x400` 是只读格式位，
+不能把它误报为地址访问错误。错误检查使用 `0xc00001fe` 掩码。
+
+`--display map` 在严格匹配上述固件状态时，临时为原 GOP 建立只读恒等映射，
+保留未映射的外侧保护页。它不改 SMR、S2CR、CBAR、CBA2R、源地址、面板或缩放。
+先取得原画面的两路 mixer MISR，再打开地址翻译，跨 64 次刷新检查 32 份输出签名。
+首版退出检查发现 context 恢复顺序和 MISR 状态处理不正确，未作为合格版本保留。
+修复后先关闭翻译并同步 TLB、恢复配置，最后恢复原 SCTLR；MISR 的可写控制位恢复，
+本轮产生的只读结果就绪状态通过 clear 位清除。不能把读写属性不同的位逐位混比。
+
+`--display flip` 另外分配两份独立的 1080×2400 BGRA 缓冲，各 2,532 个 4 KiB 页，
+全部物理页面位于 4 GiB 以上；映射到 `0x10000000` 与 `0x12000000` 的 32 位 IOVA。
+在已测得的空闲窗口，只改 VIG0/1 的源地址并提交 CTL0 两个对应的 flush 位。
+每个测试画面保持两次刷新，以两路实际 mixer 签名校验切换；这不是帧率基准。
+退出时先恢复 GOP 源地址，并确认两次完整传输和原图签名，再撤销地址翻译。
+两份测试缓冲在整个受控运行期间保持分配，不会在 DPU 使用时释放。
+
+| 实机记录 | 结果 |
+| --- | --- |
+| `1792790108-run-cp0.log` | 64/64 次切换、128 次刷新，两种画面签名分别为 `0x516eb0cb`、`0x923b1009`，左右 mixer 均一致 |
+| `1792790222-run-cp0.log` | 1,000/1,000 次切换、2,000 次刷新，逐次签名一致；SMMU fault、underrun、异常中断均为零 |
+
+两轮均确认原画面签名和地址、九项 context 配置、MISR 控制位、TE/GIC 设置及两项总线
+时钟请求恢复。32 位显示地址能够访问 4 GiB 以上的实际图像，且两种输出签名随切换改变，
+这是 DPU 读取新映射的证据；不仅是寄存器写入读回。
+`lemonade-check-display.py` 核验日志哈希、请求次数、实际输出、错误状态与恢复顺序，
+并拒绝缺项、矛盾结果或被修改的日志。主机检查另覆盖验收证据的失效场景。
+
+随后故意在双缓冲循环中途以 3 秒定时返回中断运行，设备进入 Qualcomm `05c6:900e`
+调试模式，未取得此次 XNU 日志。因此异常退出未通过，尚不能确定出错位置；
+当前需要物理重启并重新核对 Android。前述 1,000 次正常切换和退出结果仍保留，
+不能把它外推为任意时刻中断都可安全恢复。此实验路径暂不用于日常默认启动。
+
+静态检查发现退出线程与同 CPU 上的探测线程可能交错执行。新候选在退出开始时设置
+单向停止标志，把时钟、地址和 SMMU 配置写入及对应恢复记录放入屏蔽本地中断的事务；
+恢复期间保持中断关闭，随后拒绝所有恢复执行的探测读写。6 个主机场景实际编译该 C 驱动，
+在重新打开中断时注入退出回调，并用不可访问内存检查停止后的寄存器访问；
+AddressSanitizer / UndefinedBehaviorSanitizer 均通过。这只验证 CPU 执行顺序，
+尚不能证明本次 `900e` 的根因或真机异常退出已经修好。新候选已构建，待物理重启后复测。
+
+桌面回归另发现测试工具省略 `--metal-profile` 时选择 Apple1 表，导致 MPS 拒绝初始化，
+SpringBoard 反复 abort（`1792790381-run-cp0.log`）。工具已改为默认选择此前实测通过的
+profile 1，并在运行记录中写入实际值；仍可显式选择 profile 0 做对照。
+这项默认值修正尚待设备重启后的完整桌面复测，不代表已全面满足 Apple2 家族的全部能力。
+
+这仍是独立显示缓冲测试，尚未把桌面 IOSurface 直接送屏，也没有完成生产者 release fence、
+1125×2436 到 1080×2400 的硬件缩放或多图层合成。MISR 是 DPU 内部输出检查，
+不等于实际面板的光学测量。默认桌面继续使用此前验证的同步 CPU 复制路径。
+
+```sh
+python3 tools/lemonade-usb.py run --kernel built --userland --display smmu --seconds 30
+python3 tools/lemonade-usb.py run --kernel built --userland --display flip --display-flips 1000 --seconds 60
+python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
+```
+
+寄存器依据：[Linux v6.12 SM8350 设备树](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/qcom/sm8350.dtsi)、
+[ARM SMMU](https://github.com/torvalds/linux/blob/v6.12/drivers/iommu/arm/arm-smmu/arm-smmu.h)、
+[MISR 控制](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_util.c)。
+
 ## 复现
 
 先准备项目的 Linux 构建环境、iOS 16.5 SDK、核验过的系统镜像和有权使用的 Metal 编译器。
@@ -156,6 +220,8 @@ tools/lemonade-build-metal.sh
 python3 tools/lemonade-build-graphics-image.py
 tools/lemonade-build-kernel.sh
 python3 tools/test-lemonade-usb.py
+python3 tools/test-lemonade-display-stop.py
+python3 tools/test-lemonade-check-display.py
 python3 tools/lemonade-usb.py run --profile performance --metal-test --display sync --metrics --seconds 100
 ```
 
@@ -172,7 +238,7 @@ python3 tools/lemonade-usb.py run --profile performance --metal-test --display s
 ## 尚未达到的边界
 
 系统所有应用的 Metal 兼容、深度 MSAA resolve、完整 texture view、heaps/events 和全部私有 SPI
-尚未全面验收。DPU SMMU 映射、双/三缓冲直接扫描、生产者 release fence、硬件缩放、
+尚未全面验收。独立双缓冲的 DPU SMMU 读取已通过上述有界测试；桌面直接扫描、生产者 release fence、硬件缩放、
 Wi-Fi 与 GPU 联合运行、120 Hz 模式及长时间温控也不能据本页结果宣称完成。
 当前安全窗口内复制仍有约 3 ms 成本，动画绘制也有长帧；GPU 可用并不意味着所有刷新瓶颈消失。
 
@@ -196,6 +262,7 @@ Metal 对照全部一致；本轮 90 秒记录 5,351 次 TE、634 次呈现，�
 两项修复后 `1792787267-screen.png` 的主屏幕圆角裂缝已消失，四种 CA 图像也逐像素通过。
 此视觉验收仅覆盖该桌面画面及测试场景，不能替代所有应用或面板扫描的检查。
 
-本阶段结束后已返回原 Android（`android-roundtrip-20261024T045545.json`）：
+前一 Metal 阶段结束后已返回原 Android（`android-roundtrip-20261024T045545.json`）：
 精确 USB 身份、启动完成、原槽与锁状态相符；boot/vendor_boot/dtbo/vbmeta/xbl
 五个活动分区哈希均与原备份一致。root 可用，默认外网路由经 wlan0，三次受控 ping 成功。
+该记录早于后续 DPU 中断退出失败；不能用它声称失败后已经恢复 Android。

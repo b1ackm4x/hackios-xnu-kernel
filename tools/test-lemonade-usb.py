@@ -127,17 +127,61 @@ class DeviceSafety(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'display mode'):
             self.run_action('run', '--kernel', 'built', '--display', 'clocks')
         self.assertFalse(any('stage' in c for c in self.calls))
-        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync']
+        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip']
         path.write_text(json.dumps(manifest))
-        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4)):
+        (self.root / 'userland').mkdir()
+        root_image = self.root / 'userland/root.apfs'
+        root_image.write_bytes(b'fixture root image')
+        image_record = {'bytes': root_image.stat().st_size, 'sha256': hashlib.sha256(root_image.read_bytes()).hexdigest()}
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': image_record, 'userland/system.apfs': image_record}))
+        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4), ('smmu', 5), ('map', 6), ('flip', 7)):
             self.calls.clear()
-            self.run_action('run', '--kernel', 'built', '--display', mode, '--seconds', '1')
+            self.run_action('run', '--kernel', 'built', '--display', mode, '--seconds', '1',
+                            *(('--userland',) if mode in ('map', 'flip') else ()))
             payload = next(c for c in self.calls if c[0] == 'python3')
             cmdline = payload[payload.index('--cmdline') + 1].split()
             self.assertIn('lemonade_display=' + str(number), cmdline)
             if mode == 'sync': self.assertIn('ca_vbl=1', cmdline)
+            if mode == 'flip': self.assertIn('lemonade_display_flips=64', cmdline)
             self.assertIn('ufs_write=0', cmdline)
             self.assertFalse(any(p.startswith('display_probe=') for p in cmdline))
+
+    def test_display_mapping_rejects_unscoped_device_changes(self):
+        for mode in ('map', 'flip'):
+            for extra in ((), ('--userland', '--gpu'), ('--userland', '--touch', 'inspect'),
+                          ('--userland', '--cpu-policy', 'balanced'), ('--profile', 'performance'),
+                          ('--userland', '--cpus', '4'), ('--userland', '--boot-cpu', '4')):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    self.run_action('run', '--kernel', 'built', '--display', mode, *extra)
+        for extra in (('--display', 'map', '--display-flips', '64'),
+                      ('--display', 'flip', '--display-flips', '1000', '--seconds', '30')):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--kernel', 'built', '--userland', *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_system_metal_uses_tested_default_and_records_explicit_profile(self):
+        self.fastboot = self.loader + '\tfastboot\n'
+        self.product = 'xnuloader'
+        self.result = 'returned 19 0'
+        self.log = b'adreno: THE GPU STAYS ON\n'
+        data = b'graphics kernel'
+        (self.root / 'out/lemonade-kernel').write_bytes(data)
+        (self.root / 'out/lemonade-kernel.manifest.json').write_text(json.dumps({
+            'device': 'lemonade', 'stage': 'xnu-kernel', 'sha256': hashlib.sha256(data).hexdigest()}))
+        (self.root / 'userland').mkdir()
+        image = self.root / 'userland/root.apfs'
+        image.write_bytes(b'fixture image')
+        info = {'bytes': image.stat().st_size, 'sha256': hashlib.sha256(image.read_bytes()).hexdigest()}
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': info, 'userland/system.apfs': info}))
+        for extra, expected in (((), 1), (('--metal-profile', '0'), 0), (('--metal-profile', '1'), 1)):
+            self.calls.clear()
+            with patch.object(usb, 'verified_graphics_overlay', return_value=(image, {})):
+                self.run_action('run', '--kernel', 'built', '--gpu', '--userland', '--metal-system', 'desktop', *extra)
+            record = json.loads((self.root / 'out/lemonade-xnu.manifest.json').read_text())
+            self.assertEqual(record['metal_profile'], expected)
+            self.assertIn('metal_profile=' + str(expected), record['cmdline'].split())
 
     def test_metal_overlay_rejects_changed_image_jobs_and_sources(self):
         folder = self.root / 'out/lemonade-metal'

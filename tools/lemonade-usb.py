@@ -99,8 +99,9 @@ def main():
     parser.add_argument('--network-test', action='store_true', help='explicit RAM-only association/DHCP/traffic acceptance with a private current-network overlay')
     parser.add_argument('--metal-test', action='store_true', help='verified RAM-only Metal pixel and IOSurface diagnostic overlay')
     parser.add_argument('--metal-system', choices=('apps', 'desktop'), help='verified RAM-only system Metal discovery; desktop also selects Metal compositing')
-    parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2; does not imply complete family compliance')
-    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync'), help='SM8350 display survey; clocks temporarily votes for register-bus access; irq also measures and restores a bounded TE interrupt')
+    parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2 (tested system default); does not imply complete family compliance')
+    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip'), help='SM8350 display; smmu reads mappings; map identity-maps GOP; flip tests two owned buffers; both restore firmware state')
+    parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip; default 64')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
     parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
@@ -121,7 +122,7 @@ def main():
     args.kernel = args.kernel or "prebuilt"
     args.cpu_policy = args.cpu_policy or "firmware"
     if args.seconds is None:
-        args.seconds = 300 if args.profile else 8
+        args.seconds = 300 if args.profile else (60 if args.display_flips == 1000 else 30 if args.display in ('map', 'flip') else 8)
     if (args.boot_cpu is not None or args.cpus is not None) and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU topology tests require run --kernel built")
     if args.gpu_trace and (args.action != "run" or not args.gpu):
@@ -137,10 +138,19 @@ def main():
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
     if args.display and (args.action != 'run' or args.kernel != 'built' or args.checkpoint or args.gpu_step or args.wifi):
         parser.error('Display survey requires run --kernel built without checkpoints, GPU steps or Wi-Fi tests')
+    if args.display in ('map', 'flip') and (not args.userland or args.gpu or args.touch or args.cpu_policy != 'firmware' or
+                                          args.cpus not in (None, 1) or args.boot_cpu not in (None, 0)):
+        parser.error('Display mapping probe requires --userland on boot CPU 0 only, without GPU, touch or CPU-policy changes')
+    if args.display_flips is not None and args.display != 'flip':
+        parser.error('--display-flips requires --display flip')
+    if args.display_flips == 1000 and args.seconds < 50:
+        parser.error('1000 display flips require at least 50 seconds')
     if args.metal_test and args.metal_system:
         parser.error('Choose process-local or system Metal testing')
     if args.metal_profile is not None and not args.metal_system:
         parser.error('--metal-profile requires --metal-system')
+    if args.metal_system and args.metal_profile is None:
+        args.metal_profile = 1  # SpringBoard/MPS require the tested Apple2 table.
     if (args.metal_test or args.metal_system) and (args.action != 'run' or args.kernel != 'built' or not args.gpu or
             not args.userland or args.checkpoint or args.gpu_step or args.wifi):
         parser.error('Metal test requires run --kernel built --gpu --userland without a Wi-Fi test')
@@ -330,7 +340,9 @@ def main():
             cmdline += ' camtl=' + ('1' if args.metal_system == 'desktop' else '0')
         if args.display:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_display='))
-            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4}[args.display])
+            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7}[args.display])
+            if args.display == 'flip':
+                cmdline += ' lemonade_display_flips=' + str(args.display_flips or 64)
             if args.display == 'sync':
                 cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('ca_vbl='))
                 cmdline += ' ca_vbl=1'
