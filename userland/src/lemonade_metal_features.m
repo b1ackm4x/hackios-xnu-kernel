@@ -26,6 +26,113 @@ static BOOL finish(id<MTLCommandBuffer> command)
     return command.status == MTLCommandBufferStatusCompleted;
 }
 
+/* Release the application's ownership after binding, before the first draw or
+ * dispatch. A separate autorelease pool also exercises set*Bytes storage. */
+static void lifetimeTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library)
+{
+    for (unsigned mode=0;mode<3;mode++) @autoreleasepool {
+        NSError *error=nil;
+        id<MTLFunction> vs=[library newFunctionWithName:@"lemonade_vertex"];
+        id<MTLFunction> fs=[library newFunctionWithName:@"lemonade_color"];
+        MTLRenderPipelineDescriptor *pd=[[MTLRenderPipelineDescriptor alloc] init];
+        pd.vertexFunction=vs;pd.fragmentFunction=fs;
+        pd.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm;
+        pd.depthAttachmentPixelFormat=MTLPixelFormatDepth32Float;
+        id<MTLRenderPipelineState> pipeline=[device newRenderPipelineStateWithDescriptor:pd error:&error];
+        MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+        td.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
+        id<MTLTexture> target=[device newTextureWithDescriptor:td],readback=[device newTextureWithDescriptor:td];
+        MTLTextureDescriptor *zd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:16 height:16 mipmapped:NO];
+        zd.usage=MTLTextureUsageRenderTarget;
+        id<MTLTexture> depth=[device newTextureWithDescriptor:zd];
+        MTLDepthStencilDescriptor *ds=[[MTLDepthStencilDescriptor alloc] init];
+        ds.depthCompareFunction=MTLCompareFunctionAlways;ds.depthWriteEnabled=YES;
+        id<MTLDepthStencilState> state=[device newDepthStencilStateWithDescriptor:ds];
+        float z=.5f,green[4]={0,1,0,1};
+        id<MTLBuffer> vb=[device newBufferWithBytes:&z length:sizeof(z) options:0];
+        id<MTLBuffer> fb=[device newBufferWithBytes:green length:sizeof(green) options:0];
+        const char *name=(const char *[]) {"render-release-before-first-draw","render-bytes-pool-before-first-draw","render-attachment-snapshot-lifetime"}[mode];
+        if (!pipeline||!target||!readback||!depth||!state||!vb||!fb) {
+            result(name,NO,0,1);
+        } else {
+            MTLRenderPassDescriptor *pass=[[MTLRenderPassDescriptor alloc] init];
+            pass.colorAttachments[0].texture=target;
+            pass.colorAttachments[0].loadAction=MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+            pass.depthAttachment.texture=depth;
+            pass.depthAttachment.loadAction=MTLLoadActionDontCare;
+            pass.depthAttachment.storeAction=MTLStoreActionDontCare;
+            id<MTLCommandBuffer> command=[queue commandBuffer];
+            id<MTLRenderCommandEncoder> encoder=[command renderCommandEncoderWithDescriptor:pass];
+            [encoder setRenderPipelineState:pipeline];[encoder setDepthStencilState:state];
+            if (mode==1) @autoreleasepool {
+                [encoder setVertexBytes:&z length:sizeof(z) atIndex:0];
+                [encoder setFragmentBytes:green length:sizeof(green) atIndex:0];
+            } else {
+                [encoder setVertexBuffer:vb offset:0 atIndex:0];[encoder setFragmentBuffer:fb offset:0 atIndex:0];
+            }
+            [pipeline release];pipeline=nil;[state release];state=nil;
+            [vb release];vb=nil;[fb release];fb=nil;
+            /* The encoder must snapshot and own attachments even when no load
+             * clear command provides an independent reference to the texture. */
+            pass.colorAttachments[0].texture=nil;pass.depthAttachment.texture=nil;[pass release];
+            id<MTLTexture> recordedTarget=target;
+            if(mode==2){[target release];target=nil;[depth release];depth=nil;}
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];[encoder endEncoding];
+            id<MTLBlitCommandEncoder> blit=[command blitCommandEncoder];
+            [blit copyFromTexture:recordedTarget sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+                      sourceSize:MTLSizeMake(16,16,1) toTexture:readback destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+            [blit endEncoding];BOOL done=finish(command);
+            uint8_t pixels[1024];[readback getBytes:pixels bytesPerRow:64 fromRegion:MTLRegionMake2D(0,0,16,16) mipmapLevel:0];
+            unsigned different=0;for(unsigned p=0;p<256;p++)for(unsigned c=0;c<4;c++)different+=pixels[p*4+c]!=(c==1||c==3?255:0);
+            result(name,done&&encoder&&!different,command.status,different);
+        }
+        [pipeline release];[state release];[vb release];[fb release];
+        [target release];[readback release];[depth release];[ds release];[pd release];[vs release];[fs release];
+    }
+    @autoreleasepool {
+        NSError *error=nil;uint32_t count=64;
+        id<MTLFunction> function=[library newFunctionWithName:@"lemonade_compute"];
+        id<MTLComputePipelineState> pipeline=[device newComputePipelineStateWithFunction:function error:&error];
+        id<MTLBuffer> output=[device newBufferWithLength:512 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> countBuffer=[device newBufferWithBytes:&count length:sizeof(count) options:0];
+        if(pipeline&&output.contents&&countBuffer) {
+            memset(output.contents,0xa5,512);
+            id<MTLCommandBuffer> command=[queue commandBuffer];id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];[encoder setBuffer:output offset:0 atIndex:0];[encoder setBuffer:countBuffer offset:0 atIndex:1];
+            [pipeline release];pipeline=nil;[countBuffer release];countBuffer=nil;
+            [encoder dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(16,1,1)];[encoder endEncoding];
+            BOOL done=finish(command);unsigned different=0;
+            for(unsigned i=0;i<128;i++)different+=((uint32_t*)output.contents)[i]!=(i<64?i*7+3:0xa5a5a5a5);
+            result("compute-release-before-first-dispatch",done&&encoder&&!different,command.status,different);
+        } else result("compute-release-before-first-dispatch",NO,0,1);
+        [pipeline release];[countBuffer release];[output release];[function release];
+    }
+    @autoreleasepool {
+        NSError *error=nil;
+        id<MTLFunction> function=[library newFunctionWithName:@"lemonade_image_sample"];
+        id<MTLComputePipelineState> pipeline=[device newComputePipelineStateWithFunction:function error:&error];
+        MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:17 height:17 mipmapped:NO];
+        td.usage=MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite;
+        id<MTLTexture> source=[device newTextureWithDescriptor:td],target=[device newTextureWithDescriptor:td];
+        MTLSamplerDescriptor *sd=[[MTLSamplerDescriptor alloc] init];sd.normalizedCoordinates=NO;
+        sd.minFilter=sd.magFilter=MTLSamplerMinMagFilterNearest;sd.sAddressMode=sd.tAddressMode=MTLSamplerAddressModeClampToEdge;
+        id<MTLSamplerState> sampler=[device newSamplerStateWithDescriptor:sd];
+        if(pipeline&&source&&target&&sampler) {
+            uint8_t input[17*17*4],pixels[sizeof(input)];for(unsigned i=0;i<sizeof(input);i++)input[i]=(i*37+13)&255;
+            [source replaceRegion:MTLRegionMake2D(0,0,17,17) mipmapLevel:0 withBytes:input bytesPerRow:68];
+            id<MTLCommandBuffer> command=[queue commandBuffer];id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];[encoder setTexture:source atIndex:1];[encoder setTexture:target atIndex:0];[encoder setSamplerState:sampler atIndex:0];
+            [pipeline release];pipeline=nil;[source release];source=nil;[sampler release];sampler=nil;
+            [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,32,1)];[encoder endEncoding];BOOL done=finish(command);
+            [target getBytes:pixels bytesPerRow:68 fromRegion:MTLRegionMake2D(0,0,17,17) mipmapLevel:0];unsigned different=0;
+            for(unsigned i=0;i<sizeof(input);i++)different+=abs((int)pixels[i]-input[i])>1;
+            result("compute-texture-sampler-release-before-dispatch",done&&encoder&&!different,command.status,different);
+        } else result("compute-texture-sampler-release-before-dispatch",NO,0,1);
+        [pipeline release];[source release];[target release];[sampler release];[sd release];[function release];
+    }
+}
+
 int lemonade_metal_features(id<MTLDevice> device, const char *path)
 {
     @autoreleasepool {
@@ -653,6 +760,7 @@ int lemonade_metal_features(id<MTLDevice> device, const char *path)
             result(dynamic?"uniform-unsized-dynamic-index-127":"uniform-unsized-static-index-3",done&&uniformPipeline&&!different,command.status,different);
             [values release];[selected release];[fs release];[p release];[uniformPipeline release];
         }
+        lifetimeTests(device,queue,library);
         printf("lemonade-metal: feature summary checks=%u failed=%u\n", checks, failures);
         [src release]; [dst release]; [compute release]; [kernel release]; [output release]; [countBuffer release];
         [pipeline release]; [pd release]; [vertex release]; [fragment release]; [library release];

@@ -3340,6 +3340,20 @@ struct gem_close { uint32_t handle, pad; };
 
 @end
 
+/* Encoders own their current bindings before the first draw/dispatch. Recorded
+ * work takes its own references, so rebinding or ending an encoder cannot free
+ * resources still needed by an earlier command. Retain before releasing the old
+ * value, and make repeated binding/cleanup safe. */
+static void
+rw_replace_binding(id *slot, id value)
+{
+	if (*slot == value) return;
+	[value retain];
+	id previous = *slot;
+	*slot = value;
+	[previous release];
+}
+
 @implementation RedwoodMetalWork
 - (void)retainResources
 {
@@ -4540,7 +4554,7 @@ enum {
 		if (texture == nil) {
 			continue;
 		}
-		_color[i] = texture;
+		_color[i] = [texture retain];
 		_colorCount = i + 1;
 		_storeAction[i] = [attachment storeAction];
 		_resolve[i] = [[attachment resolveTexture] retain];
@@ -4584,7 +4598,7 @@ enum {
 		         "different textures; one texture carries both aspects here, so this "
 		         "pass is encoded with neither\n");
 	} else {
-		_depth = ztex != nil ? ztex : stex;
+		_depth = [(ztex != nil ? ztex : stex) retain];
 		for (unsigned i=0;i<2;i++) {
 			MTLRenderPassAttachmentDescriptor *a = i ? (id)sa : (id)za;
 			if ([a texture] && [a loadAction] == MTLLoadActionClear) {
@@ -4602,7 +4616,7 @@ enum {
 
 - (id)device { return [_commandBuffer device]; }
 
-- (void)setRenderPipelineState:(id)state { _pipeline = state; }
+- (void)setRenderPipelineState:(id)state { rw_replace_binding((id *)&_pipeline, state); }
 
 /*
  * One table, two meanings, and the offset is no longer thrown away.
@@ -4623,7 +4637,7 @@ enum {
 		_complained = YES;
 		return;
 	}
-	_vertexBuffers[index] = buffer;
+	rw_replace_binding(&_vertexBuffers[index], buffer);
 	_vertexBufferOffsets[index] = offset;
 	if (index + 1 > _vertexBufferCount) {
 		_vertexBufferCount = (unsigned)index + 1;
@@ -4650,7 +4664,7 @@ enum {
 		_complained = YES;
 		return;
 	}
-	_fragmentBuffers[index] = buffer;
+	rw_replace_binding(&_fragmentBuffers[index], buffer);
 	_fragmentBufferOffsets[index] = offset;
 	if (index + 1 > _fragmentBufferCount) {
 		_fragmentBufferCount = (unsigned)index + 1;
@@ -4662,7 +4676,8 @@ enum {
 	id buffer = [[self device] newBufferWithBytes:bytes length:length options:0];
 
 	if (buffer != nil) {
-		[self setVertexBuffer:[buffer autorelease] offset:0 atIndex:index];
+		[self setVertexBuffer:buffer offset:0 atIndex:index];
+		[buffer release];
 	}
 }
 
@@ -4671,7 +4686,8 @@ enum {
 	id buffer = [[self device] newBufferWithBytes:bytes length:length options:0];
 
 	if (buffer != nil) {
-		[self setFragmentBuffer:[buffer autorelease] offset:0 atIndex:index];
+		[self setFragmentBuffer:buffer offset:0 atIndex:index];
+		[buffer release];
 	}
 }
 
@@ -4680,7 +4696,7 @@ enum {
 	if (index >= RW_MAX_BUFFERS) {
 		return;
 	}
-	_fragmentTextures[index] = texture;
+	rw_replace_binding(&_fragmentTextures[index], texture);
 	if (index + 1 > _fragmentTextureCount) {
 		_fragmentTextureCount = (unsigned)index + 1;
 	}
@@ -4691,7 +4707,7 @@ enum {
 	if (index >= RW_MAX_BUFFERS) {
 		return;
 	}
-	_fragmentSamplers[index] = sampler;
+	rw_replace_binding(&_fragmentSamplers[index], sampler);
 	if (index + 1 > _fragmentSamplerCount) {
 		_fragmentSamplerCount = (unsigned)index + 1;
 	}
@@ -4734,7 +4750,7 @@ enum {
 		         class_getName(object_getClass(state)));
 		state = nil;
 	}
-	_depthStencilState = state;
+	rw_replace_binding(&_depthStencilState, state);
 }
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a
 {
@@ -5813,6 +5829,25 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
  * -endEncoding undefined, and this driver would still record it; refusing that is separate
  * work and nothing has asked for it.
  */
+- (void)releaseEncodingResources
+{
+	rw_replace_binding((id *)&_pipeline, nil);
+	rw_replace_binding(&_depth, nil);
+	rw_replace_binding(&_depthStencilState, nil);
+	for (unsigned i = 0; i < 8; i++) {
+		rw_replace_binding(&_color[i], nil);
+		rw_replace_binding(&_resolve[i], nil);
+	}
+	for (unsigned i = 0; i < RW_MAX_BUFFERS; i++) {
+		rw_replace_binding(&_vertexBuffers[i], nil);
+		rw_replace_binding(&_fragmentBuffers[i], nil);
+		rw_replace_binding(&_fragmentTextures[i], nil);
+		rw_replace_binding(&_fragmentSamplers[i], nil);
+	}
+	_colorCount = _vertexBufferCount = _fragmentBufferCount = 0;
+	_fragmentTextureCount = _fragmentSamplerCount = 0;
+}
+
 - (void)endEncoding
 {
 	if (_commandBuffer == nil) return;
@@ -5828,13 +5863,14 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 		work->blitDestinationSlice = (unsigned)_resolveSlice[i];
 		[_commandBuffer recordWork:work]; [work release];
 	}
+	[self releaseEncodingResources];
 	[super endEncoding];
 	_commandBuffer = nil;
 }
 
 - (void)dealloc
 {
-	for (unsigned i = 0; i < 8; i++) [_resolve[i] release];
+	[self releaseEncodingResources];
 	[super dealloc];
 }
 
@@ -5866,7 +5902,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 
 - (void)setComputePipelineState:(id)state
 {
-	_pipeline = state;
+	rw_replace_binding((id *)&_pipeline, state);
 }
 
 - (void)setBuffer:(id)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index
@@ -5883,7 +5919,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 	 * library takes a `constant` binding at any offset (uploading the block when the
 	 * GPU cannot fetch from that offset) and refuses a `device` one the GPU cannot
 	 * fetch from, by name, where the shader's own address space is in hand. */
-	_buffers[index] = buffer;
+	rw_replace_binding(&_buffers[index], buffer);
 	_offsets[index] = offset;
 	if (index + 1 > _highest) {
 		_highest = (unsigned)index + 1;
@@ -5897,7 +5933,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 		         (unsigned long)index, RW_MAX_BUFFERS);
 		return;
 	}
-	_textures[index] = texture;
+	rw_replace_binding(&_textures[index], texture);
 	if (index + 1 > _highestTexture) {
 		_highestTexture = (unsigned)index + 1;
 	}
@@ -5917,7 +5953,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 		         (unsigned long)index, RW_MAX_BUFFERS);
 		return;
 	}
-	_samplers[index] = sampler;
+	rw_replace_binding(&_samplers[index], sampler);
 	if (index + 1 > _highestSampler) {
 		_highestSampler = (unsigned)index + 1;
 	}
@@ -5953,7 +5989,8 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 	id buffer = [[self device] newBufferWithBytes:bytes length:length options:0];
 
 	if (buffer != nil) {
-		[self setBuffer:[buffer autorelease] offset:0 atIndex:index];
+		[self setBuffer:buffer offset:0 atIndex:index];
+		[buffer release];
 	}
 }
 
@@ -6180,9 +6217,29 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
  * encoder released without this. Nothing has deallocated a compute encoder of ours on the
  * phone yet -- the one that aborted 43 times was the render one, out of warmup_shaders -- so
  * this half is the same fix made before it is measured, not after. */
+- (void)releaseEncodingResources
+{
+	rw_replace_binding((id *)&_pipeline, nil);
+	for (unsigned i = 0; i < RW_MAX_BUFFERS; i++) {
+		rw_replace_binding(&_buffers[i], nil);
+		rw_replace_binding(&_textures[i], nil);
+		rw_replace_binding(&_samplers[i], nil);
+	}
+	_highest = _highestTexture = _highestSampler = 0;
+}
+
 - (void)endEncoding
 {
+	if (_commandBuffer == nil) return;
+	[self releaseEncodingResources];
 	[super endEncoding];
+	_commandBuffer = nil;
+}
+
+- (void)dealloc
+{
+	[self releaseEncodingResources];
+	[super dealloc];
 }
 
 @end
