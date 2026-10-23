@@ -17,7 +17,7 @@ import hashlib, json, os
 from pathlib import Path
 paths = ['bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
          'bsd/dev/lemonade_touch.c', 'bsd/dev/lemonade_touch_protocol.h',
-         'bsd/dev/lemonade_wifi.c', 'bsd/dev/redwood_wifi.c', 'bsd/dev/redwood_goodix.c',
+         'bsd/dev/lemonade_wifi.c', 'bsd/dev/lemonade_mhi_protocol.h', 'bsd/dev/redwood_wifi.c', 'bsd/dev/redwood_goodix.c',
          'bsd/dev/redwood_buttons.c', 'bsd/dev/redwood_input.c', 'bsd/sys/redwood_input.h',
          'osfmk/arm64/loader_return.c']
 inputs = {}
@@ -25,9 +25,10 @@ for relative in paths:
     source = Path('xnu/files') / relative
     data = source.read_bytes()
     target = Path(os.environ['XNU_SRC']) / relative
-    temporary = target.with_suffix(target.suffix + '.lemonade-tmp')
-    temporary.write_bytes(data)
-    temporary.replace(target)
+    if not target.exists() or target.read_bytes() != data:
+        temporary = target.with_suffix(target.suffix + '.lemonade-tmp')
+        temporary.write_bytes(data)
+        temporary.replace(target)
     inputs[relative] = hashlib.sha256(data).hexdigest()
     if hashlib.sha256(target.read_bytes()).hexdigest() != inputs[relative]:
         raise SystemExit('Kernel input copy mismatch: ' + relative)
@@ -36,11 +37,12 @@ COPY
 python3 - "$XNU_SRC/bsd/conf/files" <<'PY'
 from pathlib import Path
 import sys
-p = Path(sys.argv[1]); s = p.read_text()
+p = Path(sys.argv[1]); original = p.read_text(); s = original
 for name in ('lemonade_touch.c', 'lemonade_wifi.c'):
     if 'bsd/dev/' + name not in s:
         s += '\nbsd/dev/' + name + '\tstandard\n'
-p.write_text(s)
+if s != original:
+    p.write_text(s)
 PY
 mkdir -p out local/lemonade
 LOG="local/lemonade/gpu-kernel-build-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -78,7 +80,7 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'touch_driver_supported': 'lemonade-s6sy792-v1',
           'touch_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch.c').read_bytes()).hexdigest(),
           'touch_protocol_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch_protocol.h').read_bytes()).hexdigest(),
-          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'phy', 'root', 'radio', 'link', 'endpoint', 'mmio', 'smmu', 'sid', 'dma', 'dma-fault', 'bhi'],
+          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'phy', 'root', 'radio', 'link', 'endpoint', 'mmio', 'smmu', 'sid', 'dma', 'dma-fault', 'bhi', 'mhi', 'bhie', 'ipcr', 'qmi'],
           'wifi_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_wifi.c').read_bytes()).hexdigest(),
           'build_log': str(log), 'gpu_hardware_verified': False}
 Path('out/lemonade-kernel.manifest.json').write_text(json.dumps(record, indent=2) + '\n')

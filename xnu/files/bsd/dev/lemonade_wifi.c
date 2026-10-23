@@ -5,7 +5,8 @@
  * 13ca08fdf0979fdd61d5e8991661874bb2d19150: gcc-lahaina.c, lahaina-pcie.dtsi,
  * pci-msm.c. No network identity, calibration or credentials belong here.
  * Stages 2..15 keep endpoint DMA off; 16 verifies an unmapped DMA guard;
- * 17 transfers only the original firmware's verified BHI prefix into RAM.
+ * 17 transfers the original BHI prefix; 18 adds MSI/MHI events; 19 loads the
+ * complete image; 20/21 test IPCR/QRTR and QMI, without RF or networking.
  * lemonade_wifi=1 only reads; it never starts the redwood AHB/WPSS path.
  */
 #include <kern/clock.h>
@@ -19,6 +20,7 @@
 #include <sys/systm.h>
 #include <vm/memory_types.h>
 #include <vm/vm_kern.h>
+#include "lemonade_mhi_protocol.h"
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern void redwood_tl(const char *format, ...) __printflike(1, 2);
@@ -28,10 +30,14 @@ static unsigned iatu_count;
 static uint32_t perst_cfg, perst_io;
 static uint32_t radio_cfg, radio_io, clkreq_cfg, clkreq_io, iatu_values[2][7];
 static uint32_t bar0_old, bar1_old, endpoint_command_old;
-static bool sid_saved, bus_master_was_enabled;
+static bool sid_saved, bus_master_was_enabled, msi_saved;
+static unsigned msi_offset, msi_data_offset, msi_mask_offset;
+static uint32_t msi_old_control, msi_old_low, msi_old_high, msi_old_data, msi_old_mask;
 static uint32_t sid_table_old[256], sid_cfg_old;
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);
+extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);
+extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern lck_mtx_t redwood_smmu_lock;
 static void dma_restore(void);
 
@@ -109,6 +115,20 @@ void lemonade_wifi_quiesce(void) {
     if (!saved_count && !parf_count && !perst_saved) { return; }
     if (bar_saved) {
         if (rd(dbi, 0x80) & (1u << 29)) {
+            if (msi_saved) {
+                wr16(config + msi_offset + 2, msi_old_control & ~1u);
+                if (msi_old_control & 0x100) { wr(config + msi_mask_offset, msi_old_mask); }
+                wr(config + msi_offset + 4, msi_old_low);
+                if (msi_old_control & 0x80) { wr(config + msi_offset + 8, msi_old_high); }
+                wr16(config + msi_data_offset, msi_old_data); wr16(config + msi_offset + 2, msi_old_control);
+                bool restored = (rd(config, msi_offset) >> 16) == msi_old_control &&
+                    rd(config, msi_offset + 4) == msi_old_low && (rd(config, msi_data_offset) & 0xffff) == msi_old_data &&
+                    (!(msi_old_control & 0x80) || rd(config, msi_offset + 8) == msi_old_high) &&
+                    (!(msi_old_control & 0x100) || rd(config, msi_mask_offset) == msi_old_mask);
+                redwood_tl("wifi-lemonade: PCI MSI disabled and original configuration restored\n");
+                redwood_tl("wifi-lemonade: PCI MSI restore readback %s\n", restored ? "verified" : "failed");
+                msi_saved = false;
+            }
             wr16(config + 4, endpoint_command_old & ~6u);
             if (bus_master_was_enabled) {
                 redwood_tl("wifi-lemonade: endpoint bus master clear %s\n", (rd(config, 4) & 4) ? "failed" : "verified");
@@ -414,20 +434,29 @@ static bool route_endpoint(void) {
     return true;
 }
 
-/* A small, privately owned stage-1 address space: no identity mapping, no MSI
- * page and no firmware-owned context. The first probe leaves PCI bus mastering
+/* A privately owned stage-1 address space, with no identity mapping or
+ * firmware-owned context. The first probe leaves PCI bus mastering
  * off. IDR0.ATOSNS means standard translation requests are NOT supported;
  * software table validation is kept distinct from a real endpoint DMA test. */
 #define WIFI_DMA_IOVA 0xa0004000ull
 #define WIFI_DMA_SIZE 0x80000u
 #define WIFI_PHYS_MASK 0x0000fffffffff000ull
 #define WIFI_FSR_FAULT 0xc00001feu /* excludes read-only translation-format bits [10:9] */
+#define WIFI_MHI_IOVA 0xa0200000ull
+#define WIFI_MHI_SIZE (8u * 1024 * 1024)
+#define WIFI_DATA_IOVA 0xa1000000ull
+#define WIFI_DATA_LIMIT 0xb0000000ull
+#define WIFI_TABLE_PAGES (7u + 120u)
+#define WIFI_TABLE_SIZE (WIFI_TABLE_PAGES * 4096)
 static const unsigned dma_cb_offsets[] = {0, 0x10, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x38, 0x3c};
 static struct {
-    vm_offset_t mmio, cb, tables, data;
+    vm_offset_t mmio, cb, tables, data, extra, control;
     unsigned match, context;
     uint32_t smr, s2cr, cbar, cba2r, cb_old[9];
     bool owned, retain_pages;
+    unsigned allocation_count;
+    uint64_t next_iova;
+    struct { vm_offset_t cached, uncached; unsigned size; uint64_t iova; } allocations[32];
 } dma_space;
 
 static void dma_flush(vm_offset_t start, unsigned size) {
@@ -493,7 +522,14 @@ static void dma_restore(void) {
         redwood_tl("wifi-lemonade: DMA context/stream release %s; translation registers restored after endpoint reset\n", restored ? "verified" : "failed");
         if (!restored) { dma_space.retain_pages = true; return; }
     }
-    if (dma_space.tables) { kmem_free(kernel_map, dma_space.tables, round_page(3 * 4096)); dma_space.tables = 0; }
+    if (dma_space.control) { ml_io_unmap(dma_space.control, PAGE_SIZE); dma_space.control = 0; }
+    while (dma_space.allocation_count) {
+        unsigned n = --dma_space.allocation_count;
+        if (dma_space.allocations[n].uncached) { ml_io_unmap(dma_space.allocations[n].uncached, dma_space.allocations[n].size); }
+        kmem_free(kernel_map, dma_space.allocations[n].cached, dma_space.allocations[n].size);
+    }
+    if (dma_space.extra) { kmem_free(kernel_map, dma_space.extra, round_page(WIFI_MHI_SIZE)); dma_space.extra = 0; }
+    if (dma_space.tables) { kmem_free(kernel_map, dma_space.tables, round_page(WIFI_TABLE_SIZE)); dma_space.tables = 0; }
     if (dma_space.data) { kmem_free(kernel_map, dma_space.data, round_page(WIFI_DMA_SIZE)); dma_space.data = 0; }
 }
 static bool dma_translate(uint64_t address, uint64_t *result) {
@@ -504,15 +540,74 @@ static bool dma_translate(uint64_t address, uint64_t *result) {
 }
 static bool dma_walk(uint64_t address, uint64_t *physical) {
     if (address >> 39) { return false; }
-    uint64_t *l1 = (void *)dma_space.tables, *l2 = (void *)(dma_space.tables + 4096), *l3 = (void *)(dma_space.tables + 8192);
-    if ((l1[(address >> 30) & 511] & (WIFI_PHYS_MASK | 3)) != (kvtophys((vm_offset_t)l2) | 3) ||
-        (l2[(address >> 21) & 511] & (WIFI_PHYS_MASK | 3)) != (kvtophys((vm_offset_t)l3) | 3)) { return false; }
+    uint64_t *l1 = (void *)dma_space.tables, *l2 = (void *)(dma_space.tables + 4096), *l3 = NULL;
+    if ((l1[(address >> 30) & 511] & (WIFI_PHYS_MASK | 3)) != (kvtophys((vm_offset_t)l2) | 3)) { return false; }
+    uint64_t entry = l2[(address >> 21) & 511] & (WIFI_PHYS_MASK | 3);
+    for (unsigned page = 2; page < WIFI_TABLE_PAGES; page++) {
+        vm_offset_t candidate = dma_space.tables + page * 4096;
+        if (entry == (kvtophys(candidate) | 3)) { l3 = (void *)candidate; break; }
+    }
+    if (!l3) { return false; }
     uint64_t pte = l3[(address >> 12) & 511];
     if ((pte & 3) != 3) { return false; }
     *physical = (pte & WIFI_PHYS_MASK) | (address & 4095);
     return true;
 }
-static bool dma_prepare(void) {
+/* Only allocated pages are published, separated by a native-page guard. The
+ * mapping stays owned until endpoint reset; a failure never frees live DMA. */
+static bool dma_allocate(unsigned requested, bool coherent, vm_offset_t *memory, uint64_t *address) {
+    if (!dma_space.owned || !requested || requested > 64u * 1024 * 1024 ||
+        dma_space.allocation_count == 32) { return false; }
+    unsigned size = round_page(requested);
+    uint64_t iova = dma_space.next_iova ? dma_space.next_iova : WIFI_DATA_IOVA;
+    if (iova > WIFI_DATA_LIMIT - size - PAGE_SIZE) { return false; }
+    vm_offset_t cached = 0, uncached = 0;
+    kern_return_t result = coherent ?
+        kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) :
+        kmem_alloc(kernel_map, &cached, size, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
+    if (result != KERN_SUCCESS) { return false; }
+    unsigned allocation = dma_space.allocation_count++;
+    dma_space.allocations[allocation].cached = cached;
+    dma_space.allocations[allocation].size = size;
+    dma_space.allocations[allocation].iova = iova;
+    dma_space.next_iova = iova + size + PAGE_SIZE;
+    dma_flush(cached, size);
+    if (coherent) {
+        uncached = ml_io_map_unmappable(kvtophys(cached), size, VM_WIMG_WCOMB);
+        if (!uncached) { return false; }
+        dma_space.allocations[allocation].uncached = uncached;
+    }
+    uint64_t *l2 = (void *)(dma_space.tables + 4096);
+    lck_mtx_lock(&redwood_smmu_lock);
+    bool ok = true;
+    for (unsigned offset = 0; offset < size; offset += 4096) {
+        uint64_t at = iova + offset, physical = kvtophys(cached + offset);
+        unsigned page = 7 + ((at - WIFI_DATA_IOVA) >> 21);
+        uint64_t *leaf = (void *)(dma_space.tables + page * 4096);
+        unsigned index = (at >> 21) & 511;
+        uint64_t expected = kvtophys((vm_offset_t)leaf) | 3;
+        if (page >= WIFI_TABLE_PAGES || !physical || physical >> 36 || physical & 4095 ||
+            (coherent && physical != kvtophys(cached) + offset) ||
+            (l2[index] && l2[index] != expected) || leaf[(at >> 12) & 511]) { ok = false; break; }
+        l2[index] = expected;
+        leaf[(at >> 12) & 511] = physical | 3ull | (1ull << 6) | (2ull << 8) | (1ull << 10) |
+            (1ull << 11) | (1ull << 53) | (1ull << 54);
+    }
+    dma_flush(dma_space.tables, WIFI_TABLE_SIZE);
+    if (ok) { ok = dma_tlb_sync(); }
+    lck_mtx_unlock(&redwood_smmu_lock);
+    for (unsigned offset = 0; ok && offset < size; offset += 4096) {
+        uint64_t physical = 0;
+        ok = dma_walk(iova + offset, &physical) && physical == kvtophys(cached + offset);
+    }
+    uint64_t unused = 0;
+    if (!ok || dma_walk(iova - 4096, &unused) || dma_walk(iova + size, &unused)) { return false; }
+    *memory = coherent ? uncached : cached; *address = iova;
+    redwood_tl("wifi-lemonade: owned DMA allocation %u requested %u mapped %u pages %u guards verified\n",
+        allocation, requested, size, size / 4096);
+    return true;
+}
+static bool dma_prepare(bool extended) {
     if ((rd(config, 4) | rd(dbi, 4)) & 4) { return false; }
     dma_space.mmio = ml_io_map(0x15000000, 0x100000);
     if (!dma_space.mmio) { return false; }
@@ -522,7 +617,7 @@ static bool dma_prepare(void) {
     if ((scr & 9) || !(scr & (1u << 10)) || !(id0 & (1u << 30)) ||
         (id1 & 0xf0000000u) != 0x60000000u || matches > 255 || !matches || contexts > 128 || !contexts ||
         rd(dma_space.mmio, 0x48)) { return false; }
-    if (kmem_alloc(kernel_map, &dma_space.tables, round_page(3 * 4096), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+    if (kmem_alloc(kernel_map, &dma_space.tables, round_page(WIFI_TABLE_SIZE), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
         VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
         kmem_alloc(kernel_map, &dma_space.data, round_page(WIFI_DMA_SIZE), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
         VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) { return false; }
@@ -535,7 +630,34 @@ static bool dma_prepare(void) {
         l3[((WIFI_DMA_IOVA + offset) >> 12) & 511] = physical |
             3ull | (1ull << 6) | (2ull << 8) | (1ull << 10) | (1ull << 11) | (1ull << 53) | (1ull << 54);
     }
-    dma_flush(dma_space.tables, 3 * 4096);
+    if (extended) {
+        if (PAGE_SIZE != 16384 || kmem_alloc(kernel_map, &dma_space.extra, round_page(WIFI_MHI_SIZE),
+            KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) { return false; }
+        for (unsigned n = 0; n < 4; n++) {
+            uint64_t *leaf = (void *)(dma_space.tables + (3 + n) * 4096);
+            l2[((WIFI_MHI_IOVA >> 21) & 511) + n] = kvtophys((vm_offset_t)leaf) | 3;
+            for (unsigned page = 0; page < 512; page++) {
+                unsigned offset = n * 0x200000 + page * 4096;
+                uint64_t physical = kvtophys(dma_space.extra + offset);
+                if (!physical || physical >> 36 || physical & 4095) { return false; }
+                leaf[page] = physical | 3ull | (1ull << 6) | (2ull << 8) | (1ull << 10) |
+                    (1ull << 11) | (1ull << 53) | (1ull << 54);
+            }
+        }
+        /* Only the first native 16K page holds shared contexts/rings. After
+         * this flush use its uncached alias exclusively until endpoint reset. */
+        dma_flush(dma_space.extra, WIFI_MHI_SIZE);
+        dma_space.control = ml_io_map_unmappable(kvtophys(dma_space.extra), PAGE_SIZE, VM_WIMG_WCOMB);
+        if (!dma_space.control) { return false; }
+        for (unsigned offset = 0; offset < WIFI_MHI_SIZE; offset += 4096) {
+            uint64_t physical = 0;
+            if (!dma_walk(WIFI_MHI_IOVA + offset, &physical) || physical != kvtophys(dma_space.extra + offset)) { return false; }
+        }
+        uint64_t unused = 0;
+        if (dma_walk(WIFI_MHI_IOVA - 4096, &unused) || dma_walk(WIFI_MHI_IOVA + WIFI_MHI_SIZE, &unused)) { return false; }
+        redwood_tl("wifi-lemonade: MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias\n");
+    }
+    dma_flush(dma_space.tables, WIFI_TABLE_SIZE);
     dma_flush(dma_space.data, WIFI_DMA_SIZE);
     lck_mtx_lock(&redwood_smmu_lock);
     bool used[128] = {false}, collision = false;
@@ -683,6 +805,529 @@ static bool firmware_probe(void) {
     redwood_tl("wifi-lemonade: stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n");
     return true;
 }
+/* Polling first: PCI MSI targets an owned mailbox, without a CPU IRQ handler.
+ * Device-written ring pointers and
+ * records live in the uncached control alias; MMIO doors use high-then-low. */
+static struct {
+    unsigned channel_db, event_db, consumed[3], returned[3], events, m0_events, ee_events;
+    bool m0_seen, mission_seen;
+} mhi;
+static const unsigned mhi_ring_offset[3] = {0x3000, 0x2000, 0x3200};
+static const unsigned mhi_ring_count[3] = {32, 256, 32};
+static void mhi_write_address(unsigned offset, uint64_t value) {
+    wr(bar + offset + 4, value >> 32); wr(bar + offset, value);
+}
+static bool mhi_dma_ok(void) {
+    uint32_t fsr = rd(dma_space.cb, 0x58), global = rd(dma_space.mmio, 0x48);
+    if (!(fsr & WIFI_FSR_FAULT) && !global) { return true; }
+    redwood_tl("wifi-lemonade: MHI DMA fault FSR %#x FAR %#llx global %#x\n", fsr, rd64(dma_space.cb + 0x60), global);
+    return false;
+}
+#define MHI_IPCR_MTU 32768u
+#define MHI_IPCR_RX 0x600000u
+#define MHI_IPCR_TX 0x700000u
+#define QRTR_CONTROL_PORT 0xfffffffeu
+struct lemonade_qrtr_header { uint32_t version, type, source_node, source_port, confirm, size, dest_node, dest_port; };
+struct lemonade_qrtr_control { uint32_t command, words[4]; };
+static struct {
+    unsigned command_next, command_code, tx_write, tx_read, rx_write, rx_read;
+    unsigned tx_packets, tx_completed, rx_packets, hellos, services;
+    uint64_t pending_command;
+    uint32_t service_node, service_port, service_instance;
+    bool channels, hello_sent, capability_seen, capability_ok;
+    unsigned transaction, message, response_result, response_error, memory_count;
+    bool response_seen, memory_ready;
+    struct { uint32_t size, type, configs; uint64_t address; } memory[16];
+} ipcr;
+static bool ipcr_transfer_event(unsigned channel, unsigned code, uint64_t pointer, unsigned length);
+static void mhi_context_address(vm_offset_t context, unsigned offset, uint64_t address) {
+    wr(context + offset, address); wr(context + offset + 4, address >> 32);
+}
+static bool ipcr_send(const void *packet, unsigned length) {
+    unsigned next = lemonade_mhi_next(ipcr.tx_write, 32);
+    if (!ipcr.channels || !length || length > MHI_IPCR_MTU || next == ipcr.tx_read) { return false; }
+    unsigned index = ipcr.tx_write;
+    vm_offset_t buffer = dma_space.extra + MHI_IPCR_TX + index * MHI_IPCR_MTU;
+    memcpy((void *)buffer, packet, length); dma_flush(buffer, length);
+    volatile struct lemonade_mhi_element *tre = (void *)(dma_space.control + 0x3600 + index * 16);
+    tre->pointer = WIFI_MHI_IOVA + MHI_IPCR_TX + index * MHI_IPCR_MTU;
+    tre->word0 = length; tre->word1 = (2u << 16) | (1u << 9);
+    __asm__ volatile("dsb sy" ::: "memory");
+    ipcr.tx_write = next; ipcr.tx_packets++;
+    uint64_t write = WIFI_MHI_IOVA + 0x3600 + next * 16;
+    mhi_context_address(dma_space.control + 20 * 44, 36, write);
+    mhi_write_address(mhi.channel_db + 20 * 8, write);
+    return true;
+}
+static bool ipcr_qrtr_send(uint32_t type, uint32_t source_port, uint32_t node, uint32_t port,
+    const void *payload, unsigned size) {
+    uint8_t packet[256] = {0};
+    if (!size || size > sizeof(packet) - sizeof(struct lemonade_qrtr_header)) { return false; }
+    struct lemonade_qrtr_header header = {1, type, 1, source_port, 0, size, node, port};
+    memcpy(packet, &header, sizeof(header)); memcpy(packet + sizeof(header), payload, size);
+    return ipcr_send(packet, sizeof(header) + ((size + 3) & ~3u));
+}
+static bool ipcr_receive(const uint8_t *data, unsigned size) {
+    struct lemonade_qrtr_header header = {0};
+    unsigned offset;
+    if (size >= sizeof(header) && data[0] == 1) {
+        memcpy(&header, data, sizeof(header)); offset = sizeof(header);
+    } else if (size >= 16 && data[0] == 3) {
+        header.type = data[1]; header.confirm = data[2] & 1;
+        memcpy(&header.size, data + 4, 4);
+        header.source_node = data[8] | (data[9] << 8); header.source_port = data[10] | (data[11] << 8);
+        header.dest_node = data[12] | (data[13] << 8); header.dest_port = data[14] | (data[15] << 8);
+        if (header.source_port == 0xfffe) { header.source_port = QRTR_CONTROL_PORT; }
+        if (header.dest_port == 0xfffe) { header.dest_port = QRTR_CONTROL_PORT; }
+        offset = 16 + data[3];
+    } else { redwood_tl("wifi-lemonade: IPCR packet has unsupported QRTR version/length\n"); return false; }
+    if (offset > size || !header.size || header.size > size - offset) { return false; }
+    ipcr.rx_packets++;
+    if (ipcr.rx_packets <= 20) {
+        redwood_tl("wifi-lemonade: QRTR packet type %u payload %u bytes\n", header.type, header.size);
+    }
+    if (header.confirm) {
+        struct lemonade_qrtr_control resume = {7, {header.dest_node, header.dest_port, 0, 0}};
+        if (!ipcr_qrtr_send(7, header.dest_port, header.source_node, header.source_port, &resume, sizeof(resume))) { return false; }
+    }
+    if (header.dest_port == QRTR_CONTROL_PORT && header.size >= 4) {
+        struct lemonade_qrtr_control control = {0};
+        memcpy(&control, data + offset, header.size < sizeof(control) ? header.size : sizeof(control));
+        if (control.command == 2) {
+            ipcr.hellos++;
+            if (!ipcr.hello_sent) {
+                struct lemonade_qrtr_control hello = {2, {0}};
+                if (!ipcr_qrtr_send(2, QRTR_CONTROL_PORT, header.source_node, QRTR_CONTROL_PORT, &hello, sizeof(hello))) { return false; }
+                ipcr.hello_sent = true;
+            }
+        } else if (control.command == 4 && header.size >= sizeof(control)) {
+            ipcr.services++;
+            redwood_tl("wifi-lemonade: QRTR service %#x version %u instance %u announced\n",
+                control.words[0], control.words[1] & 255, control.words[1] >> 8);
+            if (control.words[0] == 0x45 && (control.words[1] & 255) == 1) {
+                ipcr.service_node = control.words[2]; ipcr.service_port = control.words[3];
+                ipcr.service_instance = control.words[1] >> 8;
+            }
+        }
+    } else if (header.type == 1 && header.dest_port == 0x4000 &&
+        header.source_node == ipcr.service_node && header.source_port == ipcr.service_port) {
+        const uint8_t *qmi = data + offset;
+        if (header.size < 7) { return false; }
+        unsigned transaction = qmi[1] | (qmi[2] << 8), message = qmi[3] | (qmi[4] << 8);
+        unsigned payload = qmi[5] | (qmi[6] << 8);
+        if (payload != header.size - 7) { return false; }
+        redwood_tl("wifi-lemonade: QMI packet type %u transaction %u message %#x payload %u bytes\n", qmi[0], transaction, message, payload);
+        if (qmi[0] == 2 && transaction == ipcr.transaction && message == ipcr.message) {
+            unsigned at = 7;
+            while (at + 3 <= header.size) {
+                unsigned type = qmi[at], length = qmi[at + 1] | (qmi[at + 2] << 8); at += 3;
+                if (length > header.size - at) { return false; }
+                if (type == 2 && length == 4) {
+                    unsigned result = qmi[at] | (qmi[at + 1] << 8), error = qmi[at + 2] | (qmi[at + 3] << 8);
+                    ipcr.response_seen = true; ipcr.response_result = result; ipcr.response_error = error;
+                    redwood_tl("wifi-lemonade: WLFW response message %#x result %u error %u\n", message, result, error);
+                    if (message == 0x24) {
+                        ipcr.capability_seen = true; ipcr.capability_ok = result == 0 && error == 0;
+                        redwood_tl("wifi-lemonade: WLFW capability response result %u error %u\n", result, error);
+                    }
+                }
+                at += length;
+            }
+            if (at != header.size) { return false; }
+        } else if (qmi[0] == 4 && message == 0x35) {
+            unsigned at = 7;
+            while (at + 3 <= header.size) {
+                unsigned type = qmi[at], length = qmi[at + 1] | (qmi[at + 2] << 8); at += 3;
+                if (length > header.size - at) { return false; }
+                if (type == 1) {
+                    if (!length || !qmi[at] || qmi[at] > 16 || ipcr.memory_count) { return false; }
+                    unsigned count = qmi[at], pos = at + 1, end = at + length;
+                    for (unsigned i = 0; i < count; i++) {
+                        if (end - pos < 9) { return false; }
+                        memcpy(&ipcr.memory[i].size, qmi + pos, 4);
+                        memcpy(&ipcr.memory[i].type, qmi + pos + 4, 4);
+                        unsigned configs = qmi[pos + 8]; pos += 9;
+                        if (configs > 2 || configs * 13 > end - pos) { return false; }
+                        ipcr.memory[i].configs = configs; pos += configs * 13;
+                        redwood_tl("wifi-lemonade: WLFW memory request %u type %u bytes %u configs %u\n",
+                            i, ipcr.memory[i].type, ipcr.memory[i].size, configs);
+                    }
+                    if (pos != end) { return false; }
+                    ipcr.memory_count = count;
+                }
+                at += length;
+            }
+            if (at != header.size) { return false; }
+        } else if (qmi[0] == 4 && message == 0x37) {
+            ipcr.memory_ready = true;
+            redwood_tl("wifi-lemonade: WLFW firmware memory ready indication\n");
+        }
+    }
+    return true;
+}
+static bool ipcr_transfer_event(unsigned channel, unsigned code, uint64_t pointer, unsigned length) {
+    if (!ipcr.channels || (channel != 20 && channel != 21)) { return false; }
+    unsigned ring_offset = channel == 20 ? 0x3600 : 0x3800;
+    uint64_t base = WIFI_MHI_IOVA + ring_offset;
+    if (code == 6) {
+        unsigned index = channel == 20 ? ipcr.tx_write : ipcr.rx_write;
+        mhi_write_address(mhi.channel_db + channel * 8, base + index * 16);
+        return true;
+    }
+    if ((code != 2 && code != 4) || !lemonade_mhi_pointer_valid(pointer, base, 32)) {
+        redwood_tl("wifi-lemonade: IPCR transfer rejected channel %u code %u length %u\n", channel, code, length);
+        return false;
+    }
+    unsigned index = (unsigned)((pointer - base) / 16);
+    if (channel == 20) {
+        unsigned outstanding = (ipcr.tx_write - ipcr.tx_read) & 31;
+        unsigned done = ((index - ipcr.tx_read) & 31) + 1;
+        if (!outstanding || done > outstanding) { return false; }
+        ipcr.tx_read = lemonade_mhi_next(index, 32); ipcr.tx_completed += done;
+        return true;
+    }
+    if (index != ipcr.rx_read || !length || length > MHI_IPCR_MTU) { return false; }
+    vm_offset_t buffer = dma_space.extra + MHI_IPCR_RX + index * MHI_IPCR_MTU;
+    /* RX buffers are never written by the CPU after initial zero/flush. */
+    dma_flush(buffer, MHI_IPCR_MTU);
+    bool ok = ipcr_receive((const uint8_t *)buffer, length);
+    dma_flush(buffer, MHI_IPCR_MTU);
+    if (!ok) { return false; }
+    ipcr.rx_read = lemonade_mhi_next(ipcr.rx_read, 32);
+    ipcr.rx_write = lemonade_mhi_next(ipcr.rx_write, 32);
+    uint64_t write = base + ipcr.rx_write * 16;
+    mhi_context_address(dma_space.control + 21 * 44, 36, write);
+    mhi_write_address(mhi.channel_db + 21 * 8, write);
+    return true;
+}
+
+static bool mhi_events(void) {
+
+    if (!mhi_dma_ok()) { return false; }
+    for (unsigned n = 0; n < 3; n++) {
+        uint64_t base = WIFI_MHI_IOVA + mhi_ring_offset[n];
+        unsigned budget = mhi_ring_count[n];
+        bool recycled = false;
+        while (budget--) {
+            __asm__ volatile("dmb oshld" ::: "memory");
+            vm_offset_t context = dma_space.control + 0x800 + n * 44;
+            uint64_t pointer = ((uint64_t)rd(context, 32) << 32) | rd(context, 28);
+            if (!lemonade_mhi_pointer_valid(pointer, base, mhi_ring_count[n])) {
+                redwood_tl("wifi-lemonade: MHI event ring %u invalid read pointer %#llx\n", n, pointer);
+                for (unsigned word = 0; word < 11; word++) {
+                    redwood_tl("wifi-lemonade: MHI context %u word %u = %#x\n", n, word, rd(context, 4 * word));
+                }
+                vm_offset_t event_base = dma_space.control + mhi_ring_offset[n];
+                redwood_tl("wifi-lemonade: MHI first event words %#x %#x %#x %#x next %#x %#x %#x %#x\n",
+                    rd(event_base, 0), rd(event_base, 4), rd(event_base, 8), rd(event_base, 12),
+                    rd(event_base, 16), rd(event_base, 20), rd(event_base, 24), rd(event_base, 28));
+                return false;
+            }
+            if (pointer == base + mhi.consumed[n] * 16) { break; }
+            volatile struct lemonade_mhi_element *event = (void *)(dma_space.control +
+                mhi_ring_offset[n] + mhi.consumed[n] * 16);
+            uint32_t word0 = event->word0, word1 = event->word1;
+            unsigned type = (word1 >> 16) & 255, value = word0 >> 24;
+            if (mhi.events < 32) {
+                redwood_tl("wifi-lemonade: MHI event ring %u type %#x value %u channel %u\n", n, type, value, word1 >> 24);
+            }
+            mhi.events++;
+            if (type == 0x20) {
+                if (value == 2) { mhi.m0_seen = true; mhi.m0_events++; }
+                else if (value == 0xff) { return false; }
+            } else if (type == 0x40) {
+                mhi.ee_events++;
+                if (value == 2 || value == 4) { mhi.mission_seen = true; }
+                if (value == 3) { return false; } /* crash-dump environment */
+            } else if (type == 0x21) {
+                if (!ipcr.pending_command || event->pointer != ipcr.pending_command || value != 1) {
+                    redwood_tl("wifi-lemonade: IPCR command completion mismatch code %u\n", value);
+                    return false;
+                }
+                ipcr.command_code = value;
+            } else if (type == 0x22) {
+                if (!ipcr_transfer_event(word1 >> 24, value, event->pointer, word0 & 0xffff)) { return false; }
+            } else if (type != 0x50) {
+                redwood_tl("wifi-lemonade: unsupported MHI event type %#x\n", type);
+                return false;
+            }
+            mhi.consumed[n] = lemonade_mhi_next(mhi.consumed[n], mhi_ring_count[n]);
+            mhi.returned[n] = lemonade_mhi_next(mhi.returned[n], mhi_ring_count[n]);
+            wr(context + 36, (uint32_t)(base + mhi.returned[n] * 16));
+            wr(context + 40, 0);
+            recycled = true;
+        }
+        if (recycled) {
+            __asm__ volatile("dsb sy" ::: "memory");
+            mhi_write_address(mhi.event_db + n * 8, base + mhi.returned[n] * 16);
+        }
+    }
+    return mhi_dma_ok();
+}
+/* Give MHI's interrupt writes a valid owned destination even while polling.
+ * This is a DMA mailbox, not a GIC interrupt: SMMU protects it like the rings. */
+static bool mhi_msi_prepare(void) {
+    unsigned next = rd(config, 0x34) & 255;
+    for (unsigned count = 0; count < 32 && next; count++) {
+        if (next < 0x40 || next > 0xe8 || (next & 3)) { return false; }
+        uint32_t cap = rd(config, next);
+        if ((cap & 255) != 5) { next = (cap >> 8) & 255; continue; }
+        uint32_t control = cap >> 16;
+        redwood_tl("wifi-lemonade: PCI MSI capability %#x control %#x\n", next, control);
+        if ((control & 1) || ((control >> 1) & 7) < 2) { return false; }
+        msi_offset = next; msi_old_control = control;
+        msi_data_offset = next + ((control & 0x80) ? 12 : 8);
+        msi_mask_offset = msi_data_offset + 4;
+        msi_old_low = rd(config, next + 4); msi_old_high = (control & 0x80) ? rd(config, next + 8) : 0;
+        msi_old_data = rd(config, msi_data_offset) & 0xffff;
+        if (control & 0x100) { msi_old_mask = rd(config, msi_mask_offset); }
+        msi_saved = true;
+        wr(dma_space.control + 0x1800, 0xfeed0000);
+        wr(config + next + 4, (uint32_t)(WIFI_MHI_IOVA + 0x1800));
+        if (control & 0x80) { wr(config + next + 8, 0); }
+        wr16(config + msi_data_offset, 0x100);
+        if (control & 0x100) { wr(config + msi_mask_offset, msi_old_mask & ~15u); }
+        wr16(config + next + 2, (control & ~0x70u) | 0x21u); /* four messages */
+        bool ok = ((rd(config, next) >> 16) & 0x71) == 0x21 &&
+            rd(config, next + 4) == WIFI_MHI_IOVA + 0x1800 &&
+            (!(control & 0x80) || !rd(config, next + 8));
+        redwood_tl("wifi-lemonade: PCI MSI owned-mailbox configuration %s; four vectors, CPU IRQ disabled\n", ok ? "verified" : "failed");
+        return ok;
+    }
+    return false;
+}
+
+static bool mhi_ready(void) {
+    if (!dma_space.control || (rd(bar, 0x38) & 2) || !(rd(bar, 0x48) & 1) ||
+        rd(bar, 0x128) != 1) { return false; }
+    if (!mhi_msi_prepare()) { return false; }
+    mhi.channel_db = rd(bar, 0x18); mhi.event_db = rd(bar, 0x20);
+    if (mhi.channel_db < 0x100 || mhi.channel_db > 0x1ff000 || (mhi.channel_db & 7) ||
+        mhi.event_db < 0x100 || mhi.event_db > 0x1ff000 || (mhi.event_db & 7)) { return false; }
+    redwood_tl("wifi-lemonade: MHI control alias physical %#llx cached physical %#llx next %#llx\n",
+        kvtophys(dma_space.control), kvtophys(dma_space.extra), kvtophys(dma_space.extra + 0x3000));
+    volatile struct lemonade_mhi_context *channels = (void *)dma_space.control;
+    volatile struct lemonade_mhi_context *events = (void *)(dma_space.control + 0x800);
+    volatile struct lemonade_mhi_context *command = (void *)(dma_space.control + 0xc00);
+    /* IPCR is channel pair 20/21 in this board's original MHI configuration.
+     * Leave all channels disabled until a later explicit START command. */
+    channels[20].type = 1; channels[20].index = 1;
+    channels[21].type = 2; channels[21].index = 1;
+    for (unsigned i = 0; i < 3; i++) {
+        uint64_t base = WIFI_MHI_IOVA + mhi_ring_offset[i];
+        events[i].type = 1;
+        events[i].index = i == 2 ? 0 : i + 1;
+        events[i].base = base; events[i].length = mhi_ring_count[i] * 16;
+        events[i].read = base; events[i].write = base + (mhi_ring_count[i] - 1) * 16;
+        mhi.returned[i] = mhi_ring_count[i] - 1;
+    }
+    command->base = WIFI_MHI_IOVA + 0x3400; command->length = 32 * 16;
+    command->read = command->write = command->base;
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (unsigned n = 0; n < 3; n++) {
+        vm_offset_t context = dma_space.control + 0x800 + n * 44;
+        redwood_tl("wifi-lemonade: MHI context %u before publish cfg/type/index %#x/%#x/%#x base %#x:%#x len %#x:%#x rp %#x:%#x wp %#x:%#x\n",
+            n, rd(context, 0), rd(context, 4), rd(context, 8), rd(context, 16), rd(context, 12),
+            rd(context, 24), rd(context, 20), rd(context, 32), rd(context, 28), rd(context, 40), rd(context, 36));
+        if (rd(context, 12) != WIFI_MHI_IOVA + mhi_ring_offset[n] || rd(context, 16) != 0 ||
+            rd(context, 28) != WIFI_MHI_IOVA + mhi_ring_offset[n] || rd(context, 32) != 0) {
+            redwood_tl("wifi-lemonade: MHI context readback before publish failed\n");
+            return false;
+        }
+    }
+    mhi_write_address(mhi.channel_db + 127 * 8, 0);
+    mhi_write_address(0x58, WIFI_MHI_IOVA);
+    mhi_write_address(0x60, WIFI_MHI_IOVA + 0x800);
+    mhi_write_address(0x68, WIFI_MHI_IOVA + 0xc00);
+    wr(bar + 0x10, (rd(bar, 0x10) & 0xffff) | (3u << 16));
+    /* Match the original board's advertised MHI window. This advertises
+     * addresses only: SMMU still maps just our two bounded allocations. */
+    mhi_write_address(0x80, 0xa0000000ull);
+    mhi_write_address(0x88, 0xb0000000ull);
+    mhi_write_address(0x98, 0xa0000000ull);
+    mhi_write_address(0xa0, 0xb0000000ull);
+    if (rd(bar, 0x58) != WIFI_MHI_IOVA || rd(bar, 0x60) != WIFI_MHI_IOVA + 0x800 ||
+        ((rd(bar, 0x10) >> 16) & 0xffff) != 3) { return false; }
+    for (unsigned i = 0; i < 3; i++) { mhi_write_address(mhi.event_db + i * 8, events[i].write); }
+    redwood_tl("wifi-lemonade: MHI contexts published NER 3 CHDB %#x ERDB %#x CFG %#x VER %#x; requesting M0\n", mhi.channel_db, mhi.event_db, rd(bar, 0x10), rd(bar, 8));
+    wr(bar + 0x38, 2u << 8);
+    mhi_write_address(mhi.channel_db + 127 * 8, 1); /* keep firmware awake */
+    bool ready = false;
+    for (unsigned i = 0; i < 5000; i++) {
+        if (!mhi_events()) { break; }
+        uint32_t status = rd(bar, 0x48);
+        if ((status & 4) || ((status >> 8) & 255) == 0xff) { break; }
+        if (((status >> 8) & 255) == 2 && mhi.m0_seen) { ready = true; break; }
+        pause_us(1000);
+    }
+    redwood_tl("wifi-lemonade: MHI ready result status %#x EE %u events %u M0events %u EEevents %u FSR %#x global %#x\n",
+        rd(bar, 0x48), rd(bar, 0x128), mhi.events, mhi.m0_events, mhi.ee_events,
+        rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    redwood_tl("wifi-lemonade: MHI MSI mailbox %#x\n", rd(dma_space.control, 0x1800));
+    if (!ready || !mhi_dma_ok()) { return false; }
+    redwood_tl("wifi-lemonade: stage 18 MHI M0 confirmed by device-written event; polling transport ready\n");
+    return true;
+}
+static bool mhi_full_firmware(void) {
+    uint64_t size = 0;
+    const uint8_t *image = redwood_image_file("fw", "amss.bin", &size, NULL);
+    if (!image || size != 5178848 || wifi_crc32(image, size) != 0x7b19c475u) { return false; }
+    unsigned bhie = rd(bar, 0x2c);
+    if (bhie < 0x100 || bhie > 0x1fff00 || bhie & 3) { return false; }
+    vm_offset_t copy = dma_space.extra + 0x20000;
+    memcpy((void *)copy, image, size);
+    if (wifi_crc32((const uint8_t *)copy, size) != 0x7b19c475u) { return false; }
+    dma_flush(copy, size);
+    volatile struct lemonade_bhie_vector *vectors = (void *)(dma_space.control + 0x1000);
+    unsigned count = 0;
+    for (unsigned offset = 0; offset < size; offset += WIFI_DMA_SIZE) {
+        vectors[count].address = WIFI_MHI_IOVA + 0x20000 + offset;
+        vectors[count].length = size - offset < WIFI_DMA_SIZE ? size - offset : WIFI_DMA_SIZE;
+        count++;
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    redwood_tl("wifi-lemonade: stage 19 BHIE original firmware %u bytes, %u vectors, offset %#x\n", (unsigned)size, count, bhie);
+    mhi_write_address(bhie + 0x2c, WIFI_MHI_IOVA + 0x1000);
+    wr(bar + bhie + 0x34, count * sizeof(*vectors));
+    wr(bar + bhie + 0x3c, (rd(bar, bhie + 0x3c) & 0xc0000000u) | 2);
+    bool complete = false;
+    for (unsigned i = 0; i < 15000; i++) {
+        if (!mhi_events()) { break; }
+        uint32_t status = rd(bar, bhie + 0x44), ee = rd(bar, 0x128), state = rd(bar, 0x48);
+        if ((status >> 30) == 3 || ee == 3 || (state & 4)) { break; }
+        if ((status >> 30) == 2 && (ee == 2 || ee == 4) && mhi.mission_seen) { complete = true; break; }
+        pause_us(1000);
+    }
+    redwood_tl("wifi-lemonade: BHIE result status %#x EE %u MHI %#x events %u mission_event %u FSR %#x global %#x\n",
+        rd(bar, bhie + 0x44), rd(bar, 0x128), rd(bar, 0x48), mhi.events, mhi.mission_seen,
+        rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    if (!complete || !mhi_dma_ok()) { return false; }
+    redwood_tl("wifi-lemonade: stage 19 full firmware running; mission environment confirmed by event; no SMMU fault\n");
+    return true;
+}
+static bool ipcr_start_command(unsigned channel) {
+    unsigned index = ipcr.command_next;
+    uint64_t address = WIFI_MHI_IOVA + 0x3400 + index * 16;
+    volatile struct lemonade_mhi_element *command = (void *)(dma_space.control + 0x3400 + index * 16);
+    command->pointer = 0; command->word0 = 0; command->word1 = (channel << 24) | (0x12u << 16);
+    ipcr.pending_command = address; ipcr.command_code = 0;
+    ipcr.command_next = lemonade_mhi_next(index, 32);
+    uint64_t write = WIFI_MHI_IOVA + 0x3400 + ipcr.command_next * 16;
+    mhi_context_address(dma_space.control + 0xc00, 36, write);
+    __asm__ volatile("dsb sy" ::: "memory");
+    mhi_write_address(0x70, write);
+    for (unsigned i = 0; i < 3000 && !ipcr.command_code; i++) {
+        if (!mhi_events()) { return false; }
+        pause_us(1000);
+    }
+    redwood_tl("wifi-lemonade: IPCR channel %u START completion %u\n", channel, ipcr.command_code);
+    ipcr.pending_command = 0;
+    return ipcr.command_code == 1;
+}
+static bool ipcr_qmi_request(unsigned message, const void *payload, unsigned length) {
+    uint8_t request[192] = {0};
+    if (length > sizeof(request) - 7 || ipcr.transaction == 0xffff) { return false; }
+    unsigned transaction = ++ipcr.transaction;
+    ipcr.message = message; ipcr.response_seen = false;
+    request[1] = transaction; request[2] = transaction >> 8;
+    request[3] = message; request[4] = message >> 8;
+    request[5] = length; request[6] = length >> 8;
+    if (length) { memcpy(request + 7, payload, length); }
+    if (!ipcr_qrtr_send(1, 0x4000, ipcr.service_node, ipcr.service_port, request, length + 7)) { return false; }
+    for (unsigned i = 0; i < 5000 && !ipcr.response_seen; i++) {
+        if (!mhi_events()) { return false; }
+        pause_us(1000);
+    }
+    return ipcr.response_seen && !ipcr.response_result && !ipcr.response_error;
+}
+static bool ipcr_probe(unsigned step) {
+    if (!mhi.mission_seen || (rd(bar, 0x128) != 2 && rd(bar, 0x128) != 4)) { return false; }
+    for (unsigned channel = 20; channel <= 21; channel++) {
+        vm_offset_t context = dma_space.control + channel * 44;
+        uint64_t base = WIFI_MHI_IOVA + (channel == 20 ? 0x3600 : 0x3800);
+        wr(context, 1u | (2u << 8)); wr(context + 4, channel == 20 ? 1 : 2); wr(context + 8, 1);
+        mhi_context_address(context, 12, base); mhi_context_address(context, 20, 32 * 16);
+        mhi_context_address(context, 28, base); mhi_context_address(context, 36, base);
+    }
+    for (unsigned i = 0; i < 32; i++) {
+        volatile struct lemonade_mhi_element *tre = (void *)(dma_space.control + 0x3800 + i * 16);
+        tre->pointer = WIFI_MHI_IOVA + MHI_IPCR_RX + i * MHI_IPCR_MTU;
+        tre->word0 = MHI_IPCR_MTU; tre->word1 = (2u << 16) | (1u << 9);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    ipcr.channels = true;
+    if (!ipcr_start_command(20) || !ipcr_start_command(21)) { return false; }
+    ipcr.rx_write = 31;
+    mhi_context_address(dma_space.control + 21 * 44, 36, WIFI_MHI_IOVA + 0x3800 + 31 * 16);
+    mhi_write_address(mhi.channel_db + 21 * 8, WIFI_MHI_IOVA + 0x3800 + 31 * 16);
+    struct lemonade_qrtr_control hello = {2, {0}};
+    if (!ipcr_qrtr_send(2, QRTR_CONTROL_PORT, 0xffffffffu, QRTR_CONTROL_PORT, &hello, sizeof(hello))) { return false; }
+    bool ready = false;
+    for (unsigned i = 0; i < 5000; i++) {
+        if (!mhi_events()) { return false; }
+        if (ipcr.service_port && ipcr.tx_completed && ipcr.rx_packets) { ready = true; break; }
+        pause_us(1000);
+    }
+    redwood_tl("wifi-lemonade: IPCR result tx %u completed %u rx %u hellos %u services %u WLFW %u instance %u FSR %#x global %#x\n",
+        ipcr.tx_packets, ipcr.tx_completed, ipcr.rx_packets, ipcr.hellos, ipcr.services,
+        ipcr.service_port != 0, ipcr.service_instance, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    if (!ready || !mhi_dma_ok()) { return false; }
+    redwood_tl("wifi-lemonade: stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found\n");
+    if (step == 20) { return true; }
+    /* WLFW requires the client registration and host capabilities before a
+     * target capability query. Subscribe to the PCIe memory handshake. */
+    static const uint8_t registration[] = {
+        0x15,4,0, 0x4c,0x45,0x4e,0x4b, /* kernel client */
+        0x16,1,0,1, 0x17,1,0,1, 0x18,1,0,1, 0x1b,1,0,1
+    };
+    static const uint8_t host[] = {
+        0x10,4,0,1,0,0,0, /* one client */
+        0x14,1,0,1, /* board data */
+        0x16,1,0,1, 0x17,1,0,1, /* original M3 image/cache */
+        0x1a,1,0,0 /* calibration not yet done */
+    };
+    if (!ipcr_qmi_request(0x20, registration, sizeof(registration)) ||
+        !ipcr_qmi_request(0x34, host, sizeof(host))) { return false; }
+    for (unsigned i = 0; i < 2000 && !ipcr.memory_count && !ipcr.memory_ready; i++) {
+        if (!mhi_events()) { return false; }
+        pause_us(1000);
+    }
+    if (ipcr.memory_count) {
+        uint8_t response[4 + 17 * 8] = {1, 0, 0, 0};
+        if (ipcr.memory_count > 8) { return false; }
+        unsigned length = 1 + 17 * ipcr.memory_count;
+        response[1] = length; response[2] = length >> 8; response[3] = ipcr.memory_count;
+        for (unsigned i = 0; i < ipcr.memory_count; i++) {
+            vm_offset_t memory = 0;
+            if (ipcr.memory[i].configs || (ipcr.memory[i].type != 1 && ipcr.memory[i].type != 4) ||
+                !dma_allocate(ipcr.memory[i].size, false, &memory, &ipcr.memory[i].address)) { return false; }
+            memcpy(response + 4 + 17 * i, &ipcr.memory[i].address, 8);
+            memcpy(response + 12 + 17 * i, &ipcr.memory[i].size, 4);
+            memcpy(response + 16 + 17 * i, &ipcr.memory[i].type, 4);
+        }
+        if (!ipcr_qmi_request(0x36, response, length + 3)) { return false; }
+        for (unsigned i = 0; i < 10000 && !ipcr.memory_ready; i++) {
+            if (!mhi_events()) { return false; }
+            pause_us(1000);
+        }
+        if (!ipcr.memory_ready) { return false; }
+    }
+    if (!ipcr_qmi_request(0x24, NULL, 0)) { return false; }
+    redwood_tl("wifi-lemonade: QMI result response %u success %u tx_completed %u rx %u FSR %#x global %#x\n",
+        ipcr.capability_seen, ipcr.capability_ok, ipcr.tx_completed, ipcr.rx_packets,
+        rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    if (!ipcr.capability_seen || !ipcr.capability_ok || !mhi_dma_ok()) { return false; }
+    redwood_tl("wifi-lemonade: stage 21 WLFW capability request/response successful over QMI; no SMMU fault\n");
+    return true;
+}
+
+static bool mhi_probe(unsigned step) {
+    if (!mhi_ready()) { return false; }
+    if (step == 18) { return true; }
+    if (!mhi_full_firmware()) { return false; }
+    return step == 19 || ipcr_probe(step);
+}
+
 static bool power_root(unsigned step) {
     /* Do not reset a root complex inherited in use. */
     if (!(rd(gcc, 0x6b024) & (1u << 31))) {
@@ -860,9 +1505,11 @@ static bool power_root(unsigned step) {
     if (step == 13) { return true; }
     if (covering || !route_endpoint()) { return false; }
     if (step == 14) { return true; }
-    if (!dma_prepare()) { return false; }
+    if (!dma_prepare(step >= 18)) { return false; }
     if (step == 15) { return true; }
-    return step == 16 ? dma_fault_probe() : firmware_probe();
+    if (step == 16) { return dma_fault_probe(); }
+    if (!firmware_probe()) { return false; }
+    return step == 17 || mhi_probe(step);
 }
 void lemonade_wifi_init(void) {
     unsigned mode = 0;
@@ -871,11 +1518,11 @@ void lemonade_wifi_init(void) {
         redwood_tl("wifi-lemonade: refused on another platform\n");
         return;
     }
-    if (mode < 1 || mode > 17) {
+    if (mode < 1 || mode > 21) {
         redwood_tl("wifi-lemonade: mode %u unsupported; no hardware access\n", mode);
         return;
     }
-    if (mode == 17) {
+    if (mode >= 17) {
         unsigned guard_verified = 0;
         PE_parse_boot_argn("lemonade_dma_verified", &guard_verified, sizeof(guard_verified));
         if (guard_verified != 1) {

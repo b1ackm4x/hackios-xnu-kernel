@@ -305,6 +305,12 @@ class DeviceSafety(unittest.TestCase):
         args = payload[payload.index("--cmdline") + 1].split()
         self.assertEqual([x for x in args if x.startswith("touchscreen=")], ["touchscreen=2"])
 
+    def test_firmware_modes_require_verified_ram_overlay_before_device_access(self):
+        for mode in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi'):
+            with self.subTest(mode=mode), self.assertRaises(SystemExit):
+                self.run_action('run', '--kernel', 'built', '--wifi', mode)
+            self.assertFalse(self.calls)
+
     def test_cpu_policy_refuses_old_kernel_before_upload(self):
         self.fastboot = self.loader + "\tfastboot\n"
         self.product = "xnuloader"

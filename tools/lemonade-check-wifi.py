@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 MODES = {'inspect': 1, 'rails': 2, 'domain': 3, 'clocks': 4,
-         'resets': 5, 'controller': 6, 'phy': 7, 'root': 8, 'radio': 9, 'link': 10, 'endpoint': 11, 'mmio': 12, 'smmu': 13, 'sid': 14, 'dma': 15, 'dma-fault': 16, 'bhi': 17}
+         'resets': 5, 'controller': 6, 'phy': 7, 'root': 8, 'radio': 9, 'link': 10, 'endpoint': 11, 'mmio': 12, 'smmu': 13, 'sid': 14, 'dma': 15, 'dma-fault': 16, 'bhi': 17, 'mhi': 18, 'bhie': 19, 'ipcr': 20, 'qmi': 21}
 
 
 def check(manifest, raw):
@@ -60,13 +60,39 @@ def check(manifest, raw):
         if MODES[mode] >= 16:
             checks['dma_stopped_before_unmap'] = 'endpoint DMA stopped before unmap' in log
             checks['endpoint_bus_master_cleared'] = 'endpoint bus master clear verified' in log
-        if mode == 'bhi':
+        if mode in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi'):
             checks['firmware_reached_sbl'] = 'stage 17 BHI transfer complete; execution environment SBL; no SMMU fault' in log
             status = re.search(r'BHI result status (0x[0-9a-f]+|0) EE (\d+) MHI (0x[0-9a-f]+|0) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
             checks['bhi_status_and_fault_registers'] = bool(status and int(status[1], 0) >> 30 == 2 and
                 int(status[2]) == 1 and not (int(status[4], 0) & 0xc00001fe) and int(status[5], 0) == 0)
             checks['guard_evidence_matches_kernel'] = manifest.get('dma_guard', {}).get('kernel_sha256') == manifest.get('kernel_sha256') and bool(manifest.get('kernel_sha256'))
             checks['original_firmware_verified'] = manifest.get('wifi_firmware', {}).get('firmware', {}).get('amss.bin', {}).get('sha256') == '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'
+        if mode in ('mhi', 'bhie', 'ipcr', 'qmi'):
+            checks['mhi_dma_arena_verified'] = 'MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias' in log
+            checks['mhi_m0_event_confirmed'] = 'stage 18 MHI M0 confirmed by device-written event; polling transport ready' in log
+            event = re.search(r'MHI ready result status (0x[0-9a-f]+|0) EE (\d+) events (\d+) M0events (\d+) EEevents (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
+            checks['mhi_registers_and_event_count'] = bool(event and (int(event[1], 0) >> 8) & 255 == 2 and
+                int(event[3]) > 0 and int(event[4]) > 0 and not (int(event[6], 0) & 0xc00001fe) and int(event[7], 0) == 0)
+            checks['no_mhi_transport_failure'] = not re.search(r'MHI DMA fault|invalid read pointer|unsupported MHI event|IPCR transfer rejected|IPCR command completion mismatch|PCI MSI restore readback failed', log)
+        if mode in ('bhie', 'ipcr', 'qmi'):
+            checks['full_firmware_event_confirmed'] = 'stage 19 full firmware running; mission environment confirmed by event; no SMMU fault' in log
+            result = re.search(r'BHIE result status (0x[0-9a-f]+|0) EE (\d+) MHI (0x[0-9a-f]+|0) events (\d+) mission_event (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
+            checks['bhie_status_and_fault_registers'] = bool(result and int(result[1], 0) >> 30 == 2 and
+                int(result[2]) in (2, 4) and int(result[5]) == 1 and not (int(result[6], 0) & 0xc00001fe) and int(result[7], 0) == 0)
+        if mode in ('ipcr', 'qmi'):
+            checks['msi_restore_readback'] = 'PCI MSI restore readback verified' in log
+            checks['ipcr_channel_commands_completed'] = all(f'IPCR channel {channel} START completion 1' in log for channel in (20, 21))
+            checks['qrtr_wlfw_discovered'] = 'stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found' in log
+            result = re.search(r'IPCR result tx (\d+) completed (\d+) rx (\d+) hellos (\d+) services (\d+) WLFW (\d+) instance (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
+            checks['ipcr_bidirectional_counters'] = bool(result and int(result[1]) > 0 and int(result[2]) > 0 and
+                int(result[3]) > 0 and int(result[5]) > 0 and int(result[6]) == 1 and
+                not (int(result[8], 0) & 0xc00001fe) and int(result[9], 0) == 0)
+        if mode == 'qmi':
+            checks['wlfw_capability_response'] = 'stage 21 WLFW capability request/response successful over QMI; no SMMU fault' in log
+            checks['qmi_success_result'] = 'WLFW capability response result 0 error 0' in log
+            result = re.search(r'QMI result response (\d+) success (\d+) tx_completed (\d+) rx (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
+            checks['qmi_reply_and_no_fault'] = bool(result and int(result[1]) == 1 and int(result[2]) == 1 and
+                int(result[3]) > 0 and int(result[4]) > 0 and not (int(result[5], 0) & 0xc00001fe) and int(result[6], 0) == 0)
     return {'passed': all(checks.values()), 'mode': mode, 'checks': checks,
             'scope': 'bounded PCIe bring-up stage only', 'networking_verified': False}
 

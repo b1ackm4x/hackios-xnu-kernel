@@ -122,5 +122,83 @@ class StageEvidence(unittest.TestCase):
             self.assertFalse(wifi.check(manifest, bad)['passed'])
 
 
+    def test_mhi_requires_device_event_and_bhie_requires_mission_event(self):
+        manifest, raw = self.dma_record()
+        manifest.update(wifi='mhi', cmdline='wifi=0 lemonade_wifi=18', kernel_sha256='same-kernel',
+                        dma_guard={'kernel_sha256': 'same-kernel'},
+                        wifi_firmware={'firmware': {'amss.bin': {'sha256':
+                            '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'}}})
+        raw = raw.replace(b'stage 15 passed;', b'stage 18 passed;')
+        raw += (b'endpoint bus master clear verified\nendpoint DMA stopped before unmap\n'
+                b'BHI result status 0x80000001 EE 1 MHI 0x101 FSR 0x400 global 0 error 0\n'
+                b'stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n'
+                b'MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias\n'
+                b'MHI ready result status 0x201 EE 1 events 2 M0events 1 EEevents 1 FSR 0x400 global 0\n'
+                b'stage 18 MHI M0 confirmed by device-written event; polling transport ready\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(wifi.check(manifest, raw)['passed'])
+        for bad in (raw.replace(b'M0events 1', b'M0events 0'), raw.replace(b'FSR 0x400', b'FSR 0x402'),
+                    raw + b'MHI event ring 0 invalid read pointer 0xa0203021\n'):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
+        manifest.update(wifi='bhie', cmdline='wifi=0 lemonade_wifi=19')
+        raw = raw.replace(b'stage 18 passed;', b'stage 19 passed;')
+        raw += (b'BHIE result status 0x80000002 EE 2 MHI 0x201 events 3 mission_event 1 FSR 0x400 global 0\n'
+                b'stage 19 full firmware running; mission environment confirmed by event; no SMMU fault\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(wifi.check(manifest, raw)['passed'])
+        for bad in (raw.replace(b'mission_event 1', b'mission_event 0'), raw.replace(b'EE 2 MHI', b'EE 3 MHI'),
+                    raw.replace(b'BHIE result status 0x80000002', b'BHIE result status 0xc0000002')):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
+
+    def transport_record(self, mode):
+        manifest, raw = self.dma_record()
+        manifest.update(wifi=mode, cmdline='wifi=0 lemonade_wifi=' + str(wifi.MODES[mode]),
+                        kernel_sha256='same-kernel', dma_guard={'kernel_sha256': 'same-kernel'},
+                        wifi_firmware={'firmware': {'amss.bin': {'sha256':
+                            '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'}}})
+        raw = raw.replace(b'stage 15 passed;', f'stage {wifi.MODES[mode]} passed;'.encode())
+        raw += (b'endpoint bus master clear verified\nendpoint DMA stopped before unmap\n'
+                b'BHI result status 0x80000001 EE 1 MHI 0x101 FSR 0x400 global 0 error 0\n'
+                b'stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n'
+                b'MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias\n'
+                b'MHI ready result status 0x201 EE 1 events 2 M0events 1 EEevents 1 FSR 0x400 global 0\n'
+                b'stage 18 MHI M0 confirmed by device-written event; polling transport ready\n'
+                b'BHIE result status 0x80000002 EE 2 MHI 0x201 events 3 mission_event 1 FSR 0x400 global 0\n'
+                b'stage 19 full firmware running; mission environment confirmed by event; no SMMU fault\n'
+                b'PCI MSI restore readback verified\n'
+                b'IPCR channel 20 START completion 1\nIPCR channel 21 START completion 1\n'
+                b'IPCR result tx 2 completed 2 rx 2 hellos 1 services 1 WLFW 1 instance 1 FSR 0x400 global 0\n'
+                b'stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found\n')
+        if mode == 'qmi':
+            raw += (b'WLFW capability response result 0 error 0\n'
+                    b'QMI result response 1 success 1 tx_completed 3 rx 3 FSR 0x400 global 0\n'
+                    b'stage 21 WLFW capability request/response successful over QMI; no SMMU fault\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        return manifest, raw
+
+    def test_ipcr_needs_both_channels_actual_receive_and_completed_send(self):
+        manifest, raw = self.transport_record('ipcr')
+        self.assertTrue(wifi.check(manifest, raw)['passed'])
+        for bad in (raw.replace(b'channel 21 START completion 1', b'channel 21 START completion 0'),
+                    raw.replace(b'tx 2 completed 2', b'tx 2 completed 0'),
+                    raw.replace(b'completed 2 rx 2', b'completed 2 rx 0'),
+                    raw.replace(b'PCI MSI restore readback verified', b'PCI MSI restore readback failed')):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
+
+    def test_qmi_reply_with_firmware_error_is_not_success(self):
+        manifest, raw = self.transport_record('qmi')
+        report = wifi.check(manifest, raw)
+        self.assertTrue(report['passed'])
+        self.assertFalse(report['networking_verified'])
+        for bad in (raw.replace(b'capability response result 0 error 0', b'capability response result 1 error 90'),
+                    raw.replace(b'response 1 success 1', b'response 1 success 0'),
+                    raw.replace(b'response 1 success 1', b'response 0 success 0')):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
+
+
 if __name__ == '__main__':
     unittest.main()

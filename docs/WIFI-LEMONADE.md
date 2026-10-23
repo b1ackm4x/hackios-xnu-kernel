@@ -1,6 +1,6 @@
 # OnePlus 9 Wi-Fi 移植记录
 
-截至 2026-10-23，Wi-Fi 尚不能扫描、连接或联网。当前已完成 PCIe 上电/链路、BDF→SID、独立 SMMU 地址空间、真实越界 DMA 拦截，以及原机固件前 512 KiB 的 BHI 传输。芯片已在 XNU 下从 PBL 进入 SBL；完整固件的 BHIE 下载、MHI 事件/通道、QMI 与网络收发仍未实现。首次整段上电的历史故障及后续修正见下文。
+截至 2026-10-23，Wi-Fi 尚不能扫描、连接或联网。当前已完成 PCIe 上电/链路、BDF→SID、独立 SMMU 地址空间、真实越界 DMA 拦截、BHI/SBL、MSI/MHI M0、BHIE 全镜像启动，以及 IPCR 20/21 双向收发和 WLFW 服务发现。QMI 客户端登记、主机能力、固件内存握手和能力查询均已通过；射频初始化与网络收发尚未实现。首次整段上电的历史故障及后续修正见下文。
 
 major 1 的源码核对结果和具体实施顺序见 [QCA6490 major 1 适配方案](WIFI-QCA6490-PLAN.md)。目前有明确的原厂参考和部分寄存器/描述符复用证据，目前已有首段固件进入 SBL 的本机证据，尚无完整运行固件的握手或联网结果。
 
@@ -71,11 +71,11 @@ major 1 的源码核对结果和具体实施顺序见 [QCA6490 major 1 适配方
 
 PCI ID `17cb:1103` 相同不代表芯片修订相同。项目 `tools/mk-ath11k.sh` 固定的是 Linux 7.0.14，其 `pci.c` 的 WCN6855 分支只接受 major 2；major 1 会返回 `-EOPNOTSUPP`。本轮两次实测 major 1 / minor `0x10`，不能仅修改判断条件就宣称兼容。后续还需要核对 QMI、内存请求、CE/DP 寄存器和固件服务差异。
 
-OnePlus 原厂 `cnss_pci_update_fw_name()` 对 QCA6490 major 2 选择 `amss20.bin`，其他修订选择 `amss.bin`。已按此规则从同一台原 Android 读取 `amss.bin`（5,178,848 字节）和 `m3.bin`（266,684 字节），与手机端哈希匹配；只保存在被 Git 忽略的 `local/lemonade/wifi/firmware/`。本轮把 `amss.bin` 加入独立的私有 RAM 镜像，前 512 KiB 已通过 BHI 传输；`m3.bin` 尚未使用。
+OnePlus 原厂 `cnss_pci_update_fw_name()` 对 QCA6490 major 2 选择 `amss20.bin`，其他修订选择 `amss.bin`。已按此规则从同一台原 Android 读取 `amss.bin`（5,178,848 字节）和 `m3.bin`（266,684 字节），与手机端哈希匹配；只保存在被 Git 忽略的 `local/lemonade/wifi/firmware/`。本轮把 `amss.bin` 加入独立的私有 RAM 镜像，前 512 KiB 已通过 BHI 传输；`m3.bin` 尚未发送给固件。23:05 又只读取得原机板级 ELF（59,908 字节）和原厂日志确认使用的监管数据库（19,348 字节），设备端 SHA-256 与主机一致；它们与 M3 已加入新的私有测试镜像，正常镜像未改变。
 
-MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execution environment `0`（PBL），状态 `0`；PBL 阶段 MHIVER 读数为 `0xdeadbeef`，不作为运行固件已经就绪的证据。19:30 之前的测试保持 endpoint Bus Master 关闭。后续受限 DMA/BHI 结果见下节；仍没有 MSI、中断投递、QMI、扫描、关联或 IP 网络验证。
+MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execution environment `0`（PBL），状态 `0`；PBL 阶段 MHIVER 读数为 `0xdeadbeef`，不作为运行固件已经就绪的证据。19:30 之前的测试保持 endpoint Bus Master 关闭。后续受限 DMA/BHI 结果见下节；后续 MSI/MHI/IPCR 结果见下节；CPU 中断处理、扫描、关联或 IP 网络仍未验证。
 
-已完成 **BDF → SID → SMMU → 受限 DMA 缓冲区 → BHI/SBL**。原厂 `msm_pcie_config_sid()` 使用的 PARF CRC8 索引表已在独立阶段设置和恢复；实际端点故障确认请求确实携带 `0x1c01`。下一边界为 MHI context/event ring、READY→M0 和完整固件 BHIE。现有 redwood 驱动的 SMMU/缓存维护代码可作参考，但它的 WPSS/AHB 启动和固定 WCN6750 配置不能直接调用。
+已完成 **BDF → SID → SMMU → 受限 DMA 缓冲区 → BHI/SBL**。原厂 `msm_pcie_config_sid()` 使用的 PARF CRC8 索引表已在独立阶段设置和恢复；实际端点故障确认请求确实携带 `0x1c01`。现已进一步验证 MHI context/event ring、READY→M0 和完整固件 BHIE；下一边界为 WLFW 内存/板级数据握手和网络驱动接入。现有 redwood 驱动的 SMMU/缓存维护代码可作参考，但它的 WPSS/AHB 启动和固定 WCN6750 配置不能直接调用。
 
 ## 21:00 后的 DMA 与 BHI 实测
 
@@ -95,6 +95,21 @@ MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execu
 21:47 最终恢复 Android 后，USB 身份、启动完成、B 槽、五个启动分区哈希均通过核验。`cnss_pci` 恢复 5 GT/s x1，`wlan0` 为 up，向当前 Wi-Fi 网关的三次探测均收到响应；电池 32.9°C。
 
 构建工具改为完整读取、原子替换源文件，并在链接后核验源文件与实际编译副本一致，以避免共享目录中旧文件长度造成的截断。失败的构建不会替换已核验内核。
+
+## 22:30 后的 MHI / BHIE / IPCR 实测
+
+新增测试模式为 `mhi`（18）、`bhie`（19）、`ipcr`（20）和 `qmi`（21）。后者仍要求成功能力响应才算通过，不把收到错误响应作为成功。
+
+- 新增 8 MiB 独立 DMA 区，逐页核对 2048 个映射，保留区外 guard；MHI context 为原厂协议要求的 44 字节，TRE/向量为 16 字节，共享控制页使用无缓存别名。
+- 初次只配置事件环、不配置 MSI 时，固件已写入 M0 事件，但 context 中的 read pointer 被异常内容覆盖，测试拒绝通过。端点能力实测为 **32 位 MSI、支持逐向量屏蔽**；配置四个 MSI 消息到自有 DMA mailbox 后，相同事件环得到有效指针与 M0/SBL 事件。该对比确定了初始化缺项，不声称已经确定芯片内部异常成因。
+- 内核 `53d75def30b04603e92aafcb9a228f4ba804c79f00972cd8434bf98d740192e2` 在日志 `1792766239` 通过 MHI：`MHISTATUS=0x201`，设备写入 M0 事件，MSI mailbox 为 `0x101`，没有 SMMU fault。这里通过轮询处理事件，没有安装 CPU IRQ handler。
+- 同一内核日志 `1792766347` 将原机 `amss.bin` 全部 5,178,848 字节分为 10 个 BHIE 向量；`BHIE=0x80000002`、`EE=2`，并收到设备产生的 mission EE 事件。主机核验完整 SHA-256，内核核验完整 CRC32，固件没有修改。
+- 内核 `af96a3a230762f75faa28cac287a9ef8b84fd1ecd7fa6e8d6358467ddd32b18b` 的日志 `1792766944` 中，IPCR 20/21 的 START 命令均返回 completion 1；发送与完成计数均为 2、接收 2，收到 HELLO 和 service `0x45` / version 1 / instance 1 公告。MSI 原配置、Bus Master、BAR、SMMU 和 SID 清理均有读回证据，正常返回加载器。
+- 同内核日志 `1792767031` 的首次能力查询得到匹配的 QMI response，但结果为 `result=1, error=90`，阶段 21 **失败**。原厂流程先登记客户端、声明主机能力并处理固件内存请求；后续修复按此顺序推进。
+
+内核 `c8721e264033227ba40cd7db3fd1fade5878eacaa9fac70edf470bdf4ff15809` 的日志 `1792767713` 已修复 QMI 顺序：登记（`0x20`）、主机能力（`0x34`）均返回成功；固件申请 type 1 / 5,111,808 字节和 type 4 / 3,735,552 字节，独立分配后核对 1248 / 912 页及两侧 guard，内存响应（`0x36`）成功，收到 memory-ready（`0x37`）后能力查询（`0x24`）返回 `result=0, error=0`。最终 TX 完成 7、RX 8，SMMU `FSR=0x400`、全局状态 0，阶段 21 通过并正常退回加载器。
+
+以上都不是射频 ready、扫描、关联或获取 IP 的证据。原始日志、镜像和失败尝试仅在忽略目录 `local/lemonade/wifi/mhi-20261023/` 下保存。23:03 已恢复同一 USB 目标的原 Android，五个活动启动分区哈希与备份全部一致；随后 `wlan0` 实际 IP 连通测试 3/3 成功。记录为 `android-roundtrip-20261023T230331.json`。
 
 ## 验证与后续顺序
 
@@ -127,13 +142,13 @@ python3 tools/lemonade-verify-android.py
 
 验证器检查日志哈希、模式、返回状态、阶段完成标记和恢复标记；即使全部通过，也固定输出 `networking_verified: false`。主机测试包含旧内核能力拒绝、错误目标拒绝、阶段参数和并发资源限制等场景。
 
-本轮主机验证共 46 项：31 项 USB/固件前置条件、12 项阶段证据与故障掩码反例、3 项 Android 校验边界，全部通过。另验证了首段 CRC32 标准向量及 APFS 内容/权限/符号链接读取。它们不替代上述实机日志，也不证明网络协议栈可用。
+最新主机验证包含 32 项 USB/固件前置条件、15 项阶段证据与故障掩码反例，以及独立 C 协议布局/环指针测试，全部通过。此前 3 项 Android 校验边界测试也已通过。另验证了首段 CRC32 标准向量及 APFS 内容/权限/符号链接读取。它们不替代上述实机日志，也不证明网络协议栈可用。
 
 后续按依赖推进：
 
 1. 已完成电源/时钟/复位/PARF/PHY/DBI 与退出恢复；每级保留日志和内核哈希。
-2. 已训练链路、读取 `17cb:1103` 端点及内部硬件版本，Bus Master 仍关闭。
-3. 已验证 PARF BDF-to-SID、SMMU DMA 隔离与 BHI/SBL；下一步实现 MHI 控制/事件环、READY→M0、BHIE 全镜像下载，再确认运行执行环境和 QMI 服务。
+2. 已训练链路、读取 `17cb:1103` 端点及内部硬件版本；固件阶段仅在受限 SMMU 已就绪后开启 Bus Master，退出前确认清零。
+3. 已验证 PARF BDF-to-SID、SMMU DMA 隔离、BHI/SBL、MHI M0、BHIE 全镜像及 IPCR/WLFW；继续补齐 QMI 初始化、内存请求和板级文件传输。
 4. 补充 QCA6490 major 1 的兼容性证据和 ath11k 参数，为已有兼容层补 PCIe/MHI 与相应芯片数据路径，再接入扫描、关联和 en0；不将上游 AHB 总线假设继续套用。
 5. 使用用户指定网络验证 DHCP、DNS、实际 HTTP 传输、重连及退出恢复。只有这些结果完成后，才能报告 Wi-Fi 可用。
 

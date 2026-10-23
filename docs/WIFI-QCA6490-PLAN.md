@@ -1,6 +1,6 @@
 # OnePlus 9：QCA6490 major 1 的适配方案
 
-调查时间：2026-10-23。对象是本机实测 `17cb:1103`、`TCSR_SOC_HW_VERSION=0x400c0110`，即 major 1 / minor `0x10`。本文是实现依据和验收计划；没有新增 DMA、固件加载或网络实机测试。
+调查时间：2026-10-23。对象是本机实测 `17cb:1103`、`TCSR_SOC_HW_VERSION=0x400c0110`，即 major 1 / minor `0x10`。本文记录适配依据和验收计划；后续实现已通过 DMA、完整固件启动和 IPCR/WLFW 发现，实测状态以 [Wi-Fi 记录](WIFI-LEMONADE.md) 为准，尚未联网。
 
 结论：优先保留已经通过测试的 PCIe 底层，按原厂流程启动本机固件，再为 ath11k 增加独立的 QCA6490 major 1 配置及 PCIe/MHI 适配。已核对的硬件定义有较大重合，支持这条路线；不能把版本伪装成 major 2，也不能把“支持 QCA6490”的其他设备案例视为本机兼容证据。
 
@@ -10,7 +10,7 @@
 
 - 项目固定的 Linux 7.0.14 `ath11k/pci.c` 对 `17cb:1103` 只接受 major 2。官方支持列表也列出 WCN6855 hw2.0 / hw2.1；本轮没有找到可直接用于本机 major 1 的已验证上游方案。[版本选择][linux-pci]、[官方列表][wireless]
 - OnePlus MHI 从 BAR `0x224` 提取版本；vendor major mask 为 `0xff00`，ath11k 为 `0x0f00`，对本机 `0x400c0110` 都得到 major 1。原厂 `cnss_pci_update_fw_name()` 对 QCA6490 major 2 用 `amss20.bin`，其余版本用 `amss.bin`。因此此前的识别结果和固件选择一致。[版本读取][vendor-init]、[固件选择][vendor-pci]
-- 已保存的本机 `amss.bin` 包含构建标识 `WLAN.HSP.1.1-01737-QCAHSPSWPL_V1_V2_SILICONZ-1.499991.13.512711.3`。它是对应原机的候选固件，仍须用真实 BHI/BHIE 状态验证启动。`m3.bin` 是后续 QMI/M3 交换所需材料，不能当作首段 BHI 引导镜像。
+- 已保存的本机 `amss.bin` 包含构建标识 `WLAN.HSP.1.1-01737-QCAHSPSWPL_V1_V2_SILICONZ-1.499991.13.512711.3`。它已通过真实 BHI/BHIE 状态及 mission EE 事件验证启动；这不代表无线网络 ready。`m3.bin` 是后续 QMI/M3 交换所需材料，不能当作首段 BHI 引导镜像。
 - 原厂公开模块中存在专门的 `hal/wifi3.0/qca6490/`、`hif/src/qca6490def.c` 和 `fw-api/hw/qca6490/v1/`。目录名 `v1` 本身不证明 silicon major 1 的全部运行行为；本轮把它作为原厂 QCA6490 定义来逐项比较。[HAL][vendor-hal]、[硬件定义][vendor-def]
 
 ### 18 项有界源码比较一致，但不是完整兼容认证
@@ -86,11 +86,11 @@
 
 ## 下一次实机的目标与停止条件
 
-后续真机测试已完成 BDF→SID、受限 SMMU 映射、真实越界 DMA 拦截，并确认 BHI 把芯片从 PBL 带到 SBL，详见 [实测记录](WIFI-LEMONADE.md)。下一步应建立 MHI 控制/事件环并完成 BHIE 全镜像下载。这样无需先写完整 ath11k major 1 驱动，就能验证最大的未知项：原机固件能否在当前 XNU/PCIe 环境启动。
+后续真机测试已完成 BDF→SID、受限 SMMU 映射、真实越界 DMA 拦截，并确认 BHI 把芯片从 PBL 带到 SBL，详见 [实测记录](WIFI-LEMONADE.md)。MHI M0、BHIE 全镜像启动和 IPCR/WLFW 服务发现也已通过；首次直接能力查询被拒绝后，已按顺序完成 WLFW 注册、内存握手和成功能力查询。下一步是板级数据/M3 和 ath11k major 1 配置。
 
 如果 BHI 未完成、出现 SMMU fault、无法停止设备访问或不能恢复加载器，停在对应阶段修正。只有进入固件运行态后才处理 QMI/CE 差异。若真实 WMI/HTT 与现有 ath11k 不兼容，再从公开 QCA6490 HAL/协议定义补差异；目前没有证据表明必须整体搬入 Android qcacld 或重做网络栈。
 
-本轮只更新研究文档并运行源码比较。此前 12 次硬件阶段测试的结论仍见 [实测记录](WIFI-LEMONADE.md)，不计入新的固件/联网验收。
+最初研究轮次仅运行源码比较；随后硬件实现和各次失败/通过记录见 [实测记录](WIFI-LEMONADE.md)。网络验收仍未完成。
 
 [linux-pci]: https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux/+/refs/tags/v7.0.14/drivers/net/wireless/ath/ath11k/pci.c
 [linux-hw]: https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux/+/refs/tags/v7.0.14/drivers/net/wireless/ath/ath11k/hw.c

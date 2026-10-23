@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
-    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi"), help="bounded PCIe bring-up stages; none enables networking")
+    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi"), help="bounded PCIe bring-up stages; none enables networking")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
                         help="SM8350 EPSS policy: inspect only, or capped stock OPPs with restore on return")
     parser.add_argument("--profile", choices=("performance",),
@@ -95,7 +95,7 @@ def main():
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
     if args.wifi and args.wifi != "inspect" and (args.touch or args.gpu or args.cpu_policy != "firmware"):
         parser.error("Wi-Fi root-power probe must run without touch, GPU or CPU-policy changes")
-    if args.wifi == 'bhi' and not args.userland:
+    if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi') and not args.userland:
         parser.error('BHI firmware test requires --userland and the verified private firmware overlay')
     if args.cpu_policy != "firmware" and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU policy requires run --kernel built")
@@ -274,10 +274,10 @@ def main():
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
         if args.wifi:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
-            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17}[args.wifi])
+            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17, "mhi": 18, "bhie": 19, "ipcr": 20, "qmi": 21}[args.wifi])
         firmware_record = guard_record = None
         firmware_overlay = None
-        if args.wifi == 'bhi':
+        if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi'):
             firmware_overlay, firmware_record, guard_record = verified_firmware_overlay(expected_kernel)
             cmdline += ' lemonade_dma_verified=1'
         if args.cpu_policy != "firmware":

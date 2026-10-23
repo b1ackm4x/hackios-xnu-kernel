@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build a private RAM-only firmware overlay; preserve both normal APFS images."""
+import argparse
 import hashlib
 import json
 import os
@@ -44,6 +45,9 @@ def contents(image):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--driver-files', action='store_true', help='include verified original M3, board and regulatory data')
+    args = parser.parse_args()
     os.umask(0o077)
     output = ROOT / 'out/lemonade-wifi'
     output.mkdir(parents=True, exist_ok=True)
@@ -62,6 +66,15 @@ def main():
             expected['sha256'] != '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521' or
             digest(fw) != expected['sha256']):
         raise SystemExit('Firmware identity/hash differs from the verified QCA6490 v1 image')
+    names = ['amss.bin'] + (['m3.bin', 'board.bin', 'regdb.bin'] if args.driver_files else [])
+    verified = {}
+    for name in names:
+        source = firmware_dir / name
+        entry = manifest['files'].get(name, {})
+        if (not source.is_file() or source.is_symlink() or not entry.get('matches_device') or
+                source.stat().st_size != entry.get('bytes') or digest(source) != entry.get('sha256')):
+            raise SystemExit('Missing or unverified original firmware file: ' + name)
+        verified[name] = {'sha256': entry['sha256'], 'bytes': entry['bytes']}
     with tempfile.TemporaryDirectory(prefix='build-', dir=output) as work:
         work = Path(work)
         tree = work / 'root'
@@ -96,26 +109,28 @@ def main():
         (tree / 'fw').mkdir(exist_ok=True)
         if 'fw' not in before:
             (tree / 'fw').chmod(0o755)
-        destination_fw = tree / 'fw/amss.bin'
-        if destination_fw.exists() or destination_fw.is_symlink():
-            destination_fw.unlink()
-        shutil.copy2(fw, tree / 'fw/amss.bin')
-        (tree / 'fw/amss.bin').chmod(0o644)
+        for name in names:
+            destination_fw = tree / 'fw' / name
+            if destination_fw.exists() or destination_fw.is_symlink():
+                destination_fw.unlink()
+            shutil.copy2(firmware_dir / name, destination_fw)
+            destination_fw.chmod(0o644)
         candidate = work / 'wifi.apfs'
         pack(candidate)
         after = contents(candidate)
         allowed = dict(before)
         allowed.setdefault('fw', (0o40755, 0, 0, b''))
-        allowed['fw/amss.bin'] = (0o100644, 0, 0, fw.read_bytes())
+        for name in names:
+            allowed['fw/' + name] = (0o100644, 0, 0, (firmware_dir / name).read_bytes())
         if after != allowed:
-            raise SystemExit('Firmware overlay changes files outside fw/amss.bin')
+            raise SystemExit('Firmware overlay changes files outside the selected verified firmware')
         if digest(original) != original_hash:
             raise SystemExit('Normal root image changed during packaging')
         shutil.copy2(candidate, output / 'root.apfs')
     report = {'device': 'lemonade', 'scope': 'private RAM firmware test only',
               'base_root_sha256': original_hash, 'sha256': digest(output / 'root.apfs'),
               'bytes': (output / 'root.apfs').stat().st_size,
-              'firmware': {'amss.bin': {'sha256': expected['sha256'], 'bytes': fw.stat().st_size}},
+              'firmware': verified,
               'normal_root_unchanged': True, 'other_file_contents_and_modes_verified': True,
               'deployed': False}
     (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
