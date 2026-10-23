@@ -218,7 +218,8 @@ python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
 候选现在让编码器持有当前 pipeline、buffer、texture、sampler、深度状态和附件；
 先保留新绑定再释放旧绑定，同一对象重复绑定安全。每条已记录的工作继续持有独立快照，
 编码结束即释放编码器的引用，未用过的绑定和替换掉的资源也能释放；`set*Bytes` 不依赖
-调用者的 autorelease pool。这与 [Metal 默认保留命令所需资源](https://developer.apple.com/documentation/metal/mtlcommandbufferdescriptor/retainedreferences)
+调用者的 autorelease pool。编码器另外持有 device，结束编码后该公开属性仍有效，
+不再经已释放的 command buffer 访问。这与 [Metal 默认保留命令所需资源](https://developer.apple.com/documentation/metal/mtlcommandbufferdescriptor/retainedreferences)
 的契约一致。
 
 新增五项提前释放/清空 descriptor/pool drain 的像素与计算结果测试，Mac 原生 Metal

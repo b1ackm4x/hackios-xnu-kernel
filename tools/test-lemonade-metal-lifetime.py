@@ -167,7 +167,7 @@ int main(void) {
         [encoder recordDraw:3 vertexStart:0 count:3 indexBuffer:nil indexType:0 indexOffset:0 baseVertex:0 instanceCount:1 baseInstance:0];
         id replacement=resource(8);[encoder setVertexBuffer:replacement offset:0 atIndex:0];[replacement release];
         [encoder setFragmentTexture:nil atIndex:0];allAlive(0,9);
-        [encoder endEncoding];[encoder endEncoding];[encoder release];
+        [encoder endEncoding];[encoder endEncoding];assert([encoder device]==[command device]);[encoder release];
         allAlive(0,8);allDead(8,1);
         [command release];allDead(0,9);
         puts("PASS: render bindings and attachments survive early release; recorded draws survive rebinding and encoder destruction");
@@ -198,7 +198,7 @@ int main(void) {
         [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
         [encoder setBuffer:nil offset:0 atIndex:0];
         id unused=resource(20);[encoder setTexture:unused atIndex:0];[unused release];
-        [encoder endEncoding];[encoder endEncoding];[encoder release];allAlive(16,4);allDead(20,1);
+        [encoder endEncoding];[encoder endEncoding];assert([encoder device]==[command device]);[encoder release];allAlive(16,4);allDead(20,1);
         [command release];allDead(16,5);
         puts("PASS: compute bindings survive early release and dispatch keeps its original resource snapshot");
     }
