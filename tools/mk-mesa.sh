@@ -62,7 +62,16 @@ if [ ! -d mesa-$VERSION ] || [ "$(cat mesa-$VERSION/.redwood-patches 2>/dev/null
 	[ -f mesa-$VERSION.tar.xz ] || curl -sL --fail -o mesa-$VERSION.tar.xz https://archive.mesa3d.org/mesa-$VERSION.tar.xz
 	echo "$SHA256  mesa-$VERSION.tar.xz" | sha256sum -c --quiet
 	rm -rf mesa-$VERSION build-*
-	tar xJf mesa-$VERSION.tar.xz
+	# Docker's macOS shared filesystem can change directory inode identities
+	# while tar restores metadata ("Directory renamed before its status could
+	# be extracted"). Unpack on the container's native temporary filesystem,
+	# then copy the verified archive's tree to the build directory.
+	MESA_UNPACK=$(mktemp -d)
+	trap 'rm -rf "$MESA_UNPACK"' EXIT
+	tar xJf mesa-$VERSION.tar.xz -C "$MESA_UNPACK"
+	cp -a "$MESA_UNPACK/mesa-$VERSION" .
+	rm -rf "$MESA_UNPACK"
+	trap - EXIT
 	for p in "$ROOT"/tools/mesa/*.patch; do patch -s --no-backup-if-mismatch -d mesa-$VERSION -p1 < "$p"; done
 	echo "$PATCHES" > mesa-$VERSION/.redwood-patches
 fi

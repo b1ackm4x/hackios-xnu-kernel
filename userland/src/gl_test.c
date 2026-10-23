@@ -248,6 +248,12 @@ fill(int width, int height)
 int
 main(int argc, char **argv)
 {
+	const char *required_renderer = NULL;
+	if (argc >= 3 && strcmp(argv[1], "--require-renderer") == 0) {
+		required_renderer = argv[2];
+		argc -= 2;
+		argv += 2;
+	}
 	static const int attributes[] = { OSMESA_FORMAT, OSMESA_RGBA, OSMESA_PROFILE, OSMESA_ES_PROFILE,
 		                          OSMESA_CONTEXT_MAJOR_VERSION, 2, 0 };
 	static const float corners[] = {
@@ -274,6 +280,12 @@ main(int argc, char **argv)
 	}
 	printf("gl_test: %s; %s; %s\n", (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
 	    (const char *)glGetString(GL_VERSION));
+	const char *renderer = (const char *)glGetString(GL_RENDERER);
+	if (required_renderer && (!renderer || !strstr(renderer, required_renderer) ||
+	    strstr(renderer, "softpipe") || strstr(renderer, "llvmpipe"))) {
+		printf("gl_test: FAIL: required hardware renderer %s\n", required_renderer);
+		return 2;
+	}
 	if (argc > 1 && strcmp(argv[1], "fill") == 0) {
 		fill(argc > 3 ? atoi(argv[2]) : 1125, argc > 3 ? atoi(argv[3]) : 2436);
 		return 0;
@@ -342,17 +354,34 @@ main(int argc, char **argv)
 	}
 #define PIXEL(x, y) drawn[((size_t)(y) * (size_t)width + (size_t)(x)) * 4], drawn[((size_t)(y) * (size_t)width + (size_t)(x)) * 4 + 1], \
 	    drawn[((size_t)(y) * (size_t)width + (size_t)(x)) * 4 + 2], drawn[((size_t)(y) * (size_t)width + (size_t)(x)) * 4 + 3]
+	unsigned draw_error = glGetError();
 	printf("gl_test: %d x %d drawn in %llu ms, read back in %llu ms; error %#x; red green blue alpha: a corner %u %u %u %u, "
 	    "the middle %u %u %u %u, near the red corner %u %u %u %u, near the green %u %u %u %u, near the blue %u %u %u %u; "
 	    "%u of %u pixels inside the triangle (%u%%; 26%% by geometry)\n", width, height, drew - began, read - drew,
-	    glGetError(), PIXEL(2, 2), PIXEL(width / 2, height / 2), PIXEL(width * 15 / 100, height * 22 / 100),
+	    draw_error, PIXEL(2, 2), PIXEL(width / 2, height / 2), PIXEL(width * 15 / 100, height * 22 / 100),
 	    PIXEL(width * 85 / 100, height * 22 / 100), PIXEL(width / 2, height * 80 / 100), coloured,
 	    (unsigned)(width * height), (unsigned)((uint64_t)coloured * 100 / (uint64_t)(width * height)));
+	if (required_renderer) {
+		const uint8_t *background = drawn + ((size_t)2 * width + 2) * 4;
+		const uint8_t *red = drawn + ((size_t)(height * 22 / 100) * width + width * 15 / 100) * 4;
+		const uint8_t *green = drawn + ((size_t)(height * 22 / 100) * width + width * 85 / 100) * 4;
+		const uint8_t *blue = drawn + ((size_t)(height * 80 / 100) * width + width / 2) * 4;
+		unsigned coverage = (unsigned)((uint64_t)coloured * 100 / ((uint64_t)width * height));
+		if (draw_error || coverage < 25 || coverage > 27 ||
+		    abs(background[0] - 26) > 2 || abs(background[1] - 26) > 2 || abs(background[2] - 51) > 2 ||
+		    red[0] < 200 || red[1] > 50 || red[2] > 50 ||
+		    green[1] < 200 || green[0] > 50 || green[2] > 50 ||
+		    blue[2] < 200 || blue[0] > 50 || blue[1] > 50) {
+			printf("gl_test: FAIL: shader triangle pixel readback differs from its geometry/colours\n");
+			return 3;
+		}
+		printf("gl_test: PASS: hardware renderer %s; shader triangle and pixel readback verified\n", renderer);
+	}
 
 	service = IOServiceGetMatchingService(0, IOServiceMatching("RedwoodGPU"));
 	if (service == 0 || IOServiceOpen(service, mach_task_self(), 0, &connection) != 0) {
 		printf("gl_test: no GPU service in this kernel to put the picture on the panel with\n");
-		return 0;
+		return required_renderer ? 4 : 0;
 	}
 	for (int i = 0; i < seconds * 5; i++) {
 		struct show show = { (uint64_t)(uintptr_t)shown, (uint32_t)width, (uint32_t)height, (uint32_t)width * 4, 0 };

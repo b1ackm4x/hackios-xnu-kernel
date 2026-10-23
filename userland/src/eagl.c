@@ -762,6 +762,7 @@ target_to_surface(struct eagl *e, struct image *image)
 	image->drawn = false;
 	if (image->mirror != 0) {
 		GLint read = 0, draw = 0;
+		GLboolean scissored = glIsEnabled(GL_SCISSOR_TEST);
 
 		/* the frame into the surface's memory, by the GPU (blit_targets); upside down if it is drawn so */
 		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
@@ -776,8 +777,16 @@ target_to_surface(struct eagl *e, struct image *image)
 		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
 		glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
+		/* Blits obey the destination scissor. CoreAnimation leaves the last
+		 * damaged rectangle enabled, but this copy must preserve the entire
+		 * private render target in the displayed IOSurface. Restore its state
+		 * before CoreAnimation draws the next frame. */
+		glDisable(GL_SCISSOR_TEST);
 		glBlitFramebuffer(0, 0, image->width, image->height, 0, image->invert ? image->height : 0, image->width,
 		    image->invert ? 0 : image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		if (scissored) {
+			glEnable(GL_SCISSOR_TEST);
+		}
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
 		if (IOSurfaceLock(surface, 0, NULL) == 0) {
@@ -4116,7 +4125,9 @@ install(void)
 		all_shaders = strstr(arguments, "glshaders=1") != NULL;
 		census_on = strstr(arguments, "glcensus=1") != NULL;
 		frame_lines = strstr(arguments, "glframes=1") != NULL;
-		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
+		/* Mode 2 keeps frame/input/presentation timing without SpringBoard's
+		 * very frequent main-run-loop trace (inject_sb.c observes only mode 1). */
+		latency_lines = strstr(arguments, "touch_lat=1") != NULL || strstr(arguments, "touch_lat=2") != NULL;
 		if ((argument = strstr(arguments, "glslow=")) != NULL) {
 			slow_calls_us = strtoull(argument + 7, NULL, 10);
 		}
