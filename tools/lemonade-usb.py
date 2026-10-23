@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
-    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "root"), help="bounded PCIe bring-up stages; none enables networking")
+    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu"), help="bounded PCIe bring-up stages; none enables networking")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
                         help="SM8350 EPSS policy: inspect only, or capped stock OPPs with restore on return")
     parser.add_argument("--profile", choices=("performance",),
@@ -240,7 +240,7 @@ def main():
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
         if args.wifi:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
-            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "root": 7}[args.wifi])
+            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13}[args.wifi])
         if args.cpu_policy != "firmware":
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("cpufreq="))
             cmdline += " cpufreq=" + ("2" if args.cpu_policy == "inspect" else "1") + " ddr=0"

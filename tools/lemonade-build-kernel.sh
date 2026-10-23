@@ -54,7 +54,7 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'touch_driver_supported': 'lemonade-s6sy792-v1',
           'touch_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch.c').read_bytes()).hexdigest(),
           'touch_protocol_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch_protocol.h').read_bytes()).hexdigest(),
-          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'root'],
+          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'phy', 'root', 'radio', 'link', 'endpoint', 'mmio', 'smmu'],
           'wifi_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_wifi.c').read_bytes()).hexdigest(),
           'build_log': str(log), 'gpu_hardware_verified': False}
 Path('out/lemonade-kernel.manifest.json').write_text(json.dumps(record, indent=2) + '\n')

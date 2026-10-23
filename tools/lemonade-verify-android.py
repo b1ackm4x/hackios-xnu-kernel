@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import time
 
@@ -63,8 +64,17 @@ def main():
     checks = {}
     for name in ('boot', 'vendor_boot', 'dtbo', 'vbmeta', 'xbl'):
         partition = name + slot
-        value = command(['adb', '-s', serial, 'exec-out', 'su', '-c',
-                         'sha256sum /dev/block/by-name/' + partition], timeout=90).split()[0]
+        remote = 'su -c ' + shlex.quote('sha256sum /dev/block/by-name/' + partition)
+        value = None
+        for attempt in range(3):
+            output = command(['adb', '-s', serial, 'exec-out', remote], timeout=90).split()
+            if output and re.fullmatch(r'[0-9a-fA-F]{64}', output[0]):
+                value = output[0].lower()
+                break
+            if attempt < 2:
+                time.sleep(2)
+        if value is None:
+            raise SystemExit(f'No valid root checksum for {partition}; no success record saved')
         checks[partition] = value == backups[partition + '.img']['sha256']
     record = {'checked_at': datetime.now().astimezone().isoformat(), 'sys.boot_completed': '1',
               'slot': slot, 'flash_locked': props['ro.boot.flash.locked'], 'usb_identity_verified': True,
