@@ -14,7 +14,7 @@
 
 ### Metal 有两条值得区分的路线
 
-HackiOS 的 AIR→NIR 路线偏重着色器编译。其详细报告记录：456 个模块中，321 个入口模块能够翻译和生成 Adreno 机器码；对应入口测试中，30 个在真机 GPU 上完成，另有 24 个已提交但未完成。其余 135 个库函数单独统计。文档明确把完整 Metal 对象层和内核提交 ABI 列为另外的工作。因此 README 中的较旧数字，以及“可以编译”的比例，都不代表应用 Metal 兼容度。[AIR 详细报告](https://github.com/oosexgang/hackios-xnu-userland/blob/906425b75e02b4f99eb5d7bb1ef7c9583472d772/docs/air.md)
+HackiOS 已有 AIR→NIR 编译器，也已有 RedwoodMetal 设备对象、资源、计算/渲染编码器及 RedwoodGPU 提交路径。**10 月 23 日进一步核对源码后修正：AIR 文档开头“另外两部分尚未开始”的描述已经过时，不能据此判断当前实现。** 系统语料 456 个模块中 321 个通过 NIR/ir3，早期报告有 30 个上游真机完成项；这些均不代表完整 Metal 或本机 A660 的应用兼容度。现有实现仍缺部分视口/裁剪状态、blit、resolve、事件等。详见 [OnePlus 9 Metal 方案与主机验证](METAL-LEMONADE.md)。[当前对象层源码](https://github.com/oosexgang/hackios-xnu-userland/blob/906425b75e02b4f99eb5d7bb1ef7c9583472d772/userland/src/redwoodmetal.m)、[AIR 详细报告](https://github.com/oosexgang/hackios-xnu-userland/blob/906425b75e02b4f99eb5d7bb1ef7c9583472d772/docs/air.md)
 
 UniXNU 的 NativeMetal 与 NativeAdreno 是独立实现路线。维护者报告在小米 Pad 6S Pro（SM8550、Adreno 740、iPadOS 17.7.11）上实现了 Metal 设备、桌面 GPU 合成和指定进程的 Metal 设备。核心路径是 Metal 前端、AIR→SPIR-V、Mesa Turnip、原生 GPU 提交；首次着色器编译仍慢。该成果更接近完整运行链路，但不能外推为所有 Metal 应用均兼容。[NativeMetal](https://github.com/UniXNU/NativeMetal/blob/c6d29caad6d880cc8204ebe3bc34d77479a3255d/README.md)、[驱动架构](https://unixnu.com/drivers/native-adreno)
 
@@ -47,7 +47,7 @@ UniXNU 的 NativeMetal 与 NativeAdreno 是独立实现路线。维护者报告�
 | 能力 | 可依靠的共享工作 | 一加 9 必须补齐的部分 | 当前判断 |
 | --- | --- | --- | --- |
 | XNU 和 iOS 用户空间 | HackiOS 的启动、IOKit 替代服务、应用兼容、构建修复 | 保持本机回归测试，修复板级资源与通用层的交互 | 优先跟随直接上游，选择性回合补丁 |
-| Metal 和应用图形 | HackiOS AIR 编译器；UniXNU NativeMetal；Mesa freedreno/Turnip | A660 提交后端、iOS 16.5 ABI、IOSurface、同步与应用验证 | 共享层有明确进展，本机接入仍是项目 |
+| Metal 和应用图形 | HackiOS RedwoodMetal/AIR 与现有 RedwoodGPU；UniXNU NativeMetal；Mesa freedreno/Turnip | 先验证现有链路的 A660 计算/绘制，再补状态、同步与应用兼容；UniXNU 路线另需后端适配 | 已完成候选交叉编译，本机 Metal 仍未验收 |
 | 显示与帧同步 | Linux SM8350 DPU/DSI/DSC 驱动；其他机型的扫描输出设计 | AMB655X 面板、DSC 命令模式、TE 同步、DPU SMMU、缓冲区释放时机 | 本机负责，不能等待 redwood 驱动自然覆盖 |
 | 触摸与实体按键 | 通用 HID 桥；其他机型 GENI/SPMI 实现 | S6SY792 的 GENI I²C 与 IRQ、复位和电源流程、多指、侧键、锁屏唤醒 | 基础触摸已通，长期使用路径本机负责 |
 | 功耗与充电 | Qualcomm/Linux 电源、温度与充电协议；共享 IOPower 接口 | 电池真实读数、电量计配置、充电状态机、限流和温控、CPU/GPU DVFS、休眠恢复 | 日常使用的前置条件，本机负责 |
@@ -91,7 +91,7 @@ DPU 显示可以在电源和联网工作期间穿插推进，具体寄存器与�
 
 ## 分支维护与跟踪策略
 
-保留 HackiOS `device/lemonade` 为当前稳定实验基线，继续吸收通用修复。本轮不迁移到 UniXNU；未来先在独立实验分支验证 A660 的 Metal 设备发现、最小渲染、资源释放和显示同步，再判断接入成本。这样不会为了新图形路线同时更换内核版本、用户空间和全部已验证驱动。
+保留 HackiOS `device/lemonade` 为当前稳定实验基线，继续吸收通用修复。Metal 首先验证已存在的 RedwoodMetal/AIR→freedreno→RedwoodGPU 链路，在独立实验分支完成 A660 设备发现、计算/像素、资源释放和显示同步。UniXNU 用户空间路线作为功能缺口较大时的第二方案；本轮不整体迁移系统。具体接入边界见 [Metal 方案](METAL-LEMONADE.md)。
 
 优先跟踪三个来源：HackiOS 的通用接口与应用修复，UniXNU 的 Metal/缓冲区/缓存实现，Linux 与 OnePlus 的 SM8350 硬件驱动。sweet/topaz 作为具体问题的参考。按子系统摘取有实测意义的改动，记录来源和许可证，避免直接覆盖整个机型分支。
 
