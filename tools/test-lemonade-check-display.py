@@ -39,9 +39,9 @@ class DisplayEvidence(unittest.TestCase):
     def interrupted(self, log=None, **overrides):
         if log is None:
             log = self.interrupted_log()
-        return self.checked(log, interrupted=True, seconds=3,
-                            cmdline='ufs_write=0 loader_return_after=3 lemonade_display=7 lemonade_display_flips=64',
-                            **overrides)
+        record = {'seconds': 3, 'cmdline': 'ufs_write=0 loader_return_after=3 lemonade_display=7 lemonade_display_flips=64'}
+        record.update(overrides)
+        return self.checked(log, interrupted=True, **record)
 
     def interrupted_log(self):
         line = 'lemonade-display: flip completed=64/64 frames=128 MISR=0x4444/0x4444 fsr=0x400 global=0 underrun=0\n'
@@ -117,6 +117,29 @@ class DisplayEvidence(unittest.TestCase):
                     'source=0x12000000/0x12000000 fsr=0x400 global=0 underrun=0\n')
         self.assertTrue(self.checked(LOG+snapshot)['passed'])
         self.assertFalse(self.checked(LOG+snapshot.replace('fsr=0x400', 'fsr=0x402'))['passed'])
+
+    def test_manual_commands_require_idle_and_one_completed_transfer_each(self):
+        setup = ('lemonade-display: manual configured=1 idle=1 sync=0x180085 auto=0x1 status=0\n'
+                 'lemonade-display: manual idle frames=0 done=0 line=1 tear=2400\n'
+                 'lemonade-display: manual transfer n=1 frame_delta=1 done=0x100 MISR=0x3333/0x3333\n'
+                 'lemonade-display: manual transfer n=2 frame_delta=1 done=0x100 MISR=0x4444/0x4444\n'
+                 'lemonade-display: manual transfer n=64 frame_delta=1 done=0x100 MISR=0x4444/0x4444\n')
+        cleanup = ('lemonade-display: mapping cleanup stopping=0 mapped=1 flipping=1 '
+                   'source=0x12000000/0x12000000 fsr=0x400 global=0 underrun=0\n'
+                   'lemonade-display: manual restored sync=1 auto=1\n')
+        source = 'lemonade-display: source restore '
+        log = setup + LOG.replace('frames=128', 'frames=64').replace(source, cleanup+source)
+        def checked(value):
+            return self.checked(value, display='manual', cmdline='ufs_write=0 lemonade_display=8 lemonade_display_flips=64')['passed']
+        self.assertTrue(checked(log))
+        for old,new in (('configured=1','configured=0'),('auto=0x1','auto=0x80000001'),
+                        ('idle frames=0','idle frames=1'),('done=0 line=1','done=0x300 line=1'),
+                        ('sync=1 auto=1','sync=1 auto=0'),('frames=64 MISR=0x4444','frames=128 MISR=0x4444'),
+                        ('done=0x100','done=0'),('frame_delta=1','frame_delta=2'),('transfer n=64','transfer n=63')):
+            self.assertFalse(checked(log.replace(old,new)))
+        restore = 'lemonade-display: manual restored sync=1 auto=1\n'
+        self.assertFalse(checked(log.replace(restore,'')+restore))
+        self.assertFalse(checked(log+'lemonade-display: manual configured=0 idle=0 sync=0 auto=0 status=0\n'))
 
 
 if __name__ == '__main__':

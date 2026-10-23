@@ -121,7 +121,7 @@ static void reset_fixture(void) {
 static void assert_context_restored(void) {
     for (unsigned i=0;i<9;i++)
         assert(*(uint32_t *)(display_map.cb+display_cb_offsets[i])==display_map.saved[i]);
-    assert(!display_map.active && !display_map.flip_active && !display_map.misr_active);
+    assert(!display_map.active && !display_map.flip_active && !display_map.misr_active && !display_map.manual_active);
     assert(!display_restoring);
 }
 static void return_after_complete_flip(void) {
@@ -140,6 +140,12 @@ static void return_after_complete_context(void) {
 }
 static void return_after_complete_vote(void) {
     assert(votes[0].changed && host_clocks[0]==1);
+    lemonade_display_quiesce();
+}
+static void return_after_complete_manual_setup(void) {
+    assert(display_map.manual_active);
+    assert(display_map.sync_config==0x180085 && display_map.autorefresh==0x80000001);
+    assert(host_mdp[0x35288/4]==0x180085 && host_mdp[0x352b4/4]==1);
     lemonade_display_quiesce();
 }
 static void return_after_complete_restore(void) {
@@ -211,6 +217,42 @@ int main(void) {
     lemonade_display_quiesce();
     assert(!host_interrupts && host_clocks[0]==0 && display_stopping);
     puts("PASS: return preserves an already disabled interrupt state");
+
+    reset_fixture();
+    display_map.active=display_map.flip_active=display_map.misr_active=true;
+    host_mdp[0x35288/4]=0x180085;host_mdp[0x352b4/4]=0x80000001;
+    host_mdp[0x3525c/4]=0xf0000; /* observed firmware mux; PP0 is the low nibble */
+    host_pending=return_after_complete_manual_setup;
+    assert(!display_manual_begin());
+    assert(host_callbacks==1 && host_interrupts && display_stopping);
+    assert_context_restored();
+    assert(host_mdp[0x35288/4]==0x180085 && host_mdp[0x352b4/4]==0x80000001);
+    assert(host_mdp[0x3525c/4]==0xf0000);
+    char *manual_restore=strstr(host_log,"manual restored sync=1 auto=1");
+    pixels=strstr(host_log,"source restore pixels=1");
+    assert(manual_restore && pixels && manual_restore<pixels);
+    puts("PASS: interrupted manual handover restores automatic GOP transfer before unmapping");
+
+    reset_fixture();
+    display_map.active=display_map.flip_active=display_map.misr_active=display_map.manual_active=true;
+    display_map.sync_config=0x180085;display_map.autorefresh=0x80000001;
+    host_mdp[0x35288/4]=0x180085;host_mdp[0x352b4/4]=1;
+    host_pending=return_after_complete_flip;
+    assert(!display_flip_buffer(1));
+    assert_context_restored();
+    assert(host_mdp[0x1501c/4]==1 && host_mdp[0x352b4/4]==0x80000001);
+    assert(!display_manual_begin());
+    puts("PASS: interrupted manual kickoff restores source and automatic refresh with complete journals");
+
+    reset_fixture();
+    display_map.flip_active=true;
+    host_mdp[0x35288/4]=0x180085;host_mdp[0x352b4/4]=0x80000001;
+    host_mdp[0x3525c/4]=0xf0001; /* PP1 must not use the PP0 completion bit */
+    assert(!display_manual_begin());
+    assert(!display_map.manual_active && host_interrupts);
+    assert(host_mdp[0x35288/4]==0x180085 && host_mdp[0x352b4/4]==0x80000001);
+    assert(host_mdp[0x3525c/4]==0xf0001);
+    puts("PASS: non-master pingpong is refused without altering the display configuration");
     return 0;
 }
 '''

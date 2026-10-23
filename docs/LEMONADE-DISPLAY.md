@@ -206,6 +206,36 @@ AddressSanitizer / UndefinedBehaviorSanitizer 均通过。这只验证 CPU 执�
 报告使用 null，避免误写为零。两次中断后同一内核又通过上述 1,000 次正常切换。
 这些证据覆盖已测中断点，不证明所有时序均安全，也不能单独确定旧版 `900e` 的唯一根因。
 
+### 命令模式逐帧传输
+
+`--display manual` 在上述独立缓冲路径中接管自动刷新：先断开外部 TE，关闭 autorefresh，
+等待当前传输完成，再接回 TE。实测空闲 50 ms 内帧计数不变且 PP0 完成位为零；
+每次只提交两路源地址、flush 和一次 CTL_START，等待主 PINGPONG0 完成、传输行计数归于
+空闲且帧计数恰好增加 1，然后校验两路 mixer 签名。INTF1 的 INTF_MUX 低 4 位选择 PP0；
+固件保留的高位 `0xf0000` 不属于通道编号，两路 DSC 也不等于两个独立完成中断。
+
+首轮实验误等两个 PP 完成位，并在恢复 autorefresh 后额外发 CTL_START，未能确认原图恢复。
+该候选已单独留档为失败版本，返回 Android 后五个活动分区哈希仍与原始备份一致。
+参照 OnePlus 原厂命令 encoder 修正后，恢复流程先选择 GOP，再断开 TE、启用原 autorefresh、
+接回 TE，期间不发送 CTL_START。确认两次实际传输和原图签名后才撤销映射。
+第二个候选因误把 INTF_MUX 整个寄存器当作通道编号而在接管前被拒绝；原图和状态正常恢复。
+
+内核 `28d66d67331ccdfc1a3ed8d61329d33b0bdd20a42d13310d527a78ae6b2a9b92` 的实机证据：
+
+| 实机记录 | 结果 |
+| --- | --- |
+| `1792799104-run-cp0.log` | 64 次命令、64 帧，两种画面逐次签名正确；原图、映射、中断和时钟完整恢复 |
+| `1792799138-run-cp0.log` | 2 秒定时中断时仍扫描测试 IOVA，清理前无 fault/underrun，原图先于撤销映射恢复 |
+| `1792799231-run-cp0.log` | 1,000 次命令、1,000 帧，逐次签名正确，无超时、fault、underrun 或异常中断，完整恢复 |
+
+检查器同时验证无自动传输、单命令单帧、主 PP 完成和恢复顺序；14 项证据失效测试通过。
+实际 C 驱动的 9 组主机检查覆盖中断恢复、真实 INTF_MUX 高位以及拒绝错误 PP，
+AddressSanitizer / UndefinedBehaviorSanitizer 通过；USB 工具的 41 项检查通过。
+这仍是明确启用的独立缓冲实验。它建立了逐帧完成依据，尚未接入桌面生产者的缓冲区复用同步。
+
+时序依据：[OnePlus SM8350 命令 encoder](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/oneplus/SM8350_R_11.0/techpack/display/msm/sde/sde_encoder_phys_cmd.c)、
+[INTF 和通道选择](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/oneplus/SM8350_R_11.0/techpack/display/msm/sde/sde_hw_intf.c)。
+
 桌面回归另发现测试工具省略 `--metal-profile` 时选择 Apple1 表，导致 MPS 拒绝初始化，
 SpringBoard 反复 abort（`1792790381-run-cp0.log`）。工具已改为默认选择此前实测通过的
 profile 1，并在运行记录中写入实际值；仍可显式选择 profile 0 做对照。
@@ -220,6 +250,7 @@ Apple2 家族的全部能力。
 ```sh
 python3 tools/lemonade-usb.py run --kernel built --userland --display smmu --seconds 30
 python3 tools/lemonade-usb.py run --kernel built --userland --display flip --display-flips 1000 --seconds 60
+python3 tools/lemonade-usb.py run --kernel built --userland --display manual --display-flips 1000 --seconds 60
 python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
 python3 tools/lemonade-check-display.py local/lemonade/INTERRUPTED-run-cp0.log --interrupted
 ```

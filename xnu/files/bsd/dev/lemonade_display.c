@@ -461,12 +461,15 @@ display_smmu_survey(void)
 #define DISPLAY_FSR_FAULT 0xc00001feu /* [10:9] describe the format, not faults */
 #define DISPLAY_MISR_CONTROL 0x8f0001ffu /* excludes read-only status and W1C */
 #define DISPLAY_BUFFER_IOVA(n) (0x10000000ull + (n) * 0x02000000ull)
+/* INTF1 is bound to master PINGPONG0; the two DSC/mixers share its transfer. */
+#define DISPLAY_PP_DONE (1u << 8)
 static const unsigned display_cb_offsets[] = {0, 0x10, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x38, 0x3c};
 static struct {
 	vm_offset_t smmu, cb, tables, mdp, buffers[2];
 	unsigned table_pages;
 	uint32_t saved[9], misr[2], baseline[2], source[2], flush;
-	bool active, misr_active, flip_active;
+	uint32_t sync_config, autorefresh;
+	bool active, misr_active, flip_active, manual_active;
 } display_map;
 
 static uint64_t *
@@ -521,6 +524,9 @@ display_original_pixels(void)
 		    rd(mdp, 0x44314) == display_map.baseline[0] && rd(mdp, 0x45314) == display_map.baseline[1]) return true;
 		delay(50);
 	}
+	tell("lemonade-display: original pixels wait failed frames=%u line=%u tear=%u MISR=%#x/%#x expected=%#x/%#x auto=%#x\n",
+	    rd(intf, 0xac) - first, rd(intf, 0xb0), rd(intf, 0x2b0), rd(mdp, 0x44314), rd(mdp, 0x45314),
+	    display_map.baseline[0], display_map.baseline[1], rd(intf, 0x2b4));
 	return false;
 }
 
@@ -540,13 +546,28 @@ display_map_restore(void)
 		    !!(rd(display_map.mdp, 0x14) & (1u << 26)));
 	}
 	if (display_map.flip_active) {
+		bool manual = display_map.manual_active;
 		/* Restore the physical GOP source while its identity mapping is still
 		 * live. Confirm actual output before turning translation off. */
 		wr(display_map.mdp + 0x4014, display_map.source[0]);
 		wr(display_map.mdp + 0x6014, display_map.source[1]);
 		wr(display_map.mdp + 0x15018, 3); /* only VIG0 and VIG1 */
+		if (manual) {
+			/* Resume the original automatic transfer only after selecting GOP,
+			 * while its identity mapping and both owned buffers are still valid. */
+			vm_offset_t intf = display_map.mdp + INTF1_OFFSET;
+			wr(intf + 0x288, display_map.sync_config & ~(1u << 20));
+			wr(display_map.mdp + 0x18, DISPLAY_PP_DONE);
+			/* The stock command encoder enables autorefresh instead of issuing
+			 * CTL_START. Connect TE after arming it, avoiding a premature frame. */
+			wr(intf + 0x2b4, display_map.autorefresh);
+			wr(intf + 0x288, display_map.sync_config);
+			tell("lemonade-display: manual restored sync=%u auto=%u\n",
+			    rd(intf, 0x288) == display_map.sync_config, rd(intf, 0x2b4) == display_map.autorefresh);
+			display_map.manual_active = false;
+		}
 		bool pixels = display_original_pixels();
-		if (!pixels) {
+		if (!pixels && !manual) {
 			/* A stalled automatic refresh must still latch the original source. */
 			wr(display_map.mdp + 0x1501c, 1);
 			pixels = display_original_pixels();
@@ -632,8 +653,83 @@ display_flip_buffer(unsigned n)
 	wr(display_map.mdp + 0x4014, DISPLAY_BUFFER_IOVA(n));
 	wr(display_map.mdp + 0x6014, DISPLAY_BUFFER_IOVA(n));
 	wr(display_map.mdp + 0x15018, 3);
+	if (display_map.manual_active) {
+		wr(display_map.mdp + 0x18, DISPLAY_PP_DONE);
+		wr(display_map.mdp + 0x1501c, 1);
+	}
 	ml_set_interrupts_enabled(enabled);
 	return !os_atomic_load(&display_stopping, acquire);
+}
+
+/* Linux DPU 7 command-mode handover: disconnect external TE, disable
+ * autorefresh, finish any active transfer, then reconnect TE. No panel/DSI
+ * timing is changed. A complete journal precedes the first register write. */
+static bool
+display_manual_begin(void)
+{
+	bool enabled;
+	if (!display_transaction_begin(&enabled)) return false;
+	vm_offset_t mdp = display_map.mdp, intf = mdp + INTF1_OFFSET;
+	uint32_t sync = rd(intf, 0x288), automatic = rd(intf, 0x2b4);
+	/* INTF_MUX selects the pingpong in bits [3:0]; firmware retains 0xf
+	 * in the unrelated [19:16] field. Preserve it, as the stock driver does. */
+	if (!display_map.flip_active || sync != 0x180085 || automatic != 0x80000001 || (rd(intf, 0x25c) & 0xf) != 0 ||
+	    (rd(mdp, 0x10) & DISPLAY_PP_DONE)) {
+		tell("lemonade-display: manual refused sync=%#x auto=%#x pp=%#x done_enable=%#x\n", sync, automatic, rd(intf, 0x25c), rd(mdp, 0x10));
+		ml_set_interrupts_enabled(enabled);
+		return false;
+	}
+	display_map.sync_config = sync; display_map.autorefresh = automatic;
+	display_map.manual_active = true;
+	wr(intf + 0x288, sync & ~(1u << 20));
+	wr(intf + 0x2b4, automatic & ~(1u << 31));
+	bool idle = false;
+	for (unsigned i = 0; i < 2000; i++) {
+		uint32_t line = rd(intf, 0x2b0) & 0xffff;
+		if (!line || line >= 2400) { idle = true; break; }
+		delay(50);
+	}
+	wr(intf + 0x288, sync);
+	wr(mdp + 0x18, DISPLAY_PP_DONE);
+	bool configured = idle && rd(intf, 0x288) == sync && rd(intf, 0x2b4) == (automatic & ~(1u << 31));
+	tell("lemonade-display: manual configured=%u idle=%u sync=%#x auto=%#x status=%#x\n",
+	    configured, idle, rd(intf, 0x288), rd(intf, 0x2b4), rd(mdp, 0x14));
+	ml_set_interrupts_enabled(enabled);
+	return configured && !os_atomic_load(&display_stopping, acquire);
+}
+
+static bool
+display_manual_idle(void)
+{
+	vm_offset_t mdp = display_map.mdp, intf = mdp + INTF1_OFFSET;
+	uint32_t first = rd(intf, 0xac);
+	delay(50000);
+	if (os_atomic_load(&display_stopping, acquire)) return false;
+	uint32_t frames = rd(intf, 0xac) - first, done = rd(mdp, 0x14) & DISPLAY_PP_DONE;
+	tell("lemonade-display: manual idle frames=%u done=%#x line=%u tear=%u\n",
+	    frames, done, rd(intf, 0xb0), rd(intf, 0x2b0));
+	return !frames && !done;
+}
+
+static bool
+display_manual_sample(uint32_t value[2], uint32_t first)
+{
+	vm_offset_t mdp = display_map.mdp, intf = mdp + INTF1_OFFSET;
+	for (unsigned i = 0; i < 2000; i++) {
+		if (os_atomic_load(&display_stopping, acquire)) return false;
+		uint32_t done = rd(mdp, 0x14) & DISPLAY_PP_DONE;
+		if (done == DISPLAY_PP_DONE && rd(intf, 0xb0) == 1 && rd(intf, 0x2b0) >= 2400) {
+			uint32_t frames = rd(intf, 0xac) - first;
+			for (unsigned n = 0; n < 2; n++) value[n] = rd(mdp, 0x44314 + 0x1000 * n);
+			if (frames == 1) return true;
+			tell("lemonade-display: manual frame count failed frames=%u\n", frames);
+			return false;
+		}
+		delay(50);
+	}
+	tell("lemonade-display: manual transfer failed frame_delta=%u done=%#x line=%u tear=%u start=%#x\n",
+	    rd(intf, 0xac) - first, rd(mdp, 0x14) & DISPLAY_PP_DONE, rd(intf, 0xb0), rd(intf, 0x2b0), rd(mdp, 0x1501c));
+	return false;
 }
 
 static bool
@@ -653,7 +749,7 @@ display_misr_sample(uint32_t value[2])
 }
 
 static void
-display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip)
+display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual)
 {
 	if (os_atomic_load(&display_stopping, acquire)) return;
 	display_map.mdp = mdp;
@@ -774,12 +870,21 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip)
 		first_frame = rd(mdp, INTF1_OFFSET + 0xac);
 		ml_set_interrupts_enabled(enabled);
 		if (initial_underrun) { tell("lemonade-display: flip refused: pre-existing underrun\n"); goto done; }
+		if (manual) {
+			if (!display_manual_begin() || !display_manual_idle()) goto done;
+			first_frame = rd(mdp, INTF1_OFFSET + 0xac);
+		}
 		for (; completed < loops; completed++) {
 			unsigned n = completed & 1;
 			if (lemonade_display_present_begin(&window) != 1) break;
+			uint32_t before = rd(mdp, INTF1_OFFSET + 0xac);
 			if (!display_flip_buffer(n)) return;
-			if (!display_misr_sample(sample) || (rd(cb, 0x58) & DISPLAY_FSR_FAULT) || rd(smmu, 0x48) ||
+			if (!(manual ? display_manual_sample(sample, before) : display_misr_sample(sample)) ||
+			    (rd(cb, 0x58) & DISPLAY_FSR_FAULT) || rd(smmu, 0x48) ||
 			    (rd(mdp, 0x14) & (1u << 26)) || rd(mdp, 0x4014) != DISPLAY_BUFFER_IOVA(n) || rd(mdp, 0x6014) != DISPLAY_BUFFER_IOVA(n)) break;
+			if (manual && (completed < 2 || completed + 1 == loops))
+				tell("lemonade-display: manual transfer n=%u frame_delta=%u done=%#x MISR=%#x/%#x\n",
+				    completed + 1, rd(mdp, INTF1_OFFSET + 0xac) - before, rd(mdp, 0x14) & DISPLAY_PP_DONE, sample[0], sample[1]);
 			if (completed < 2) {
 				checksums[n][0] = sample[0]; checksums[n][1] = sample[1];
 				tell("lemonade-display: buffer %u MISR=%#x/%#x flush=%#x\n", n, sample[0], sample[1], rd(mdp, 0x15018));
@@ -806,7 +911,7 @@ lemonade_display_init(void)
 	const void *value;
 	unsigned length;
 	if (!PE_parse_boot_argn("lemonade_display", &mode, sizeof(mode)) || !mode) return;
-	if (mode > 7 || SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	if (mode > 8 || SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
 	    SecureDTGetProperty(entry, "device_type", &value, &length) != kSuccess ||
 	    length != sizeof("lemonade") || memcmp(value, "lemonade", length)) {
 		tell("lemonade-display: refused: unsupported platform or mode\n");
@@ -854,7 +959,7 @@ lemonade_display_init(void)
 			report(mdp + pipes[n], block, "state", pipe_regs[i]);
 	}
 	if (mode == 5) { display_smmu_survey(); goto out; }
-	if (mode == 6 || mode == 7) { display_mapping_probe(mdp, mdss, mode == 7); goto out; }
+	if (mode >= 6 && mode <= 8) { display_mapping_probe(mdp, mdss, mode != 6, mode == 8); goto out; }
 	vm_offset_t intf = mdp + INTF1_OFFSET;
 	static const uint32_t intf_regs[] = { 0, 4, 8, 0xc, 0x1c, 0x24, 0x3c, 0x60,
 	    0x84, 0xa8, 0x26c, 0x280, 0x284, 0x288, 0x28c, 0x294, 0x29c, 0x2a0, 0x2b4 };

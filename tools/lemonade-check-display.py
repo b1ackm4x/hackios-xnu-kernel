@@ -38,16 +38,20 @@ def check(record, raw, interrupted=False):
                       r' fsr=' + NUMBER + r' global=' + NUMBER + r' underrun=(\d+)')
     clocks = re.findall(r'bus vote (\d+) restored enable=(\d+) expected=(\d+)', log)
     summaries = ('mapping samples=', 'mapping restore ', 'MISR control restored=', 'final irq_count=')
-    if mode == 'flip':
+    if mode in ('flip', 'manual'):
         summaries += ('source restore ', 'mapping cleanup ') if interrupted else ('flip completed=', 'source restore ')
+    if mode == 'manual':
+        summaries += ('manual configured=', 'manual idle ', 'manual restored ')
+        if not interrupted:
+            summaries += ('mapping cleanup ',)
     checks = {
         'lemonade_record': record.get('device') == 'lemonade',
-        'known_probe': mode == 'flip' if interrupted else mode in ('map', 'flip'),
+        'known_probe': mode in ('flip', 'manual') if interrupted else mode in ('map', 'flip', 'manual'),
         'log_integrity': hashlib.sha256(raw).hexdigest() == record.get('log_sha256'),
         'kernel_identified': bool(re.fullmatch(r'[0-9a-f]{64}', record.get('kernel_sha256', ''))),
         'returned_to_loader': bool(re.search(r'result: returned \d+ 0(?:\s|$)', record.get('result', ''))),
         'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|uncaught exception', text, re.I),
-        'matching_mode': 'lemonade_display=' + str({'map': 6, 'flip': 7}.get(mode)) in args,
+        'matching_mode': 'lemonade_display=' + str({'map': 6, 'flip': 7, 'manual': 8}.get(mode)) in args,
         'storage_writes_disabled': 'ufs_write=0' in args,
         'no_probe_failure': not re.search(r'refused|failed|context restore offset=', log),
         'unambiguous_results': all(sum(line.startswith('lemonade-display: ' + prefix) for line in lines) == 1
@@ -66,7 +70,7 @@ def check(record, raw, interrupted=False):
         checks['pre_cleanup_state_clean'] = not (cleanup[5] & FAULT_MASK) and cleanup[6:] == (0, 0)
     frames = None if interrupted else 0
     completed = None if interrupted else 0
-    if mode == 'flip':
+    if mode in ('flip', 'manual'):
         expected = [int(a.split('=', 1)[1]) for a in args if re.fullmatch(r'lemonade_display_flips=\d+', a)]
         flipped = numbers(r'flip completed=(\d+)/(\d+) frames=(\d+) MISR=' + NUMBER + '/' + NUMBER +
                           r' fsr=' + NUMBER + r' global=' + NUMBER + r' underrun=(\d+)')
@@ -104,6 +108,25 @@ def check(record, raw, interrupted=False):
             })
         if flipped:
             completed, frames = flipped[0], flipped[2]
+        if mode == 'manual':
+            configured = numbers(r'manual configured=(\d+) idle=(\d+) sync=' + NUMBER + r' auto=' + NUMBER + r' status=' + NUMBER)
+            idle = numbers(r'manual idle frames=(\d+) done=' + NUMBER + r' line=(\d+) tear=(\d+)')
+            restore = log.find('manual restored sync=1 auto=1')
+            source = log.find('source restore pixels=1')
+            checks.update({
+                'manual_transfer_configured': bool(configured and configured[:4] == (1, 1, 0x180085, 1) and
+                    not (configured[4] & ((1 << 26) | 0x300))),
+                'no_automatic_transfers': bool(idle and idle[:2] == (0, 0)),
+                'automatic_refresh_restored_before_pixels': 0 <= restore < source,
+            })
+            transfers = [numbers(r'manual transfer n=' + str(n) + r' frame_delta=(\d+) done=' + NUMBER +
+                                 r' MISR=' + NUMBER + '/' + NUMBER)
+                         for n in ((1, 2) if interrupted else (1, 2, expected[0] if len(expected) == 1 else 0))]
+            checks['master_pingpong_completed_with_matching_pixels'] = bool(all(transfers) and
+                all(t[:2] == (1, 0x100) and t[2:] == signatures[index % 2] for t, index in
+                    zip(transfers, (0, 1) if interrupted else (0, 1, (expected[0] - 1) % 2 if len(expected) == 1 else 0))))
+            if not interrupted:
+                checks['one_transfer_per_command'] = bool(flipped and flipped[0] == flipped[2])
     return {'passed': all(checks.values()), 'mode': mode, 'interrupted': interrupted, 'checks': checks,
             'completed_flips': completed, 'hardware_frames_during_flips': frames,
             'kernel_sha256': record.get('kernel_sha256'), 'log_sha256': record.get('log_sha256')}
