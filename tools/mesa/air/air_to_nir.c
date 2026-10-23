@@ -939,6 +939,13 @@ make_io_var(struct air_ctx *c, nir_variable_mode mode, const struct air_type *t,
    const struct glsl_type *gt;
    unsigned comps = air_nir_components(t);
    unsigned bits = air_nir_bit_size(c, t);
+   /* The VPC interface uses full component slots. Keep half precision inside
+    * each shader, but convert at its boundary: passing raw 16-bit varyings to
+    * ir3's standalone stage linker loses or aliases components on a6xx. */
+   if (bits == 16 && location >= VARYING_SLOT_VAR0 &&
+       ((c->nir->info.stage == MESA_SHADER_VERTEX && mode == nir_var_shader_out) ||
+        (c->nir->info.stage == MESA_SHADER_FRAGMENT && mode == nir_var_shader_in)))
+      bits = 32;
    if (air_type_is_float(air_type_scalar(t)))
       gt = bits == 16 ? glsl_f16vec_type(comps) : glsl_vec_type(comps);
    else
@@ -1910,6 +1917,11 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
          return translate_vertex_attribute(c, node, param, t);
       unsigned slot = VARYING_SLOT_VAR0 + (*next_varying)++;
       const char *name = md_key_str(node, "air.arg_name");
+      if (md_key(node, "air.arg_unused") >= 0) {
+         c->params[param] = air_val_ssa(c, nir_undef(&c->b, air_nir_components(t),
+                                                   air_nir_bit_size(c, t)));
+         return true;
+      }
       nir_variable *var = make_io_var(c, nir_var_shader_in, t, slot, name);
       var->data.driver_location = c->nir->num_inputs++;
       if (md_key(node, "air.flat") >= 0)
@@ -1920,9 +1932,16 @@ translate_input(struct air_ctx *c, const struct air_md *node, unsigned *next_var
          var->data.interpolation = INTERP_MODE_SMOOTH;
       var->data.centroid = md_key(node, "air.centroid") >= 0;
       var->data.sample = md_key(node, "air.sample") >= 0;
-      if (c->nir->info.stage == MESA_SHADER_FRAGMENT)
-         add_varying(c, name, slot, air_nir_components(t), node);
-      c->params[param] = air_val_ssa(c, nir_load_var(&c->b, var));
+      if (c->nir->info.stage == MESA_SHADER_FRAGMENT) {
+         const char *semantic = md_key_str(node, "air.fragment_input");
+         add_varying(c, semantic ? semantic : name, slot, air_nir_components(t), node);
+      }
+      nir_def *value = nir_load_var(&c->b, var);
+      unsigned bits = air_nir_bit_size(c, t);
+      if (value->bit_size != bits)
+         value = air_type_is_float(air_type_scalar(t)) ? nir_f2fN(&c->b, value, bits)
+                                                       : nir_u2uN(&c->b, value, bits);
+      c->params[param] = air_val_ssa(c, value);
       return true;
    }
 
@@ -2759,8 +2778,13 @@ emit_return(struct air_ctx *c, const struct air_inst *in)
             return air_error(c, "interface: field %u of the result has no output", i);
          if (!v->elems[i] || v->elems[i]->kind != AIR_VAL_SSA)
             continue; /* a field left undef is a target nothing writes */
-         nir_store_var(&c->b, c->outputs[i].var, v->elems[i]->def,
-                       BITFIELD_MASK(v->elems[i]->def->num_components));
+         nir_def *value = v->elems[i]->def;
+         unsigned bits = glsl_get_bit_size(c->outputs[i].var->type);
+         if (value->bit_size != bits)
+            value = air_type_is_float(air_type_scalar(rt->members[i]))
+               ? nir_f2fN(&c->b, value, bits) : nir_u2uN(&c->b, value, bits);
+         nir_store_var(&c->b, c->outputs[i].var, value,
+                       BITFIELD_MASK(value->num_components));
       }
       return true;
    }

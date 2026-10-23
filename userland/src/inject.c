@@ -277,6 +277,13 @@ say_the_fault(int signal_number, siginfo_t *info, void *context_in)
 	}
 	say("redwood: signal %d at %p, pc %#lx, lr %#lx, called from%s (unslid)\n", signal_number,
 	    info != NULL ? info->si_addr : NULL, pc - slide, lr - slide, frames);
+	/* Shared-cache subtraction cannot identify a fault in a separately loaded
+	 * Mesa/Metal image. Keep its image-relative location as well. */
+	Dl_info image = {0};
+	if (pc && dladdr((void *)pc, &image)) {
+		say("redwood: fault image %s offset %#lx symbol %s\n", image.dli_fname,
+		    pc - (uintptr_t)image.dli_fbase, image.dli_sname ? image.dli_sname : "?");
+	}
 	signal(signal_number, SIG_DFL);
 	raise(signal_number);
 }

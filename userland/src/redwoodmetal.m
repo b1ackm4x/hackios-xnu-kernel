@@ -80,8 +80,9 @@
  * `device` one the GPU cannot fetch from is refused by name, because the shader may write
  * it and a copy would lose the writes.
  *
- * What is NOT here, and is not pretended: heaps, blit encoders, events, multisample
- * resolve, and the rectangle half of a viewport -- the rest of docs/metal.md 10.8.
+ * The lemonade path also supplies viewport/scissor/raster state, GPU blit encoders,
+ * and color multisample resolve. Heaps, events, full texture views, depth resolve,
+ * and nonuniform threadgroups still need implementation and device validation.
  *
  * Every line this file writes carries the PROCESS it was written by
  * (`redwoodmetal[progname pid]:`, see rw_print): a driver is a library, four or five
@@ -95,6 +96,8 @@
 #import <objc/runtime.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
+#include <mach/mach_time.h>
+#include <pthread.h>
 
 #include "redwood_drawable.h"
 #include <stdarg.h>
@@ -307,6 +310,11 @@ struct rwa_draw {
 	unsigned vertex_buffer_table_count;
 	const struct rwa_buffer_bind *fragment_buffer_table;
 	unsigned fragment_buffer_table_count;
+	const double *viewport;
+	const uint64_t *scissor;
+	unsigned cull_mode, front_winding, fill_mode, depth_clip_mode;
+	float depth_bias, slope_scale, depth_bias_clamp;
+	const float *blend_color;
 };
 
 /*
@@ -471,6 +479,43 @@ rw_print(const char *fmt, ...)
 	fflush(stdout);
 }
 
+/* The existing --metrics boot mode also records bounded Metal timings.
+ * Aggregate locally so measuring many small draws does not flood the device log. */
+static pthread_once_t rw_metrics_once = PTHREAD_ONCE_INIT;
+static mach_timebase_info_data_t rw_metrics_timebase;
+static BOOL rw_metrics_active;
+static void rw_metrics_init(void)
+{
+	char args[2048]={0}; size_t size=sizeof(args)-1;
+	const char *key="touch_lat=2";
+	if(sysctlbyname("kern.bootargs",args,&size,NULL,0)==0) {
+		char *at=strstr(args,key);
+		rw_metrics_active=at&&(at==args||at[-1]==' ')&&
+			(at[strlen(key)]==' '||at[strlen(key)]=='\0');
+	}
+	mach_timebase_info(&rw_metrics_timebase);
+	if(rw_metrics_active)setenv("REDWOOD_AIR_TIMING","1",1);
+}
+static uint64_t rw_metrics_us(void)
+{
+	return mach_absolute_time()*rw_metrics_timebase.numer/rw_metrics_timebase.denom/1000;
+}
+static void rw_metrics_record(uint64_t wait, uint64_t work, uint64_t fence, NSUInteger commands)
+{
+	static pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZER;
+	static unsigned count; static uint64_t waits,works,fences,totalCommands,maximum;
+	pthread_mutex_lock(&mutex);
+	waits+=wait;works+=work;fences+=fence;totalCommands+=commands;
+	uint64_t total=wait+work+fence;if(total>maximum)maximum=total;
+	if(++count==60) {
+		rw_print("timing buffers=60 commands=%llu wait_us=%llu work_us=%llu fence_us=%llu max_us=%llu\n",
+			(unsigned long long)totalCommands,(unsigned long long)waits,(unsigned long long)works,
+			(unsigned long long)fences,(unsigned long long)maximum);
+		count=0;waits=works=fences=totalCommands=maximum=0;
+	}
+	pthread_mutex_unlock(&mutex);
+}
+
 static struct {
 	void *handle;
 	struct rwa_device *(*device_open)(char *, size_t);
@@ -522,6 +567,17 @@ static struct {
 							  char *, size_t);
 	void (*depth_stencil_destroy)(struct rwa_depth_stencil *);
 	int (*finish)(struct rwa_device *, char *, size_t);
+	int (*batch_begin)(struct rwa_device *, char *, size_t);
+	int (*batch_end)(struct rwa_device *, char *, size_t);
+	int (*buffer_fill)(struct rwa_buffer *, size_t, size_t, uint8_t, char *, size_t);
+	int (*buffer_copy)(struct rwa_buffer *, size_t, struct rwa_buffer *, size_t, size_t, char *, size_t);
+	int (*texture_copy)(struct rwa_texture *, unsigned, unsigned, const unsigned[3],
+	                    struct rwa_texture *, unsigned, unsigned, const unsigned[3], const unsigned[3], char *, size_t);
+	int (*texture_mipmap)(struct rwa_texture *, char *, size_t);
+	int (*texture_resolve)(struct rwa_texture *, unsigned, unsigned, struct rwa_texture *, unsigned, unsigned, char *, size_t);
+	int (*texture_clear)(struct rwa_texture *, unsigned, unsigned, unsigned, const double *, double, unsigned, char *, size_t);
+	int (*buffer_texture_copy)(struct rwa_buffer *, size_t, size_t, size_t, struct rwa_texture *, unsigned, unsigned,
+	                           const unsigned[3], const unsigned[3], unsigned, char *, size_t);
 } mesa;
 
 /* Loaded once, and its absence is an answer rather than a crash: without the GPU there is
@@ -581,6 +637,15 @@ mesa_available(void)
 	*(void **)&mesa.depth_stencil_create = dlsym(mesa.handle, "rwa_depth_stencil_create");
 	*(void **)&mesa.depth_stencil_destroy = dlsym(mesa.handle, "rwa_depth_stencil_destroy");
 	*(void **)&mesa.finish = dlsym(mesa.handle, "rwa_finish");
+	*(void **)&mesa.batch_begin = dlsym(mesa.handle, "rwa_batch_begin");
+	*(void **)&mesa.batch_end = dlsym(mesa.handle, "rwa_batch_end");
+	*(void **)&mesa.buffer_fill = dlsym(mesa.handle, "rwa_buffer_fill");
+	*(void **)&mesa.buffer_copy = dlsym(mesa.handle, "rwa_buffer_copy");
+	*(void **)&mesa.texture_copy = dlsym(mesa.handle, "rwa_texture_copy");
+	*(void **)&mesa.texture_mipmap = dlsym(mesa.handle, "rwa_texture_mipmap");
+	*(void **)&mesa.texture_resolve = dlsym(mesa.handle, "rwa_texture_resolve");
+	*(void **)&mesa.texture_clear = dlsym(mesa.handle, "rwa_texture_clear");
+	*(void **)&mesa.buffer_texture_copy = dlsym(mesa.handle, "rwa_buffer_texture_copy");
 	if (mesa.device_open == NULL || mesa.compute_create == NULL || mesa.dispatch == NULL ||
 	    mesa.texture_create == NULL || mesa.sampler_create == NULL) {
 		/* rwa_dispatch's arguments changed when textures were added to the contract, so
@@ -961,10 +1026,15 @@ struct gem_close { uint32_t handle, pad; };
 @interface RedwoodMetalCommandBuffer : _MTLCommandBuffer
 - (instancetype)initWithRedwoodQueue:(RedwoodMetalCommandQueue *)queue;
 - (void)recordWork:(RedwoodMetalWork *)work;
+- (void)runRecordedWork;
 - (id)device;
 @end
 
 @interface RedwoodMetalComputeEncoder : _MTLCommandEncoder
+- (instancetype)initWithRedwoodCommandBuffer:(RedwoodMetalCommandBuffer *)commandBuffer;
+@end
+
+@interface RedwoodMetalBlitEncoder : _MTLCommandEncoder
 - (instancetype)initWithRedwoodCommandBuffer:(RedwoodMetalCommandBuffer *)commandBuffer;
 @end
 
@@ -1022,6 +1092,8 @@ struct gem_close { uint32_t handle, pad; };
 	id color[8];
 	unsigned colorCount;
 	float clearColor[4];
+	double loadColor[4], loadDepth;
+	unsigned loadAspect;
 	BOOL clears;
 	/* the depth/stencil attachment of the pass, its two load actions and the state
 	 * bound when the draw was encoded. Separate flags per aspect because Metal keeps
@@ -1035,6 +1107,19 @@ struct gem_close { uint32_t handle, pad; };
 	unsigned stencilReference[2];
 	float depthRange[2];
 	BOOL hasDepthRange;
+	double viewportRect[4];
+	uint64_t scissorRect[4];
+	BOOL hasViewport, hasScissor;
+	unsigned cullMode, frontWinding, fillMode, depthClipMode;
+	float depthBias, slopeScale, depthBiasClamp;
+	float blendColor[4];
+	BOOL ownsResources;
+	unsigned blitOp;
+	id blitSource, blitDestination;
+	size_t blitSourceOffset, blitDestinationOffset, blitBytes, blitRowBytes, blitImageBytes;
+	unsigned blitSourceLevel, blitDestinationLevel, blitSourceSlice, blitDestinationSlice;
+	unsigned blitSourceOrigin[3], blitDestinationOrigin[3], blitSize[3];
+	uint8_t blitValue;
 	unsigned primitive, vertexStart, vertexCount;
 	/* the index buffer of an indexed draw and the three numbers that come with it in
 	 * the same Metal call; indexBuffer nil is -drawPrimitives:, and then vertexCount
@@ -1059,6 +1144,7 @@ struct gem_close { uint32_t handle, pad; };
 	unsigned count, textureCount, samplerCount;
 	unsigned groups[3], size[3];
 }
+- (void)retainResources;
 @end
 
 @interface RedwoodMetalTexture : _MTLResource {
@@ -1422,6 +1508,11 @@ struct gem_close { uint32_t handle, pad; };
 	 * name instead of this driver picking one of them. */
 	shape.depth_format = (unsigned)[descriptor depthAttachmentPixelFormat];
 	shape.stencil_format = (unsigned)[descriptor stencilAttachmentPixelFormat];
+	if (getenv("REDWOOD_METAL_TRACE")) {
+		rw_print("render vertex=%s fragment=%s colors=%u/%u samples=%u stencil=%u\n",
+		    vertex ? [[vertex name] UTF8String] : "generated", [[fragment name] UTF8String],
+		    shape.color_format[0], shape.color_format[1], shape.sample_count, shape.stencil_format);
+	}
 
 	/*
 	 * THE VERTEX DESCRIPTOR, which is what the window server asked this driver for and
@@ -2119,6 +2210,8 @@ struct gem_close { uint32_t handle, pad; };
 		return [self fail:error with:@"the function has no bitcode"];
 	}
 
+	if (getenv("REDWOOD_METAL_TRACE")) rw_print("compute function %s bytes=%lu class=%s\n", [[function name] UTF8String], (unsigned long)[air length], class_getName([function class]));
+
 	char why[512] = { 0 };
 	struct rwa_compute_info info = { 0 };
 	struct rwa_compute *compute = mesa.compute_create(_mesa, [air bytes], [air length],
@@ -2137,6 +2230,7 @@ struct gem_close { uint32_t handle, pad; };
 
 - (id)fail:(NSError **)error with:(NSString *)reason
 {
+	if (getenv("REDWOOD_METAL_TRACE")) rw_print("API failure: %s\n", reason.UTF8String);
 	if (error != NULL) {
 		*error = [NSError errorWithDomain:@"RedwoodMetal" code:1
 					 userInfo:@{ NSLocalizedDescriptionKey: reason }];
@@ -2209,23 +2303,11 @@ struct gem_close { uint32_t handle, pad; };
 - (BOOL)isDepth24Stencil8PixelFormatSupported { return NO; }
 
 /*
- * One sample, STILL -- and this one needs its reason written down, because it is now the
- * narrower statement of the two this driver could make.
- *
- * The compiler library does make multisample textures since docs/metal.md 10.34: the
- * Adreno gives 2 and 4 samples, a render pass of that count fills one, and a shader reads
- * one with read(coord, sample). So "count == 1" is no longer what this device CAN do with
- * a multisample texture.
- *
- * It is what this device can do with one for an APPLICATION, and that is what the
- * selector asks. An application that is told four samples makes a four-sample attachment
- * and then asks for its result in a one-sample texture -- MTLStoreActionMultisampleResolve,
- * or MTLRenderPassColorAttachmentDescriptor.resolveTexture -- and this driver has neither:
- * the contract stores what it has and resolves nothing. AppleMetalGLRenderer is exactly
- * such an application (its own six multisample fragment shaders are the ones 10.34 is
- * about), and a GL context given an MSAA config it cannot resolve is worse off than one
- * given none. So the yes waits for the resolve, and the measurement of the texture does
- * not wait for the yes: a test binds one without asking.
+ * Keep the generic capability query at one sample. Two/four-sample color render
+ * and resolve are now validated, including partial edge coverage; that does not
+ * yet establish depth/stencil resolve or every format an application could pick
+ * after a device-wide yes. The explicit acceptance tests exercise 2/4 samples
+ * independently of this conservative capability query.
  *
  * Note also that -supportsTextureSampleCount: is not a second answer to keep in step. It
  * is one instruction in _MTLDevice (0x181a17890) that tail-calls -supportsSampleCount:,
@@ -2397,17 +2479,15 @@ struct gem_close { uint32_t handle, pad; };
 - (BOOL)metalAssertionsEnabled { return _assertions; }
 - (void)setMetalAssertionsEnabled:(BOOL)enabled { _assertions = enabled; }
 
-/* Without this the device inherits _MTLDevice's own answer, which is "Apple GPU" -- true of
- * the code and false of the hardware. The name is Mesa's renderer string for this chip
- * (docs/air.md: `Adreno 7c+ Gen 3, chip 0x06030500`), and the identifier beside it is asked
- * of the kernel rather than written down, so a different phone says something different.
- * Nothing in Metal's registration reads this; a person reading a log does. */
+/* Report the renderer actually opened, plus the kernel's chip identifier. Hardcoding
+ * the original laptop GPU here mislabeled the OnePlus 9's Adreno 660 as a 7c+ Gen 3. */
 - (NSString *)name
 {
 	uint64_t chip = 0;
 
 	if (gpu_param(_gpu, 0x03, &chip)) {
-		return [NSString stringWithFormat:@"Adreno 7c+ Gen 3 (chip %#x, Redwood)",
+		const char *renderer = _mesa != NULL ? mesa.device_name(_mesa) : "Adreno";
+		return [NSString stringWithFormat:@"%s (chip %#x, Redwood)", renderer,
 				 (unsigned)(chip & 0xffffffffu)];
 	}
 	return @"Adreno (Redwood; the GPU is not started)";
@@ -3261,6 +3341,31 @@ struct gem_close { uint32_t handle, pad; };
 @end
 
 @implementation RedwoodMetalWork
+- (void)retainResources
+{
+	if (ownsResources) return;
+	[blitSource retain]; [blitDestination retain];
+	[render retain]; [pipeline retain]; [depth retain]; [depthStencilState retain]; [indexBuffer retain];
+	for (unsigned i = 0; i < colorCount; i++) [color[i] retain];
+	for (unsigned i = 0; i < vertexBufferCount; i++) [vertexBuffers[i] retain];
+	for (unsigned i = 0; i < count; i++) [buffers[i] retain];
+	for (unsigned i = 0; i < textureCount; i++) [textures[i] retain];
+	for (unsigned i = 0; i < samplerCount; i++) [samplers[i] retain];
+	ownsResources = YES;
+}
+- (void)dealloc
+{
+	if (ownsResources) {
+		[blitSource release]; [blitDestination release];
+		[render release]; [pipeline release]; [depth release]; [depthStencilState release]; [indexBuffer release];
+		for (unsigned i = 0; i < colorCount; i++) [color[i] release];
+		for (unsigned i = 0; i < vertexBufferCount; i++) [vertexBuffers[i] release];
+		for (unsigned i = 0; i < count; i++) [buffers[i] release];
+		for (unsigned i = 0; i < textureCount; i++) [textures[i] release];
+		for (unsigned i = 0; i < samplerCount; i++) [samplers[i] release];
+	}
+	[super dealloc];
+}
 @end
 
 /*
@@ -3618,6 +3723,15 @@ enum {
 	NSUInteger _protectionOptions;  /* what the window server asked for; see -setProtectionOptions: */
 }
 
++ (void)load
+{
+	/* _MTLCommandBuffer supplies methods but does not declare the public
+	 * protocol. MPS checks conformance before constructing its image cache. */
+	Protocol *protocol = objc_getProtocol("MTLCommandBuffer");
+	if (protocol && !class_conformsToProtocol(self, protocol))
+		class_addProtocol(self, protocol);
+}
+
 /*
  * The window server sends this to every command buffer it makes, and until it was answered the
  * boot of 22 October 01:51 ended it 78 times with
@@ -3748,7 +3862,15 @@ enum {
 /* The rest of what MTLCommandBuffer requires of a driver. Each declines rather than being
  * absent, for the reason the device's own 44 were answered: a missing selector aborts the
  * caller, and these are the four that were still missing. */
-- (id)blitCommandEncoder          { return nil; }
+- (id)blitCommandEncoder
+{
+	return [[[RedwoodMetalBlitEncoder alloc] initWithRedwoodCommandBuffer:self] autorelease];
+}
+- (id)blitCommandEncoderWithDescriptor:(id)descriptor
+{
+	(void)descriptor;
+	return [self blitCommandEncoder];
+}
 - (id)resourceStateCommandEncoder { return nil; }
 - (id)accelerationStructureCommandEncoder { return nil; }
 - (void)encodeSignalEvent:(id)event value:(uint64_t)value { (void)event; (void)value; }
@@ -3762,6 +3884,9 @@ enum {
 
 - (void)recordWork:(RedwoodMetalWork *)work
 {
+	/* A command buffer owns the objects referenced by its recorded commands, even
+	 * after an application releases them before commit. Keep them through its fence. */
+	[work retainResources];
 	[_work addObject:work];
 }
 
@@ -3771,12 +3896,51 @@ enum {
 - (void)commit
 {
 	char why[512] = { 0 };
-
+	pthread_once(&rw_metrics_once,rw_metrics_init);
+	uint64_t started=rw_metrics_active?rw_metrics_us():0,acquired=started,recorded=started;
+	if (getenv("REDWOOD_METAL_TRACE")) rw_print("commit work=%lu\n", (unsigned long)_work.count);
 	_status = RW_CB_COMMITTED;
+	struct rwa_device *device = [[_queue device] mesaDevice];
+	BOOL batched = mesa.batch_begin && mesa.batch_end;
+	if (batched && mesa.batch_begin(device, why, sizeof(why)) != 0) {
+		[self failWith:why];
+	} else {
+		if(rw_metrics_active)acquired=rw_metrics_us();
+		@try {
+			[self runRecordedWork];
+		} @catch (NSException *exception) {
+			(void)exception;
+			[self failWith:"command execution raised an Objective-C exception"];
+		} @finally {
+			if(rw_metrics_active)recorded=rw_metrics_us();
+			if (batched) {
+				int rc = mesa.batch_end(device, why, sizeof(why));
+				if (_status != RW_CB_ERROR) {
+					if (rc) [self failWith:why];
+					else _status = RW_CB_COMPLETED;
+				}
+			}
+		}
+	}
+	if(rw_metrics_active)rw_metrics_record(acquired-started,recorded-acquired,
+		rw_metrics_us()-recorded,_work.count);
+	/* Return the queue slot and release the context lock before callbacks can
+	 * create another command buffer, including after any failed command. */
+	[self redwoodReturnSlot];
+	[self redwoodDeliverHandlers];
+}
+
+- (void)runRecordedWork
+{
+	char why[512] = { 0 };
 	for (RedwoodMetalWork *work in _work) {
+		if (work->blitOp) {
+			if (![self runBlit:work why:why size:sizeof(why)]) return;
+			continue;
+		}
 		if (work->render != nil) {
 			if (![self runDraw:work why:why size:sizeof(why)]) {
-				goto done;
+				return;
 			}
 			continue;
 		}
@@ -3829,18 +3993,68 @@ enum {
 							      [NSString stringWithUTF8String:why] }]
 				     retain];
 			_status = RW_CB_ERROR;
-			goto done;
+			return;
 		}
 	}
 	_status = RW_CB_SCHEDULED;   /* submitted; the fence below is what makes it completed */
-done:
-	/* The queue's slot goes back here and on every way out of this method, a failed draw
-	 * included: a buffer that errored is as finished as one that drew, and a slot kept
-	 * because of an error would turn one bad draw into a queue that blocks for ever. */
-	[self redwoodReturnSlot];
-	/* and only then the handlers, so that a handler which makes the next command buffer
-	 * is not waiting for a slot this one still holds */
-	[self redwoodDeliverHandlers];
+}
+
+- (BOOL)runBlit:(RedwoodMetalWork *)w why:(char *)why size:(size_t)size
+{
+	int rc = -1;
+	snprintf(why, size, "unsupported or invalid Metal blit command %u", w->blitOp);
+	switch (w->blitOp) {
+	case 1:
+		if (mesa.buffer_fill && [w->blitDestination isKindOfClass:[RedwoodMetalBuffer class]])
+			rc = mesa.buffer_fill([w->blitDestination mesaBuffer], w->blitDestinationOffset, w->blitBytes, w->blitValue, why, size);
+		break;
+	case 2:
+		if (mesa.buffer_copy && [w->blitSource isKindOfClass:[RedwoodMetalBuffer class]] &&
+		    [w->blitDestination isKindOfClass:[RedwoodMetalBuffer class]])
+			rc = mesa.buffer_copy([w->blitSource mesaBuffer], w->blitSourceOffset,
+			                      [w->blitDestination mesaBuffer], w->blitDestinationOffset, w->blitBytes, why, size);
+		break;
+	case 3:
+		if (mesa.texture_copy && [w->blitSource isKindOfClass:[RedwoodMetalTexture class]] &&
+		    [w->blitDestination isKindOfClass:[RedwoodMetalTexture class]])
+			rc = mesa.texture_copy([w->blitSource mesaTexture], w->blitSourceLevel, w->blitSourceSlice, w->blitSourceOrigin,
+			                       [w->blitDestination mesaTexture], w->blitDestinationLevel, w->blitDestinationSlice,
+			                       w->blitDestinationOrigin, w->blitSize, why, size);
+		break;
+	case 4:
+		if (mesa.texture_mipmap && [w->blitDestination isKindOfClass:[RedwoodMetalTexture class]])
+			rc = mesa.texture_mipmap([w->blitDestination mesaTexture], why, size);
+		break;
+	case 5: rc = mesa.finish([[self device] mesaDevice], why, size); break;
+	case 9:
+		if (mesa.texture_clear && [w->blitDestination isKindOfClass:[RedwoodMetalTexture class]])
+			rc = mesa.texture_clear([w->blitDestination mesaTexture], w->blitDestinationLevel, w->blitDestinationSlice,
+			                        w->loadAspect, w->loadColor, w->loadDepth, w->clearStencil, why, size);
+		break;
+	case 8:
+		if (mesa.texture_resolve && [w->blitSource isKindOfClass:[RedwoodMetalTexture class]] &&
+		    [w->blitDestination isKindOfClass:[RedwoodMetalTexture class]])
+			rc = mesa.texture_resolve([w->blitSource mesaTexture], w->blitSourceLevel, w->blitSourceSlice,
+			                          [w->blitDestination mesaTexture], w->blitDestinationLevel, w->blitDestinationSlice, why, size);
+		break;
+	case 6: case 7: {
+		id buffer = w->blitOp == 6 ? w->blitSource : w->blitDestination;
+		id texture = w->blitOp == 6 ? w->blitDestination : w->blitSource;
+		if (mesa.buffer_texture_copy && [buffer isKindOfClass:[RedwoodMetalBuffer class]] &&
+		    [texture isKindOfClass:[RedwoodMetalTexture class]])
+			rc = mesa.buffer_texture_copy([buffer mesaBuffer], w->blitSourceOffset, w->blitRowBytes, w->blitImageBytes,
+			                              [texture mesaTexture], w->blitSourceLevel, w->blitSourceSlice,
+			                              w->blitSourceOrigin, w->blitSize, w->blitOp == 6, why, size);
+		break;
+	}
+	}
+	if (!rc) return YES;
+	[_error release];
+	_error = [[NSError errorWithDomain:@"RedwoodMetal" code:3 userInfo:@{
+		NSLocalizedDescriptionKey: [NSString stringWithUTF8String:why]}] retain];
+	_status = RW_CB_ERROR;
+	rw_print("blit failed: %s\n", why);
+	return NO;
 }
 
 /* A draw, built out of what the encoder recorded. Separate from the dispatch loop because the
@@ -3986,6 +4200,13 @@ done:
 		.vertex_buffer_table_count = work->vertexBufferCount,
 		.fragment_buffer_table = fragment_table,
 		.fragment_buffer_table_count = work->count,
+		.viewport = work->hasViewport ? work->viewportRect : NULL,
+		.scissor = work->hasScissor ? work->scissorRect : NULL,
+		.cull_mode = work->cullMode, .front_winding = work->frontWinding,
+		.fill_mode = work->fillMode, .depth_clip_mode = work->depthClipMode,
+		.depth_bias = work->depthBias, .slope_scale = work->slopeScale,
+		.depth_bias_clamp = work->depthBiasClamp,
+		.blend_color = work->blendColor,
 	};
 
 	if (work->indexBuffer != nil && draw.index_buffer == NULL) {
@@ -4005,6 +4226,7 @@ done:
 
 - (void)failWith:(const char *)reason
 {
+	[_error release];
 	_error = [[NSError errorWithDomain:@"RedwoodMetal" code:4
 				  userInfo:@{ NSLocalizedDescriptionKey:
 					      [NSString stringWithUTF8String:reason] }] retain];
@@ -4017,7 +4239,7 @@ done:
 {
 	char why[512] = { 0 };
 
-	if (_status == RW_CB_ERROR) {
+	if (_status == RW_CB_ERROR || _status == RW_CB_COMPLETED) {
 		return;
 	}
 	if (mesa.finish([[_queue device] mesaDevice], why, sizeof(why)) != 0) {
@@ -4045,9 +4267,8 @@ done:
  *
  * So handlers are kept and delivered where the work happens: -commit. A scheduled handler
  * is delivered as soon as the recorded work has been submitted, a completed handler after
- * the GPU fence has been paid for -- the fence is only taken when somebody is actually
- * waiting on one, because this driver's -commit is otherwise asynchronous and a fence
- * nobody asked for would cost every frame. A handler added after the fact is delivered at
+ * the GPU fence has been paid for. This implementation executes commit synchronously,
+ * grouping its draws and transfers before one completion fence. A handler added after the fact is delivered at
  * once rather than dropped: Metal calls that undefined, and losing it would be the kind of
  * silence this driver is trying to stop having.
  */
@@ -4155,10 +4376,123 @@ done:
 
 @end
 
+@implementation RedwoodMetalBlitEncoder {
+	RedwoodMetalCommandBuffer *_commandBuffer;
+}
+- (instancetype)initWithRedwoodCommandBuffer:(RedwoodMetalCommandBuffer *)commandBuffer
+{
+	self = [super initWithCommandBuffer:commandBuffer];
+	if (self) _commandBuffer = commandBuffer;
+	return self;
+}
+- (id)device { return [_commandBuffer device]; }
+- (void)record:(RedwoodMetalWork *)work
+{
+	[_commandBuffer recordWork:work]; [work release];
+}
+- (void)fillBuffer:(id)buffer range:(NSRange)range value:(uint8_t)value
+{
+	RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+	w->blitOp = 1; w->blitDestination = buffer; w->blitDestinationOffset = range.location;
+	w->blitBytes = range.length; w->blitValue = value; [self record:w];
+}
+- (void)copyFromBuffer:(id)source sourceOffset:(NSUInteger)sourceOffset
+	toBuffer:(id)destination destinationOffset:(NSUInteger)destinationOffset size:(NSUInteger)size
+{
+	RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+	w->blitOp = 2; w->blitSource = source; w->blitDestination = destination;
+	w->blitSourceOffset = sourceOffset; w->blitDestinationOffset = destinationOffset;
+	w->blitBytes = size; [self record:w];
+}
+- (void)copyFromTexture:(id)source sourceSlice:(NSUInteger)sourceSlice sourceLevel:(NSUInteger)sourceLevel
+	sourceOrigin:(MTLOrigin)sourceOrigin sourceSize:(MTLSize)size toTexture:(id)destination
+	destinationSlice:(NSUInteger)destinationSlice destinationLevel:(NSUInteger)destinationLevel
+	destinationOrigin:(MTLOrigin)destinationOrigin
+{
+	RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+	w->blitOp = 3; w->blitSource = source; w->blitDestination = destination;
+	NSUInteger values[] = {sourceSlice, sourceLevel, destinationSlice, destinationLevel,
+		sourceOrigin.x, sourceOrigin.y, sourceOrigin.z, destinationOrigin.x, destinationOrigin.y,
+		destinationOrigin.z, size.width, size.height, size.depth};
+	for (unsigned i = 0; i < sizeof(values)/sizeof(values[0]); i++)
+		if (values[i] > UINT32_MAX) w->blitOp = 99;
+	w->blitSourceSlice = sourceSlice; w->blitSourceLevel = sourceLevel;
+	w->blitDestinationSlice = destinationSlice; w->blitDestinationLevel = destinationLevel;
+	w->blitSourceOrigin[0] = sourceOrigin.x; w->blitSourceOrigin[1] = sourceOrigin.y; w->blitSourceOrigin[2] = sourceOrigin.z;
+	w->blitDestinationOrigin[0] = destinationOrigin.x; w->blitDestinationOrigin[1] = destinationOrigin.y;
+	w->blitDestinationOrigin[2] = destinationOrigin.z;
+	w->blitSize[0] = size.width; w->blitSize[1] = size.height; w->blitSize[2] = size.depth;
+	[self record:w];
+}
+- (void)transferBuffer:(id)buffer offset:(NSUInteger)offset row:(NSUInteger)row image:(NSUInteger)image
+	texture:(id)texture level:(NSUInteger)level slice:(NSUInteger)slice origin:(MTLOrigin)origin
+	size:(MTLSize)size upload:(BOOL)upload options:(NSUInteger)options
+{
+	RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+	w->blitOp = upload ? 6 : 7;
+	w->blitSource = upload ? buffer : texture; w->blitDestination = upload ? texture : buffer;
+	w->blitSourceOffset = offset; w->blitRowBytes = row; w->blitImageBytes = image;
+	w->blitSourceLevel = level; w->blitSourceSlice = slice;
+	w->blitSourceOrigin[0] = origin.x; w->blitSourceOrigin[1] = origin.y; w->blitSourceOrigin[2] = origin.z;
+	w->blitSize[0] = size.width; w->blitSize[1] = size.height; w->blitSize[2] = size.depth;
+	NSUInteger values[] = {level, slice, origin.x, origin.y, origin.z, size.width, size.height, size.depth};
+	for (unsigned i = 0; i < sizeof(values)/sizeof(values[0]); i++)
+		if (values[i] > UINT32_MAX) w->blitOp = 99;
+	if (options) w->blitOp = 99; /* packed depth/stencil aspects need their own layout */
+	[self record:w];
+}
+- (void)copyFromBuffer:(id)source sourceOffset:(NSUInteger)offset sourceBytesPerRow:(NSUInteger)row
+	sourceBytesPerImage:(NSUInteger)image sourceSize:(MTLSize)size toTexture:(id)destination
+	destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin
+{
+	[self transferBuffer:source offset:offset row:row image:image texture:destination level:level slice:slice
+		origin:origin size:size upload:YES options:0];
+}
+- (void)copyFromBuffer:(id)source sourceOffset:(NSUInteger)offset sourceBytesPerRow:(NSUInteger)row
+	sourceBytesPerImage:(NSUInteger)image sourceSize:(MTLSize)size toTexture:(id)destination
+	destinationSlice:(NSUInteger)slice destinationLevel:(NSUInteger)level destinationOrigin:(MTLOrigin)origin options:(NSUInteger)options
+{
+	[self transferBuffer:source offset:offset row:row image:image texture:destination level:level slice:slice
+		origin:origin size:size upload:YES options:options];
+}
+- (void)copyFromTexture:(id)source sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
+	sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)size toBuffer:(id)destination
+	destinationOffset:(NSUInteger)offset destinationBytesPerRow:(NSUInteger)row destinationBytesPerImage:(NSUInteger)image
+{
+	[self transferBuffer:destination offset:offset row:row image:image texture:source level:level slice:slice
+		origin:origin size:size upload:NO options:0];
+}
+- (void)copyFromTexture:(id)source sourceSlice:(NSUInteger)slice sourceLevel:(NSUInteger)level
+	sourceOrigin:(MTLOrigin)origin sourceSize:(MTLSize)size toBuffer:(id)destination
+	destinationOffset:(NSUInteger)offset destinationBytesPerRow:(NSUInteger)row destinationBytesPerImage:(NSUInteger)image options:(NSUInteger)options
+{
+	[self transferBuffer:destination offset:offset row:row image:image texture:source level:level slice:slice
+		origin:origin size:size upload:NO options:options];
+}
+- (void)generateMipmapsForTexture:(id)texture
+{
+	RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+	w->blitOp = 4; w->blitDestination = texture; [self record:w];
+}
+- (void)synchronizeResource:(id)resource
+{
+	RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+	w->blitOp = 5; w->blitSource = resource; [self record:w];
+}
+- (void)synchronizeTexture:(id)texture slice:(NSUInteger)slice level:(NSUInteger)level
+{
+	(void)slice; (void)level; [self synchronizeResource:texture];
+}
+- (void)endEncoding { [super endEncoding]; _commandBuffer = nil; }
+@end
+
 @implementation RedwoodMetalRenderEncoder {
 	RedwoodMetalCommandBuffer *_commandBuffer;   /* not retained: it owns the encoder */
 	RedwoodMetalRenderPipeline *_pipeline;
 	id _color[8];
+	id _resolve[8];
+	NSUInteger _storeAction[8], _resolveLevel[8], _resolveSlice[8];
+	BOOL _invalidResolve[8];
 	unsigned _colorCount;
 	float _clearColor[4];
 	BOOL _clears;
@@ -4170,6 +4504,12 @@ done:
 	unsigned _stencilReference[2];
 	float _depthRange[2];
 	BOOL _hasDepthRange;
+	double _viewportRect[4];
+	uint64_t _scissorRect[4];
+	BOOL _hasViewport, _hasScissor;
+	unsigned _cullMode, _frontWinding, _fillMode, _depthClipMode;
+	float _depthBias, _slopeScale, _depthBiasClamp;
+	float _blendColor[4];
 	id _vertexBuffers[RW_MAX_BUFFERS];
 	NSUInteger _vertexBufferOffsets[RW_MAX_BUFFERS];
 	id _fragmentBuffers[RW_MAX_BUFFERS];
@@ -4202,37 +4542,23 @@ done:
 		}
 		_color[i] = texture;
 		_colorCount = i + 1;
-		/*
-		 * A resolve is the one thing a multisample pass asks for that this driver
-		 * cannot do, and it is said out loud rather than ignored. The compiler
-		 * library makes multisample attachments and renders into them
-		 * (docs/metal.md 10.34), but it stores what it has and resolves nothing --
-		 * so for an application the one-sample texture it means to READ is the
-		 * resolveTexture, and that one would come back holding whatever it held
-		 * before. Silence here would read as a pass that drew nothing. The same
-		 * goes for MTLStoreActionMultisampleResolve on the depth attachment, which
-		 * nothing has asked for yet.
-		 */
-		NSUInteger store = [attachment storeAction];
-
-		if (store == MTLStoreActionMultisampleResolve ||
-		    store == MTLStoreActionStoreAndMultisampleResolve ||
-		    [attachment resolveTexture] != nil) {
-			rw_print("colour attachment %u asks for a multisample "
-			         "resolve (storeAction %lu%s) and this driver resolves nothing: "
-			         "the attachment itself is stored and the resolve texture is "
-			         "left as it was\n", i, (unsigned long)store,
-			         [attachment resolveTexture] != nil ? ", with a resolveTexture"
-								  : "");
-		}
-		if (i == 0 && [attachment loadAction] == MTLLoadActionClear) {
+		_storeAction[i] = [attachment storeAction];
+		_resolve[i] = [[attachment resolveTexture] retain];
+		_resolveLevel[i] = [attachment resolveLevel];
+		_resolveSlice[i] = [attachment resolveSlice];
+		/* Render-to-mip/layer is not yet represented by rwa_draw. Fail a requested
+		 * resolve explicitly rather than silently resolving the wrong source. */
+		_invalidResolve[i] = [attachment level] || [attachment slice] || [attachment depthPlane] ||
+		    [attachment resolveDepthPlane] || [attachment storeActionOptions] ||
+		    _resolveLevel[i] > UINT32_MAX || _resolveSlice[i] > UINT32_MAX;
+		if ([attachment loadAction] == MTLLoadActionClear) {
 			MTLClearColor c = [attachment clearColor];
-
-			_clearColor[0] = (float)c.red;
-			_clearColor[1] = (float)c.green;
-			_clearColor[2] = (float)c.blue;
-			_clearColor[3] = (float)c.alpha;
-			_clears = YES;
+			RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+			w->blitOp = [attachment level] > UINT32_MAX || [attachment slice] > UINT32_MAX || [attachment depthPlane] ? 99 : 9;
+			w->blitDestination = texture; w->blitDestinationLevel = (unsigned)[attachment level];
+			w->blitDestinationSlice = (unsigned)[attachment slice]; w->loadAspect = 1;
+			w->loadColor[0] = c.red; w->loadColor[1] = c.green; w->loadColor[2] = c.blue; w->loadColor[3] = c.alpha;
+			[_commandBuffer recordWork:w]; [w release];
 		}
 	}
 	/*
@@ -4259,13 +4585,16 @@ done:
 		         "pass is encoded with neither\n");
 	} else {
 		_depth = ztex != nil ? ztex : stex;
-		if (ztex != nil && [za loadAction] == MTLLoadActionClear) {
-			_clearDepth = (float)[za clearDepth];
-			_clearsDepth = YES;
-		}
-		if (stex != nil && [sa loadAction] == MTLLoadActionClear) {
-			_clearStencil = (unsigned)[sa clearStencil];
-			_clearsStencil = YES;
+		for (unsigned i=0;i<2;i++) {
+			MTLRenderPassAttachmentDescriptor *a = i ? (id)sa : (id)za;
+			if ([a texture] && [a loadAction] == MTLLoadActionClear) {
+				RedwoodMetalWork *w = [[RedwoodMetalWork alloc] init];
+				w->blitOp = [a level] > UINT32_MAX || [a slice] > UINT32_MAX || [a depthPlane] ? 99 : 9;
+				w->blitDestination = [a texture]; w->blitDestinationLevel = (unsigned)[a level];
+				w->blitDestinationSlice = (unsigned)[a slice]; w->loadAspect = i ? 4 : 2;
+				w->loadDepth = [za clearDepth]; w->clearStencil = (unsigned)[sa clearStencil];
+				[_commandBuffer recordWork:w]; [w release];
+			}
 		}
 	}
 	return self;
@@ -4368,42 +4697,30 @@ done:
 	}
 }
 
-/*
- * The viewport, of which exactly one half is served and the other half is declined, and the
- * split is the contract's: rwa_draw carries znear and zfar and carries no rectangle, because
- * the library's draw always covers the whole attachment.
- *
- * The depth range half is not a convenience either. It is the only thing in Metal that moves
- * a quad in z through this driver -- the generated vertex stage puts all four corners at
- * clip z = 0, and Metal's NDC z starts at 0 on the near plane, so the window depth of what
- * is drawn is znear exactly. Without it every draw here would be at depth 0 and no depth
- * test could ever be measured on the device.
- *
- * The rectangle half says so once, as it did before: a viewport silently ignored draws the
- * right triangle in the wrong place.
- */
+/* Snapshot both halves of the viewport per draw. Coordinates stay in double until
+ * the backend checks them; scissor sizes keep NSUInteger's 64 bits until clamping. */
 - (void)setViewport:(MTLViewport)viewport
 {
-	id first = _colorCount > 0 ? _color[0] : _depth;
-	NSUInteger w = [first width], h = [first height];
-
-	if ((viewport.originX != 0.0 || viewport.originY != 0.0 ||
-	     (NSUInteger)viewport.width != w || (NSUInteger)viewport.height != h) &&
-	    !_complained) {
-		rw_print("a viewport rectangle is not implemented (asked for "
-		         "%gx%g at %g,%g of a %lux%lu attachment); the draw covers the whole "
-		         "attachment\n", viewport.width, viewport.height, viewport.originX,
-		         viewport.originY, (unsigned long)w, (unsigned long)h);
-		_complained = YES;
-	}
+	_viewportRect[0] = viewport.originX;
+	_viewportRect[1] = viewport.originY;
+	_viewportRect[2] = viewport.width;
+	_viewportRect[3] = viewport.height;
+	_hasViewport = YES;
 	_depthRange[0] = (float)viewport.znear;
 	_depthRange[1] = (float)viewport.zfar;
 	_hasDepthRange = YES;
 }
-- (void)setScissorRect:(MTLScissorRect)rect           { (void)rect; }
-- (void)setCullMode:(NSUInteger)mode                  { (void)mode; }
-- (void)setFrontFacingWinding:(NSUInteger)winding     { (void)winding; }
-- (void)setTriangleFillMode:(NSUInteger)mode          { (void)mode; }
+- (void)setScissorRect:(MTLScissorRect)rect
+{
+	_scissorRect[0] = rect.x;
+	_scissorRect[1] = rect.y;
+	_scissorRect[2] = rect.width;
+	_scissorRect[3] = rect.height;
+	_hasScissor = YES;
+}
+- (void)setCullMode:(NSUInteger)mode                 { _cullMode = (unsigned)mode; }
+- (void)setFrontFacingWinding:(NSUInteger)winding    { _frontWinding = (unsigned)winding; }
+- (void)setTriangleFillMode:(NSUInteger)mode         { _fillMode = (unsigned)mode; }
 
 /* The depth/stencil state, recorded like the pipeline state: nothing runs at encode time,
  * so what a draw tests against is whatever was bound when that draw was encoded. A state
@@ -4421,7 +4738,7 @@ done:
 }
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a
 {
-	(void)r; (void)g; (void)b; (void)a;
+	_blendColor[0]=r; _blendColor[1]=g; _blendColor[2]=b; _blendColor[3]=a;
 }
 
 - (void)recordDraw:(NSUInteger)primitive
@@ -4488,6 +4805,15 @@ done:
 	work->depthRange[0] = _depthRange[0];
 	work->depthRange[1] = _depthRange[1];
 	work->hasDepthRange = _hasDepthRange;
+	memcpy(work->viewportRect, _viewportRect, sizeof(_viewportRect));
+	memcpy(work->scissorRect, _scissorRect, sizeof(_scissorRect));
+	work->hasViewport = _hasViewport;
+	work->hasScissor = _hasScissor;
+	work->cullMode = _cullMode; work->frontWinding = _frontWinding;
+	work->fillMode = _fillMode; work->depthClipMode = _depthClipMode;
+	work->depthBias = _depthBias; work->slopeScale = _slopeScale;
+	work->depthBiasClamp = _depthBiasClamp;
+	memcpy(work->blendColor, _blendColor, sizeof(_blendColor));
 	work->primitive = (unsigned)primitive;
 	work->vertexStart = (unsigned)start;
 	work->vertexCount = (unsigned)count;
@@ -4517,6 +4843,9 @@ done:
 	}
 	[_commandBuffer recordWork:work];
 	[work release];
+	/* A render-pass load action runs once. Re-clearing each recorded draw erases
+	 * everything drawn earlier in the encoder, including outside a new viewport. */
+	_clears = _clearsDepth = _clearsStencil = NO;
 }
 
 - (void)drawPrimitives:(NSUInteger)primitive
@@ -4759,23 +5088,20 @@ done:
 }
 - (void)setScissorRects:(const MTLScissorRect *)rects count:(NSUInteger)count
 {
-	(void)rects; (void)count;
-}
-/* MTLDepthClipModeClip is what the library's rasterizer state does (depth_clip_near and
- * _far are both on); MTLDepthClipModeClamp, which keeps a primitive outside the depth range
- * and clamps its z instead, is a different picture and the contract has nowhere to ask for
- * it. Said once rather than ignored. */
-- (void)setDepthClipMode:(NSUInteger)mode
-{
-	if (mode != MTLDepthClipModeClip && !_complained) {
-		rw_print("MTLDepthClipModeClamp is not implemented; this pass clips "
-		         "against the depth range instead of clamping to it\n");
+	if (count > 1 && !_complained) {
+		rw_print("%lu scissor rectangles are not implemented; the first one is taken\n",
+		         (unsigned long)count);
 		_complained = YES;
 	}
+	if (count >= 1 && rects != NULL) [self setScissorRect:rects[0]];
+}
+- (void)setDepthClipMode:(NSUInteger)mode
+{
+	_depthClipMode = (unsigned)mode;
 }
 - (void)setDepthBias:(float)bias slopeScale:(float)scale clamp:(float)clamp
 {
-	(void)bias; (void)scale; (void)clamp;
+	_depthBias = bias; _slopeScale = scale; _depthBiasClamp = clamp;
 }
 /* The stencil reference, which Metal keeps on the encoder and not in the state object, so
  * it is recorded with the draw like the clear colour. */
@@ -4810,7 +5136,7 @@ done:
  */
 - (void)setColorStoreAction:(NSUInteger)action atIndex:(NSUInteger)index
 {
-	(void)action; (void)index;
+	if (index < 8) _storeAction[index] = action;
 }
 - (void)setDepthStoreAction:(NSUInteger)action                 { (void)action; }
 - (void)setStencilStoreAction:(NSUInteger)action               { (void)action; }
@@ -5489,7 +5815,27 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
  */
 - (void)endEncoding
 {
+	if (_commandBuffer == nil) return;
+	/* Store actions happen after all draws, once per attachment, not after each
+	 * draw. The command buffer retains both textures through the GPU fence. */
+	for (unsigned i = 0; i < _colorCount; i++) {
+		if (_storeAction[i] != MTLStoreActionMultisampleResolve &&
+		    _storeAction[i] != MTLStoreActionStoreAndMultisampleResolve) continue;
+		RedwoodMetalWork *work = [[RedwoodMetalWork alloc] init];
+		work->blitOp = _invalidResolve[i] ? 99 : 8;
+		work->blitSource = _color[i]; work->blitDestination = _resolve[i];
+		work->blitDestinationLevel = (unsigned)_resolveLevel[i];
+		work->blitDestinationSlice = (unsigned)_resolveSlice[i];
+		[_commandBuffer recordWork:work]; [work release];
+	}
 	[super endEncoding];
+	_commandBuffer = nil;
+}
+
+- (void)dealloc
+{
+	for (unsigned i = 0; i < 8; i++) [_resolve[i] release];
+	[super dealloc];
 }
 
 @end
@@ -5613,6 +5959,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 
 - (void)dispatchThreadgroups:(MTLSize)groups threadsPerThreadgroup:(MTLSize)size
 {
+	if (getenv("REDWOOD_METAL_TRACE")) rw_print("dispatch %lux%lux%lu groups, %lux%lux%lu threads, pipeline=%p\n", (unsigned long)groups.width, (unsigned long)groups.height, (unsigned long)groups.depth, (unsigned long)size.width, (unsigned long)size.height, (unsigned long)size.depth, _pipeline);
 	RedwoodMetalWork *work = [[RedwoodMetalWork alloc] init];
 
 	if (_pipeline == nil || _complained) {

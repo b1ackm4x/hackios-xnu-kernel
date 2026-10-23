@@ -7278,6 +7278,9 @@ sweep_every_class(void)
 	}
 }
 
+extern int lemonade_metal_raster(id<MTLDevice>, const char *);
+extern int lemonade_metal_features(id<MTLDevice>, const char *);
+
 int
 main(int argc, char **argv)
 {
@@ -7300,8 +7303,16 @@ main(int argc, char **argv)
 	bool picture = false;
 	int picture_seconds = 60;
 	bool timing = false;
+	bool raster = false;
+	bool features = false;
 	unsigned timing_repeats = 32;
 	int next = 1;
+	if (argc > next && strcmp(argv[next], "--raster-state") == 0) {
+		raster = true;
+		next++;
+	}
+
+	if (argc > next && strcmp(argv[next], "--features") == 0) { features = true; next++; }
 
 	/*
 	 * --sweep: ask Metal for the system's device and count what every class of the driver
@@ -7588,6 +7599,8 @@ have_device:
 		return 1;
 	}
 	printf("drvtest: it calls itself \"%s\"\n", [[sys name] UTF8String]);
+	if (raster) return lemonade_metal_raster(sys, metallib);
+	if (features) return lemonade_metal_features(sys, metallib);
 
 	/* What the device still owes, counted by the runtime on the device rather than guessed
 	 * from the cache: every method the two protocols require, asked of the real object. An

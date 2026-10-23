@@ -231,9 +231,10 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -dynamiclib -install_name /redwood/lib/libredwoodmetal.dylib \
 			-framework Foundation -framework IOKit -framework Metal -lobjc \
 			-o obj/libredwoodmetal.dylib src/redwoodmetal.m src/redwooddrawable.m
-		# and the program that walks Metal's own steps 4 and 5 against it
-		$DYN -framework Foundation -framework IOKit -framework Metal -lobjc \
-			-o obj/metal_drv_test src/metal_drv_test.m
+		# and the program that walks Metal's own steps 4 and 5 against it;
+		# the lemonade feature suite also reads shared IOSurface pixels directly
+		$DYN -framework Foundation -framework IOKit -framework Metal -framework IOSurface -lobjc \
+			-o obj/metal_drv_test src/metal_drv_test.m src/lemonade_metal_raster.m src/lemonade_metal_features.m
 		# An application of this port's own: a window, a CAMetalLayer, a drawable and a
 		# triangle in it (src/triangle_app.m). UIKit because that is the point -- every
 		# Metal result so far is from inside one of Apple's daemons, and this is an

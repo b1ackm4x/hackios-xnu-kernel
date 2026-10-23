@@ -578,6 +578,14 @@ int rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings 
 /* Wait for everything dispatched so far, with a real fence. 0, or -1 and a sentence. */
 int rwa_finish(struct rwa_device *device, char *why, size_t why_size);
 
+/* Optional command-buffer scope. begin holds the context lock until end on the
+ * same thread. GPU commands preserve ordering without per-draw CPU waits; end
+ * always submits and waits with a real fence, also after an earlier API error.
+ * Calls must be balanced and cannot nest. Keep every encoded resource alive
+ * through end. CPU reads and explicit rwa_finish remain synchronous. */
+int rwa_batch_begin(struct rwa_device *device, char *why, size_t why_size);
+int rwa_batch_end(struct rwa_device *device, char *why, size_t why_size);
+
 /*
  * ---------------------------------------------------------------------------------------
  * Drawing.
@@ -786,11 +794,8 @@ struct rwa_vertex_layout {
  * end.
  *
  * It is in the SHAPE because that is where Metal puts it -- blend state is compiled into
- * the pipeline, not set on the encoder -- with ONE exception that is therefore refused:
- * the four factors that read Metal's BLEND COLOUR
- * (-setBlendColorRed:green:blue:alpha:) are encoder state, this contract has nowhere to
- * carry it, and the driver's own setter is a stub. See the refusal list at
- * rwa_render_create.
+ * the pipeline, not set on the encoder. The four constant blend factors read
+ * encoder state supplied separately as rwa_draw.blend_color.
  */
 struct rwa_color_blend {
 	unsigned blending_enabled;               /* isBlendingEnabled */
@@ -1035,15 +1040,6 @@ void rwa_depth_stencil_destroy(struct rwa_depth_stencil *state);
  * blend fields were added to end, so each is a sentence with the caller's own words in
  * it:
  *
- *   - MTLBlendFactorBlendColor, OneMinusBlendColor, BlendAlpha and OneMinusBlendAlpha
- *     (11-14). Gallium has all four (PIPE_BLENDFACTOR_CONST_COLOR and friends) and so
- *     does the hardware; what nothing here has is the COLOUR. Metal keeps it on the
- *     encoder, -setBlendColorRed:green:blue:alpha:, so it is not pipeline state and not
- *     in this shape -- and the driver's own setter is a stub that drops it. Honouring
- *     them would blend against the zero a Gallium context starts with, which is
- *     "multiply by nothing": the layer would vanish instead of failing. Serving them is
- *     one float[4] in rwa_draw and one call to set_blend_color, on the day something
- *     asks.
  *   - MTLBlendFactorSource1Color, OneMinusSource1Color, Source1Alpha and
  *     OneMinusSource1Alpha (15-18): dual-source blending, where the second factor comes
  *     from a SECOND fragment output at [[color(0), index(1)]]. Neither this contract nor
@@ -1301,10 +1297,38 @@ struct rwa_draw {
 	unsigned vertex_buffer_table_count;
 	const struct rwa_buffer_bind *fragment_buffer_table;
 	unsigned fragment_buffer_table_count;
+	/* Per-draw Metal raster state. NULL selects the whole attachment. Appended so
+	 * existing fields keep their offsets; the frontend and AIR library are paired. */
+	const double *viewport;       /* originX, originY, width, height */
+	const uint64_t *scissor;      /* x, y, width, height; clipped without overflow */
+	unsigned cull_mode, front_winding, fill_mode, depth_clip_mode;
+	float depth_bias, slope_scale, depth_bias_clamp;
+	const float *blend_color;     /* NULL means Metal's default {0,0,0,0}. */
 };
 
 int rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
 		    char *why, size_t why_size);
+
+/* Ordered GPU transfer operations. Validation precedes every resource mutation;
+ * success includes completion of the same bounded fence used by draws. */
+int rwa_buffer_fill(struct rwa_buffer *, size_t, size_t, uint8_t, char *, size_t);
+int rwa_buffer_copy(struct rwa_buffer *, size_t, struct rwa_buffer *, size_t,
+                    size_t, char *, size_t);
+int rwa_texture_copy(struct rwa_texture *, unsigned, unsigned, const unsigned[3],
+                     struct rwa_texture *, unsigned, unsigned, const unsigned[3],
+                     const unsigned[3], char *, size_t);
+int rwa_texture_mipmap(struct rwa_texture *, char *, size_t);
+/* Resolve an entire colour attachment after the final draw of its render pass. */
+int rwa_texture_resolve(struct rwa_texture *, unsigned, unsigned,
+                        struct rwa_texture *, unsigned, unsigned, char *, size_t);
+int rwa_buffer_texture_copy(struct rwa_buffer *, size_t, size_t, size_t,
+                            struct rwa_texture *, unsigned, unsigned,
+                            const unsigned[3], const unsigned[3], unsigned,
+                            char *, size_t);
+
+/* Deferred attachment load action. aspect: colour=1, depth=2, stencil=4. */
+int rwa_texture_clear(struct rwa_texture *, unsigned level, unsigned slice, unsigned aspect,
+                      const double color[4], double depth, unsigned stencil, char *, size_t);
 
 #ifdef __cplusplus
 }

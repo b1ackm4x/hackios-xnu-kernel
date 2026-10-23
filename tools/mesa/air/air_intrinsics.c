@@ -214,7 +214,12 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
    if (!strcmp(op, "fast_fabs") || !strcmp(op, "fabs")) {
       r = nir_fabs(&c->b, a[0]);
    } else if (!strcmp(op, "fast_sqrt") || !strcmp(op, "sqrt")) {
-      r = nir_fsqrt(&c->b, a[0]);
+      /* Evaluate narrow square roots in full precision before rounding once.
+       * Adreno's half reciprocal/root sequence otherwise moves analytic mask
+       * edges by several 8-bit coverage steps relative to native Metal. */
+      r = a[0]->bit_size == 16
+         ? nir_f2f16(&c->b, nir_fsqrt(&c->b, nir_f2f32(&c->b, a[0])))
+         : nir_fsqrt(&c->b, a[0]);
    } else if (!strcmp(op, "fast_rsqrt") || !strcmp(op, "rsqrt")) {
       r = nir_frsq(&c->b, a[0]);
    } else if (!strcmp(op, "fast_floor") || !strcmp(op, "floor")) {
@@ -440,7 +445,11 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       r = nir_fadd(&c->b, a[0],
                    nir_fmul(&c->b, a[2], nir_fsub(&c->b, a[1], a[0])));
    } else if (!strcmp(op, "dot")) {
-      r = nir_fdot(&c->b, a[0], a[1]);
+      /* Half inputs still produce a half result, but accumulation must not
+       * round each component's product before the sum. */
+      r = a[0]->bit_size == 16
+         ? nir_f2f16(&c->b, nir_fdot(&c->b, nir_f2f32(&c->b, a[0]), nir_f2f32(&c->b, a[1])))
+         : nir_fdot(&c->b, a[0], a[1]);
    } else if (!strcmp(op, "fast_fmin") || !strcmp(op, "fmin") || !strcmp(op, "min")) {
       r = is_float ? nir_fmin(&c->b, a[0], a[1])
                    : (is_signed ? nir_imin(&c->b, a[0], a[1]) : nir_umin(&c->b, a[0], a[1]));
@@ -492,12 +501,28 @@ math_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n, 
       r = nir_bitfield_insert(&c->b, a[0], a[1], nir_u2u32(&c->b, a[2]),
                               nir_u2u32(&c->b, a[3]));
    } else if (!strcmp(op, "dfdx")) {
-      r = nir_ddx(&c->b, a[0]);
+      if (c->nir->info.stage == MESA_SHADER_FRAGMENT)
+         c->nir->info.fs.needs_quad_helper_invocations = true;
+      /* ir3 emits the Adreno derivative instruction with TYPE_F32. Half
+       * operands must be converted before it, then rounded at the AIR result
+       * boundary; passing half registers directly produces unrelated values. */
+      r = nir_ddx(&c->b, a[0]->bit_size == 16 ? nir_f2f32(&c->b, a[0]) : a[0]);
+      if (a[0]->bit_size == 16) r = nir_f2f16(&c->b, r);
    } else if (!strcmp(op, "dfdy")) {
-      r = nir_ddy(&c->b, a[0]);
+      if (c->nir->info.stage == MESA_SHADER_FRAGMENT)
+         c->nir->info.fs.needs_quad_helper_invocations = true;
+      r = nir_ddy(&c->b, a[0]->bit_size == 16 ? nir_f2f32(&c->b, a[0]) : a[0]);
+      if (a[0]->bit_size == 16) r = nir_f2f16(&c->b, r);
    } else if (!strcmp(op, "fwidth")) {
-      r = nir_fadd(&c->b, nir_fabs(&c->b, nir_ddx(&c->b, a[0])),
-                   nir_fabs(&c->b, nir_ddy(&c->b, a[0])));
+      /* AIR does not run nir_shader_gather_info. ir3 needs this flag to
+       * execute the otherwise uncovered lanes at triangle edges; without
+       * them a derivative reads missing neighbours and cracks analytic AA. */
+      if (c->nir->info.stage == MESA_SHADER_FRAGMENT)
+         c->nir->info.fs.needs_quad_helper_invocations = true;
+      nir_def *value = a[0]->bit_size == 16 ? nir_f2f32(&c->b, a[0]) : a[0];
+      r = nir_fadd(&c->b, nir_fabs(&c->b, nir_ddx(&c->b, value)),
+                   nir_fabs(&c->b, nir_ddy(&c->b, value)));
+      if (a[0]->bit_size == 16) r = nir_f2f16(&c->b, r);
    } else if (!strcmp(op, "get_simd_width") || !strcmp(op, "get_thread_execution_width")) {
       r = nir_load_subgroup_size(&c->b);
    } else if (!strcmp(op, "all")) {
@@ -932,6 +957,9 @@ simd_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *n,
       return true;
    }
    *handled = true;
+
+   if (!strncmp(op, "quad_", 5) && c->nir->info.stage == MESA_SHADER_FRAGMENT)
+      c->nir->info.fs.needs_quad_helper_invocations = true;
 
    if (!strcmp(op, "simd_is_helper_thread")) {
       /* Exact, and width-independent: a helper thread is one whose results
@@ -1645,9 +1673,27 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
       nir_def *coord = tex_coord_and_layer(c, in, &t, n, &arg, ncoord);
       if (!coord)
          return false;
+      /* A write returns void. Its numeric type belongs to the value operand,
+       * not the call's return type: treating void as uint made float/half image
+       * stores emit typed unsigned writes on Adreno and corrupted every pixel. */
+      const struct air_type *stored_type = in->operands[arg]->type;
+      nir_alu_type source_type = tex_dest_type(c, stored_type, n);
       nir_def *value = air_get_ssa(c, in->operands[arg++]);
       if (!value)
          return false;
+      if (!air_type_is_float(air_type_scalar(stored_type))) {
+         /* LLVM integers have no signedness. Metal's texture declaration does. */
+         for (unsigned i=0;i<c->info->num_resources;i++) {
+            const struct air_resource *r=&c->info->resources[i];
+            if (r->kind != AIR_RESOURCE_IMAGE || r->index != tex.binding || !r->type_name) continue;
+            const char *element=strchr(r->type_name, '<');
+            if (element) {
+               element++; while (*element == ' ') element++;
+               bool sign = !strncmp(element,"int",3) || !strncmp(element,"short",5) || !strncmp(element,"char",4);
+               source_type = (sign ? nir_type_int : nir_type_uint) | value->bit_size;
+            }
+         }
+      }
       uint64_t lod;
       if (!tex_flag(c, in, arg, &lod))
          return false;
@@ -1662,7 +1708,7 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
                       nir_imm_int(&c->b, 0), nir_pad_vector(&c->b, value, 4),
                       nir_imm_int(&c->b, 0),
                       .image_dim = t.dim, .image_array = t.is_array,
-                      .src_type = dest_type);
+                      .src_type = source_type);
       return true;
    }
 
@@ -1881,6 +1927,12 @@ texture_op(struct air_ctx *c, const struct air_inst *in, const struct air_name *
    }
    for (unsigned i = 0; i < nsrc; i++)
       tex_instr->src[i] = srcs[i];
+
+   /* Implicit texture LOD uses the same neighbouring fragment lanes as
+    * dfdx/dfdy, even when the AIR contains no explicit derivative call. */
+   if (c->nir->info.stage == MESA_SHADER_FRAGMENT &&
+       nir_tex_instr_has_implicit_derivative(tex_instr))
+      c->nir->info.fs.needs_quad_helper_invocations = true;
 
    const struct air_type *value_type = in->base.type;
    if (value_type->kind == AIR_TYPE_STRUCT && value_type->num_members)

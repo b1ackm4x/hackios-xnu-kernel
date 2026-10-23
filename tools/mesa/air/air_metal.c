@@ -24,6 +24,7 @@
  * reason in an NSError that an application will show a person.
  */
 
+#include <pthread.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -59,6 +60,9 @@
 #include "util/u_inlines.h"
 #include "util/u_sampler.h"
 #include "util/u_debug.h"
+#include "util/os_time.h"
+#include <float.h>
+#include <math.h>
 
 /* Two seconds, the same wait air_run uses, and for the same reason: a dispatch nobody
  * waited for is not a result, and on this GPU one timeout wedges the core for the rest
@@ -75,9 +79,38 @@
  */
 #define RWA_MAX_TEXTURES 16
 
+/* Gallium contexts are externally synchronized. Metal allows resource creation,
+ * reads and command-buffer commits on different threads, all of which reach this
+ * one context. Serialize the public ABI, including NIR's process-wide type state.
+ * Recursive locking permits public helpers to call one another. CPU access through
+ * a returned buffer map still follows Metal's application synchronization rules. */
+static pthread_mutex_t rwa_api_mutex;
+static pthread_once_t rwa_api_once = PTHREAD_ONCE_INIT;
+static void rwa_api_init(void)
+{
+   pthread_mutexattr_t attr;
+   pthread_mutexattr_init(&attr);
+   pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+   pthread_mutex_init(&rwa_api_mutex, &attr);
+   pthread_mutexattr_destroy(&attr);
+}
+static void rwa_api_unlock(int *held)
+{
+   if (*held) pthread_mutex_unlock(&rwa_api_mutex);
+}
+#define RWA_API_GUARD() \
+   pthread_once(&rwa_api_once, rwa_api_init); \
+   pthread_mutex_lock(&rwa_api_mutex); \
+   int rwa_api_held __attribute__((cleanup(rwa_api_unlock))) = 1
+
 struct rwa_device {
    struct pipe_screen *screen;
    struct pipe_context *pipe;
+   bool batch_active, batch_requires_fence;
+   pthread_t batch_owner;
+   bool timing;
+   unsigned timed_draws;
+   uint64_t draw_times[6], uniform_upload_bytes, indexed_vertices;
 
    /* NIR's options for this screen, asked once: the translator needs them to know what
     * the consumer can be handed (what it may leave for the backend to lower).
@@ -420,6 +453,7 @@ finalize_for_gallium(nir_shader *nir, struct pipe_screen *screen)
 struct rwa_device *
 rwa_device_open(char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct rwa_device *device = calloc(1, sizeof(*device));
    if (!device) {
       say(why, why_size, "out of memory making a device");
@@ -571,6 +605,7 @@ fail:
 void
 rwa_device_close(struct rwa_device *device)
 {
+   RWA_API_GUARD();
    if (!device)
       return;
    if (device->default_sampler)
@@ -584,6 +619,7 @@ rwa_device_close(struct rwa_device *device)
 const char *
 rwa_device_name(struct rwa_device *device)
 {
+   RWA_API_GUARD();
    /* Mesa's own name for the chip it opened ("Adreno 7c+ Gen 3"), which is where
     * -[RedwoodMetalDevice name] gets the half it does not read out of the kernel.
     */
@@ -594,6 +630,7 @@ rwa_device_name(struct rwa_device *device)
 struct rwa_buffer *
 rwa_buffer_create(struct rwa_device *device, size_t size, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    if (size == 0 || size > UINT32_MAX) {
       say(why, why_size, "a buffer of %zu bytes: Gallium sizes a buffer in 32 bits and "
                          "zero is not a buffer", size);
@@ -662,18 +699,21 @@ rwa_buffer_create(struct rwa_device *device, size_t size, char *why, size_t why_
 void *
 rwa_buffer_map(struct rwa_buffer *buffer)
 {
+   RWA_API_GUARD();
    return buffer->map;
 }
 
 size_t
 rwa_buffer_size(struct rwa_buffer *buffer)
 {
+   RWA_API_GUARD();
    return buffer->size;
 }
 
 void
 rwa_buffer_destroy(struct rwa_buffer *buffer)
 {
+   RWA_API_GUARD();
    if (!buffer)
       return;
    /* Out of every argument-buffer record that named it, and then its own records go:
@@ -858,7 +898,10 @@ static const struct rwa_pixel_format rwa_pixel_formats[] = {
     */
    { 250, "MTLPixelFormatDepth16Unorm",    PIPE_FORMAT_Z16_UNORM },
    { 252, "MTLPixelFormatDepth32Float",    PIPE_FORMAT_Z32_FLOAT },
-   { 253, "MTLPixelFormatStencil8",        PIPE_FORMAT_S8_UINT },
+   /* a6xx has no stencil-only attachment. Keep a private packed backing;
+    * its sampler view selects only the stencil byte below. Metal still exposes
+    * one stencil aspect, and CPU/buffer transfers requiring an aspect are refused. */
+   { 253, "MTLPixelFormatStencil8",        PIPE_FORMAT_Z32_FLOAT_S8X24_UINT },
    { 260, "MTLPixelFormatDepth32Float_Stencil8", PIPE_FORMAT_Z32_FLOAT_S8X24_UINT },
 };
 
@@ -1351,6 +1394,7 @@ texture_of_shape(struct rwa_device *device, const struct rwa_texture_shape *shap
       .target = target, .format = fmt->pipe,
       .width0 = width, .height0 = height, .depth0 = depth,
       .array_size = array_size, .last_level = mips - 1, .nr_samples = query_samples,
+      .nr_storage_samples = query_samples,
       .bind = bind, .usage = PIPE_USAGE_DEFAULT };
 
    if (import) {
@@ -1463,6 +1507,7 @@ struct rwa_texture *
 rwa_texture_create(struct rwa_device *device, const struct rwa_texture_shape *shape,
                    char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    return texture_of_shape(device, shape, NULL, why, why_size);
 }
 
@@ -1471,6 +1516,7 @@ rwa_texture_from_surface(struct rwa_device *device, const struct rwa_texture_sha
                          int surface_id, unsigned offset, unsigned row_bytes, char *why,
                          size_t why_size)
 {
+   RWA_API_GUARD();
    /*
     * A surface ID of zero is not a surface. IOSurfaceGetID answers 0 for one that was
     * never made shareable, and the kernel's table has nothing at 0 either, so this would
@@ -1492,6 +1538,7 @@ rwa_texture_from_surface(struct rwa_device *device, const struct rwa_texture_sha
 void
 rwa_texture_destroy(struct rwa_texture *texture)
 {
+   RWA_API_GUARD();
    if (!texture)
       return;
    argbuf_scrub(texture->device, NULL, texture, NULL);
@@ -1501,8 +1548,7 @@ rwa_texture_destroy(struct rwa_texture *texture)
     * the moment the last reference went, which is the same trap delete_compute_state
     * below is about.
     */
-   if (texture->view)
-      texture->device->pipe->sampler_view_destroy(texture->device->pipe, texture->view);
+   pipe_sampler_view_reference(&texture->view, NULL);
    pipe_resource_reference(&texture->res, NULL);
    free(texture);
 }
@@ -1549,7 +1595,8 @@ texture_box(const struct rwa_texture *texture, unsigned level, unsigned layer,
       say(why, why_size, "a region of %ux%ux%u texels has no texels in it", s[0], s[1], s[2]);
       return false;
    }
-   if (o[0] + s[0] > w || o[1] + s[1] > h || o[2] + s[2] > d) {
+   if (o[0] > w || s[0] > w - o[0] || o[1] > h || s[1] > h - o[1] ||
+       o[2] > d || s[2] > d - o[2]) {
       say(why, why_size, "a region of %ux%ux%u texels at (%u, %u, %u) of a level that is "
                          "%ux%ux%u", s[0], s[1], s[2], o[0], o[1], o[2], w, h, d);
       return false;
@@ -1599,6 +1646,7 @@ rwa_texture_write(struct rwa_texture *texture, unsigned level, unsigned layer,
                   const unsigned origin[3], const unsigned size[3], const void *bytes,
                   size_t stride, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct pipe_box box;
    size_t row;
 
@@ -1670,6 +1718,7 @@ rwa_texture_read(struct rwa_texture *texture, unsigned level, unsigned layer,
                  const unsigned origin[3], const unsigned size[3], void *bytes,
                  size_t stride, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct pipe_context *pipe = texture->device->pipe;
    struct pipe_box box;
    size_t row;
@@ -1753,6 +1802,7 @@ rwa_depth_read(struct rwa_texture *texture, unsigned level, unsigned layer,
                const unsigned origin[3], const unsigned size[3], float *depth,
                uint8_t *stencil, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct pipe_context *pipe = texture->device->pipe;
    enum pipe_format format = texture->res->format;
    struct pipe_box box;
@@ -2138,6 +2188,7 @@ struct rwa_sampler *
 rwa_sampler_create(struct rwa_device *device, const struct rwa_sampler_state *state,
                    char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    if (!state) {
       say(why, why_size, "a sampler with no state");
       return NULL;
@@ -2177,6 +2228,7 @@ rwa_sampler_create(struct rwa_device *device, const struct rwa_sampler_state *st
 void
 rwa_sampler_destroy(struct rwa_sampler *sampler)
 {
+   RWA_API_GUARD();
    if (!sampler)
       return;
    /* Nothing is unbound here: rwa_dispatch binds the samplers it needs and unbinds
@@ -2301,6 +2353,7 @@ rwa_argbuf_encode_buffer(struct rwa_buffer *dest, size_t dest_offset, unsigned i
                          struct rwa_buffer *buffer, size_t offset, char *why,
                          size_t why_size)
 {
+   RWA_API_GUARD();
    struct rwa_argbuf_encoding *e =
       argbuf_begin_member(dest, dest_offset, id, "a buffer", why, why_size);
 
@@ -2332,6 +2385,7 @@ int
 rwa_argbuf_encode_texture(struct rwa_buffer *dest, size_t dest_offset, unsigned id,
                           struct rwa_texture *texture, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct rwa_argbuf_encoding *e =
       argbuf_begin_member(dest, dest_offset, id, "a texture", why, why_size);
 
@@ -2357,6 +2411,7 @@ int
 rwa_argbuf_encode_sampler(struct rwa_buffer *dest, size_t dest_offset, unsigned id,
                           struct rwa_sampler *sampler, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct rwa_argbuf_encoding *e =
       argbuf_begin_member(dest, dest_offset, id, "a sampler", why, why_size);
 
@@ -2381,6 +2436,7 @@ rwa_argbuf_encode_sampler(struct rwa_buffer *dest, size_t dest_offset, unsigned 
 unsigned
 rwa_argbuf_encoded_members(const struct rwa_buffer *dest, size_t dest_offset)
 {
+   RWA_API_GUARD();
    const struct rwa_argbuf_encoding *e = argbuf_find(dest, dest_offset);
 
    return e ? e->members : 0;
@@ -2762,24 +2818,10 @@ slot_shapes(nir_shader *cs, struct rwa_slot slots[RWA_MAX_TEXTURES],
                slots[binding].is_array = is_array;
             }
 
-            /* The element type is taken from a tex instruction and from nothing else.
-             *
-             * nir_tex_instr::dest_type is a real statement about the texture: a half
-             * texture read through Metal's read() becomes a txf whose dest_type is
-             * float16, and that is the type the slot holds. An image_load's dest_type
-             * and an image_store's src_type are not: with format=none they mean "raw
-             * bits, the bound image's format decides the conversion", so the front end
-             * emits uint for both, and BlitKernel_Unorm -- whose dst is declared
-             * texture2d<half, write> -- stores through src_type=uint. Reading that as a
-             * claim about the texture refused 5 of AV1SW's 11 kernels when each was
-             * bound the formats its own metadata asks for, measured with
-             * air_metal_test: every one of the _Unorm kernels, whose destination is
-             * half, and for binding a float format to what was taken for an integer
-             * shader -- the opposite of what Apple declared.
-             *
-             * The shape (dim, array) is a different matter and is taken from either,
-             * because an image intrinsic's image_dim does say which texture it is.
-             */
+            /* Prefer the declared Metal element type for validation. Image-store
+             * src_type now correctly describes the value's arithmetic type; older
+             * translations derived it from void and incorrectly said uint. Metadata
+             * remains authoritative for declarations optimized out of the NIR. */
             if (is_tex && !slots[binding].type_known) {
                slots[binding].type_known = true;
                slots[binding].type = nir_alu_type_get_base_type(type);
@@ -2794,6 +2836,7 @@ rwa_compute_create(struct rwa_device *device, const void *bitcode, size_t size,
                    const char *entry, struct rwa_compute_info *info,
                    char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    if (!bitcode || size < 4) {
       say(why, why_size, "%zu bytes is not a shader module", size);
       return NULL;
@@ -2969,6 +3012,7 @@ delete_compute_state(struct rwa_device *device, void *cso)
 void
 rwa_compute_destroy(struct rwa_compute *compute)
 {
+   RWA_API_GUARD();
    if (!compute)
       return;
    if (compute->cso)
@@ -3091,8 +3135,10 @@ finish_or_say_why(struct rwa_device *device, bool required, const char *what,
    struct pipe_fence_handle *fence = NULL;
    device->pipe->flush(device->pipe, &fence, 0);
    if (!fence) {
-      if (!required)
+      if (!required) {
+         if (device->batch_active) device->batch_requires_fence = false;
          return 0;
+      }
       say(why, why_size, "the GPU driver gave no fence for the %s, so nothing can tell "
                          "whether it finished; a dispatch nobody waited for is not a "
                          "result", what);
@@ -3114,7 +3160,59 @@ finish_or_say_why(struct rwa_device *device, bool required, const char *what,
                          "dispatch in it is vacuous too", what);
       return -1;
    }
+   if (device->batch_active) device->batch_requires_fence = false;
    return 0;
+}
+
+/* Metal command buffers retain their resources and wait at the buffer boundary.
+ * Keep ordering on the GPU inside that boundary instead of flushing and waiting
+ * on the CPU after every small draw. Explicit readback/transfer waits still use
+ * finish_or_say_why directly. Outside a batch, the original synchronous ABI stays
+ * unchanged for diagnostic clients. */
+static int
+finish_maybe_deferred(struct rwa_device *device, bool required, unsigned barriers, const char *what,
+                      char *why, size_t why_size)
+{
+   if (!device->batch_active)
+      return finish_or_say_why(device, required, what, why, why_size);
+   device->batch_requires_fence |= required;
+   if (barriers && device->pipe->memory_barrier)
+      device->pipe->memory_barrier(device->pipe, barriers);
+   return 0;
+}
+
+int
+rwa_batch_begin(struct rwa_device *device, char *why, size_t why_size)
+{
+   pthread_once(&rwa_api_once, rwa_api_init);
+   pthread_mutex_lock(&rwa_api_mutex);
+   if (!device || device->batch_active) {
+      say(why, why_size, "a command batch needs a device and cannot be nested");
+      pthread_mutex_unlock(&rwa_api_mutex);
+      return -1;
+   }
+   device->batch_active = true;
+   device->batch_requires_fence = false;
+   device->batch_owner = pthread_self();
+   /* The caller owns this lock until batch_end on the same thread. All the
+    * ordinary public calls recursively acquire it while recording the batch. */
+   return 0;
+}
+
+int
+rwa_batch_end(struct rwa_device *device, char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!device || !device->batch_active || !pthread_equal(device->batch_owner, pthread_self())) {
+      say(why, why_size, "no command batch owned by this thread");
+      return -1;
+   }
+   device->batch_active = false;
+   int rc = finish_or_say_why(device, device->batch_requires_fence, "command buffer", why, why_size);
+   device->pipe->set_framebuffer_state(device->pipe, &(struct pipe_framebuffer_state){ 0 });
+   device->batch_requires_fence = false;
+   pthread_mutex_unlock(&rwa_api_mutex); /* balance batch_begin even on a GPU error */
+   return rc;
 }
 
 /* What the shader calls a texture slot, in the words a Metal programmer wrote it in,
@@ -3187,13 +3285,9 @@ metal_texture_type(enum glsl_sampler_dim dim, bool is_array, unsigned *out)
  * What element type the shader asks of a slot, and in whose words -- Apple's declaration
  * first, the translated instructions only where there is none.
  *
- * That order is the whole of the element check, and it is here rather than inline in it
- * because rwa_module_textures has to report the same answer the check will judge by: a
- * query that preferred the NIR would tell a caller to bind a format the check then
- * refuses. An image_store's src_type is a transport type -- "raw bits, the bound format
- * decides" -- so judging by it refuses every float or normalised image the corpus writes
- * (slot_shapes says what that cost); a txf's dest_type is a real statement and is the
- * fallback for a slot whose metadata carries no type name.
+ * A query and a dispatch must make the same decision. The Metal declaration
+ * is authoritative; a translated texture instruction is the fallback when a
+ * module has no type name. Store operand types are now preserved correctly.
  *
  * False when neither exists, and that is the right way round: this exists to catch a
  * caller binding an integer texture where the shader reads floats, and a slot nothing
@@ -3294,7 +3388,7 @@ texture_fits(const struct rwa_texture *t, const struct rwa_slot *s, const char *
     * slot_element's -- shared with the query so that what a caller is told to bind and
     * what it is refused for cannot be two different things.
     */
-   nir_alu_type want = util_format_is_pure_uint(t->res->format) ? nir_type_uint
+   nir_alu_type want = t->shape.pixel_format == 253 || util_format_is_pure_uint(t->res->format) ? nir_type_uint
                      : util_format_is_pure_sint(t->res->format) ? nir_type_int
                                                                 : nir_type_float;
    nir_alu_type have;
@@ -3551,7 +3645,7 @@ struct rwa_bound {
 static int
 bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
            const struct air_shader_info *info, void **own_sampler,
-           const bool *compare_sampler,
+           const bool *compare_sampler, const unsigned *ubo_extent,
            const struct rwa_bindings *bindings, const struct rwa_buffer_bind *table,
            unsigned table_count, const char *name, struct rwa_bound *bound, char *why,
            size_t why_size)
@@ -3647,7 +3741,15 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
                 (unsigned)PIPE_MAX_CONSTANT_BUFFERS);
             return -1;
          }
+         if (ubo_extent && !ubo_extent[r->index])
+            break; /* no surviving load from this slot in this specialization */
          size_t left = b->size - MIN2(b->size, boffset);
+         size_t extent = ubo_extent ? ubo_extent[r->index] : UINT_MAX;
+         if (extent != UINT_MAX && extent > left) {
+            say(why, why_size, "constant buffer %u needs %zu bytes after its offset, but only %zu remain",
+                r->index, extent, left);
+            return -1;
+         }
          /*
           * AN OFFSET THIS GPU CANNOT FETCH FROM, served rather than refused.
           *
@@ -3667,16 +3769,18 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
           */
          struct pipe_constant_buffer cb = {
             .buffer_offset = (unsigned)boffset,
-            .buffer_size = (unsigned)left,
+            .buffer_size = (unsigned)MIN2(left, extent),
          };
          if (boffset % device->ubo_offset_align == 0) {
             cb.buffer = b->res;
          } else {
             size_t want = r->size && r->size <= left ? r->size : left;
+            want = MIN2(want, extent);
 
             cb.user_buffer = (const char *)b->map + boffset;
             cb.buffer_offset = 0;
             cb.buffer_size = (unsigned)want;
+            if (device->timing) device->uniform_upload_bytes += want;
          }
          pipe->set_constant_buffer(pipe, stage, r->index, false, &cb);
          break;
@@ -3688,7 +3792,9 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
           */
          if (!t->view) {
             struct pipe_sampler_view tmpl = { 0 };
-            u_sampler_view_default_template(&tmpl, t->res, t->res->format);
+            enum pipe_format view_format = t->shape.pixel_format == 253
+               ? PIPE_FORMAT_X32_S8X24_UINT : t->res->format;
+            u_sampler_view_default_template(&tmpl, t->res, view_format);
             t->view = pipe->create_sampler_view(pipe, t->res, &tmpl);
             if (!t->view) {
                say(why, why_size, "%s would not make a sampler view of the %s bound at "
@@ -3838,6 +3944,7 @@ rwa_dispatch(struct rwa_compute *compute, const struct rwa_bindings *bindings,
              const unsigned groups[3], const unsigned group_size[3],
              char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    /* No argument buffers, which is what every caller written before they existed means.
     * A kernel that declares one is refused by argbuf_member, naming the Metal buffer
     * index it wanted a set at and that nothing was given.
@@ -3852,6 +3959,7 @@ rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings *bin
                      const unsigned groups[3], const unsigned group_size[3],
                      char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct rwa_device *device = compute->device;
    struct pipe_context *pipe = device->pipe;
    const char *name = compute->info.entry_point ? compute->info.entry_point : "the shader";
@@ -3913,7 +4021,7 @@ rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings *bin
     */
    struct rwa_bound bound = { 0 };
    if (bind_stage(device, PIPE_SHADER_COMPUTE, &compute->info, compute->own_sampler,
-                  compute->compare_sampler,
+                  compute->compare_sampler, NULL,
                   bindings, table, table_count, name, &bound, why, why_size) != 0)
       return -1;
 
@@ -3930,7 +4038,7 @@ rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings *bin
     * and call it a result. rwa_finish is for a caller that wants to wait again, or to
     * wait for work dispatched through another pipeline of the same device.
     */
-   int rc = finish_or_say_why(device, true, "dispatch", why, why_size);
+   int rc = finish_maybe_deferred(device, true, PIPE_BARRIER_ALL, "dispatch", why, why_size);
    unbind_stage(device, PIPE_SHADER_COMPUTE, &bound);
    return rc;
 }
@@ -3938,7 +4046,229 @@ rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings *bin
 int
 rwa_finish(struct rwa_device *device, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    return finish_or_say_why(device, false, "work", why, why_size);
+}
+
+int
+rwa_buffer_fill(struct rwa_buffer *dst, size_t offset, size_t size, uint8_t value,
+                char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!dst || offset > dst->size || size > dst->size - offset) {
+      say(why, why_size, "buffer fill is outside its destination");
+      return -1;
+   }
+   if (!size) return 0;
+   /* A byte pattern is supported directly by Adreno's 2D clear, including
+    * unaligned ranges; never map-and-memset a command at encoding time. */
+   dst->device->pipe->clear_buffer(dst->device->pipe, dst->res, offset, size, &value, 1);
+   return finish_maybe_deferred(dst->device, false, PIPE_BARRIER_ALL, "buffer fill", why, why_size);
+}
+
+int
+rwa_buffer_copy(struct rwa_buffer *src, size_t src_offset, struct rwa_buffer *dst,
+                size_t dst_offset, size_t size, char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!src || !dst || src->device != dst->device || src_offset > src->size ||
+       size > src->size - src_offset || dst_offset > dst->size || size > dst->size - dst_offset ||
+       size > INT32_MAX || src_offset > INT32_MAX || dst_offset > INT32_MAX ||
+       (src == dst && size && src_offset < dst_offset + size && dst_offset < src_offset + size)) {
+      say(why, why_size, "invalid buffer copy range, overlap, or device");
+      return -1;
+   }
+   if (!size) return 0;
+   struct pipe_box box = { .x = src_offset, .width = size, .height = 1, .depth = 1 };
+   src->device->pipe->resource_copy_region(src->device->pipe, dst->res, 0, dst_offset, 0, 0,
+                                          src->res, 0, &box);
+   return finish_maybe_deferred(src->device, false, PIPE_BARRIER_ALL, "buffer copy", why, why_size);
+}
+
+int
+rwa_texture_copy(struct rwa_texture *src, unsigned src_level, unsigned src_slice,
+                 const unsigned src_origin[3], struct rwa_texture *dst,
+                 unsigned dst_level, unsigned dst_slice, const unsigned dst_origin[3],
+                 const unsigned size[3], char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!src || !dst || src->device != dst->device || src->res->format != dst->res->format ||
+       src->res->nr_samples != dst->res->nr_samples) {
+      say(why, why_size, "texture copy requires matching formats, sample counts and devices");
+      return -1;
+   }
+   struct pipe_box from, to;
+   if (!texture_box(src, src_level, src_slice, src_origin, size, &from, why, why_size) ||
+       !texture_box(dst, dst_level, dst_slice, dst_origin, size, &to, why, why_size)) return -1;
+   if (src == dst && src_level == dst_level &&
+       from.x < to.x + to.width && to.x < from.x + from.width &&
+       from.y < to.y + to.height && to.y < from.y + from.height &&
+       from.z < to.z + to.depth && to.z < from.z + from.depth) {
+      say(why, why_size, "overlapping regions of one texture"); return -1;
+   }
+   src->device->pipe->resource_copy_region(src->device->pipe, dst->res, dst_level,
+                                          to.x, to.y, to.z, src->res, src_level, &from);
+   return finish_maybe_deferred(src->device, false, PIPE_BARRIER_ALL, "texture copy", why, why_size);
+}
+
+int
+rwa_texture_resolve(struct rwa_texture *src, unsigned src_level, unsigned src_slice,
+                    struct rwa_texture *dst, unsigned dst_level, unsigned dst_slice,
+                    char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!src || !dst || src->device != dst->device || src == dst ||
+       src->res->format != dst->res->format || src->res->nr_samples < 2 ||
+       dst->res->nr_samples > 1 || format_is_depth_stencil(src->res->format) ||
+       util_format_is_pure_integer(src->res->format) ||
+       util_format_is_compressed(src->res->format)) {
+      say(why, why_size, "colour resolve requires matching normalized/float formats and multisample-to-single-sample resources");
+      return -1;
+   }
+   struct pipe_blit_info blit = {0};
+   blit.src.resource = src->res; blit.dst.resource = dst->res;
+   blit.src.format = src->res->format; blit.dst.format = dst->res->format;
+   blit.src.level = src_level; blit.dst.level = dst_level;
+   if (!src->device->screen->is_format_supported(src->device->screen, src->res->format,
+          src->res->target, src->res->nr_samples, src->res->nr_storage_samples, PIPE_BIND_SAMPLER_VIEW) ||
+       !dst->device->screen->is_format_supported(dst->device->screen, dst->res->format,
+          dst->res->target, dst->res->nr_samples, dst->res->nr_storage_samples, PIPE_BIND_RENDER_TARGET)) {
+      say(why, why_size, "resolve rejected: sampling/storage samples %u/%u to %u/%u are unsupported",
+          src->res->nr_samples, src->res->nr_storage_samples, dst->res->nr_samples, dst->res->nr_storage_samples);
+      return -1;
+   }
+   if (!texture_box(src, src_level, src_slice, NULL, NULL, &blit.src.box, why, why_size) ||
+       !texture_box(dst, dst_level, dst_slice, NULL, NULL, &blit.dst.box, why, why_size)) return -1;
+   if (blit.src.box.width != blit.dst.box.width || blit.src.box.height != blit.dst.box.height ||
+       blit.src.box.depth != 1 || blit.dst.box.depth != 1) {
+      say(why, why_size, "resolve attachment dimensions differ or are not 2D"); return -1;
+   }
+   blit.mask = util_format_get_mask(src->res->format);
+   blit.filter = PIPE_TEX_FILTER_NEAREST;
+   src->device->pipe->blit(src->device->pipe, &blit);
+   return finish_maybe_deferred(src->device, true, PIPE_BARRIER_ALL, "colour resolve", why, why_size);
+}
+
+int
+rwa_texture_mipmap(struct rwa_texture *texture, char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!texture || texture->res->nr_samples > 1 ||
+       texture->res->target == PIPE_TEXTURE_3D ||
+       format_is_depth_stencil(texture->res->format) ||
+       util_format_is_pure_integer(texture->res->format) ||
+       util_format_is_compressed(texture->res->format)) {
+      say(why, why_size, "texture cannot generate mipmaps"); return -1;
+   }
+   if (!texture->res->last_level) return 0;
+   /* Freedreno supplies blit, but no optional generate_mipmap callback. Build
+    * the chain explicitly through its GPU scaler, one dependent level at a time. */
+   for (unsigned level = 1; level <= texture->res->last_level; level++) {
+      for (unsigned layer = 0; layer < texture->layers; layer++) {
+         struct pipe_blit_info blit = {0};
+         blit.src.resource = blit.dst.resource = texture->res;
+         blit.src.format = blit.dst.format = texture->res->format;
+         blit.src.level = level - 1; blit.dst.level = level;
+         if (!texture_box(texture, level - 1, layer, NULL, NULL, &blit.src.box, why, why_size) ||
+             !texture_box(texture, level, layer, NULL, NULL, &blit.dst.box, why, why_size)) return -1;
+         blit.mask = util_format_get_mask(texture->res->format);
+         blit.filter = PIPE_TEX_FILTER_LINEAR;
+         texture->device->pipe->blit(texture->device->pipe, &blit);
+      }
+   }
+   return finish_maybe_deferred(texture->device, false, PIPE_BARRIER_ALL, "mipmap generation", why, why_size);
+}
+
+int
+rwa_buffer_texture_copy(struct rwa_buffer *buffer, size_t offset, size_t row_bytes,
+                        size_t image_bytes, struct rwa_texture *texture,
+                        unsigned level, unsigned slice, const unsigned origin[3],
+                        const unsigned size[3], unsigned upload, char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   struct pipe_box region;
+   if (!buffer || !texture || buffer->device != texture->device ||
+       texture->res->nr_samples > 1 || util_format_is_compressed(texture->res->format) ||
+       (format_has_depth(texture->res->format) && format_has_stencil(texture->res->format)) ||
+       !texture_box(texture, level, slice, origin, size, &region, why, why_size)) {
+      say(why, why_size, "invalid buffer/texture copy shape, format, or device"); return -1;
+   }
+   unsigned texel = util_format_get_blocksize(texture->res->format);
+   uint64_t bytes = (uint64_t)region.width * texel;
+   if (!row_bytes) row_bytes = bytes;
+   if (row_bytes > UINT32_MAX || row_bytes < bytes || row_bytes % texel) {
+      say(why, why_size, "invalid buffer/texture row stride"); return -1;
+   }
+   uint64_t plane = (uint64_t)row_bytes * region.height;
+   if (!image_bytes) image_bytes = plane;
+   if (image_bytes > UINT32_MAX || image_bytes < plane || offset > buffer->size) {
+      say(why, why_size, "invalid buffer/texture image stride or offset"); return -1;
+   }
+   uint64_t span = (uint64_t)(region.depth - 1) * image_bytes +
+                   (uint64_t)(region.height - 1) * row_bytes + bytes;
+   if (span > buffer->size - offset) {
+      say(why, why_size, "buffer/texture copy exceeds its buffer"); return -1;
+   }
+#ifdef GALLIUM_FREEDRENO
+   struct rwa_device *device = buffer->device;
+   struct pipe_context *pipe = device->pipe;
+   if (!device->software && device->screen->resource_get_handle && device->screen->resource_from_handle) {
+      /* The Adreno 2D engine copies either two buffers or two textures. Give
+       * a shared staging BO both views, and move padded rows using GPU buffer
+       * copies. No CPU pixel conversion or readback occurs in this path. */
+      uint64_t pitch = (bytes + 255) & ~255ull;
+      uint64_t allocation = pitch * region.height;
+      if (allocation > UINT32_MAX || pitch > UINT32_MAX) {
+         say(why, why_size, "buffer/texture staging plane is too large"); return -1;
+      }
+      struct pipe_resource *linear = pipe_buffer_create(device->screen, PIPE_BIND_SHARED,
+                                                         PIPE_USAGE_STAGING, allocation);
+      struct pipe_resource *view = NULL;
+      int rc = -1;
+      struct winsys_handle handle = { .type = WINSYS_HANDLE_TYPE_KMS };
+      struct pipe_resource templ = {
+         .target = PIPE_TEXTURE_2D, .format = texture->res->format,
+         .width0 = region.width, .height0 = region.height, .depth0 = 1, .array_size = 1,
+         .usage = PIPE_USAGE_STAGING, .bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET | PIPE_BIND_LINEAR,
+      };
+      if (!linear || !device->screen->resource_get_handle(device->screen, pipe, linear, &handle, 0)) {
+         say(why, why_size, "GPU could not allocate/export a transfer plane"); goto out;
+      }
+      handle.stride = pitch; handle.offset = 0; handle.modifier = DRM_FORMAT_MOD_LINEAR;
+      view = device->screen->resource_from_handle(device->screen, &templ, &handle, PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
+      if (!view) { say(why, why_size, "GPU could not import its transfer plane as a texture"); goto out; }
+      for (int z = 0; z < region.depth; z++) {
+         if (!upload) {
+            struct pipe_box from = region; from.z += z; from.depth = 1;
+            pipe->resource_copy_region(pipe, view, 0, 0, 0, 0, texture->res, level, &from);
+            if (finish_or_say_why(device, false, "texture transfer", why, why_size)) goto out;
+         }
+         for (int y = 0; y < region.height; y++) {
+            unsigned buffer_offset = offset + (uint64_t)z * image_bytes + (uint64_t)y * row_bytes;
+            unsigned linear_offset = y * pitch;
+            struct pipe_box row = {.x = upload ? buffer_offset : linear_offset, .width = bytes, .height = 1, .depth = 1};
+            pipe->resource_copy_region(pipe, upload ? linear : buffer->res, 0,
+                                        upload ? linear_offset : buffer_offset, 0, 0,
+                                        upload ? buffer->res : linear, 0, &row);
+         }
+         /* Aliased resource views have separate Gallium dependency records;
+          * explicitly finish before switching between their buffer/texture views. */
+         if (finish_or_say_why(device, false, "transfer rows", why, why_size)) goto out;
+         if (upload) {
+            struct pipe_box from = {.width = region.width, .height = region.height, .depth = 1};
+            pipe->resource_copy_region(pipe, texture->res, level, region.x, region.y, region.z + z, view, 0, &from);
+            if (finish_or_say_why(device, false, "texture transfer", why, why_size)) goto out;
+         }
+      }
+      rc = 0;
+out:
+      pipe_resource_reference(&view, NULL);
+      pipe_resource_reference(&linear, NULL);
+      return rc;
+   }
+#endif
+   say(why, why_size, "buffer/texture GPU transfers require a shared resource import backend");
+   return -1;
 }
 
 /*
@@ -4180,6 +4510,7 @@ rwa_module_textures(struct rwa_device *device, const void *bitcode, size_t size,
                     const char *entry, struct rwa_texture_decl *out, unsigned max,
                     unsigned *count, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    if (count)
       *count = 0;
    if (!device) {
@@ -4327,6 +4658,7 @@ rwa_module_argbufs(struct rwa_device *device, const void *bitcode, size_t size,
                    const char *entry, struct rwa_argbuf_layout *out, unsigned max,
                    unsigned *count, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    if (count)
       *count = 0;
    if (!device) {
@@ -4613,6 +4945,7 @@ rwa_depth_stencil_create(struct rwa_device *device,
                          const struct rwa_depth_stencil_state *state, char *why,
                          size_t why_size)
 {
+   RWA_API_GUARD();
    if (!state) {
       say(why, why_size, "a depth/stencil state with no descriptor");
       return NULL;
@@ -4670,6 +5003,7 @@ rwa_depth_stencil_create(struct rwa_device *device,
 void
 rwa_depth_stencil_destroy(struct rwa_depth_stencil *state)
 {
+   RWA_API_GUARD();
    if (!state)
       return;
    /* Unbound before deleted, unlike a sampler and like a pipeline's own states: a draw
@@ -5107,7 +5441,10 @@ struct rwa_render {
 
    struct air_shader_info finfo;
    struct air_shader_info vinfo;      /* valid only when a vertex module was supplied */
+   unsigned vertex_ubo_extent[PIPE_MAX_CONSTANT_BUFFERS];
+   unsigned fragment_ubo_extent[PIPE_MAX_CONSTANT_BUFFERS];
    bool generated_vertex;
+   bool writes_resources;
 
    struct rwa_render_shape shape;
 
@@ -5126,6 +5463,7 @@ struct rwa_render {
     */
    void *vs_cso, *fs_cso;
    void *blend, *dsa, *rast, *velem;
+   struct pipe_rasterizer_state rasterizer;
    struct pipe_resource *vbuf;        /* the full-screen quad, for the generated stage */
 
    /* What the vertex descriptor was turned into, empty for a stage that fetches no
@@ -5135,6 +5473,45 @@ struct rwa_render {
     */
    struct rwa_vertex_state vstate;
 };
+
+/* Reflection may describe an unsized array or resources eliminated by function
+ * constants. Do not upload the rest of a large Metal ring buffer for every draw.
+ * Derive a conservative byte bound from the specialized NIR: dynamic offsets
+ * keep UINT_MAX (the original full range), and absent loads need no upload. */
+static void
+uniform_extents(nir_shader *nir, unsigned extent[PIPE_MAX_CONSTANT_BUFFERS])
+{
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+      NIR_PASS(progress, nir, nir_opt_algebraic);
+      NIR_PASS(progress, nir, nir_opt_dce);
+      NIR_PASS(progress, nir, nir_opt_dead_cf);
+   } while (progress);
+   nir_foreach_function_impl(impl, nir)
+      nir_foreach_block(block, impl)
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic) continue;
+            nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+            if (load->intrinsic != nir_intrinsic_load_ubo) continue;
+            if (!nir_src_is_const(load->src[0])) {
+               for (unsigned i = 0; i < PIPE_MAX_CONSTANT_BUFFERS; i++) extent[i] = UINT_MAX;
+               return;
+            }
+            unsigned slot = nir_src_as_uint(load->src[0]);
+            if (slot >= PIPE_MAX_CONSTANT_BUFFERS) continue;
+            if (!nir_src_is_const(load->src[1])) {
+               extent[slot] = UINT_MAX;
+               continue;
+            }
+            uint64_t end = nir_src_as_uint(load->src[1]);
+            end += load->def.num_components * load->def.bit_size / 8;
+            extent[slot] = MAX2(extent[slot], (unsigned)MIN2(end, UINT_MAX));
+         }
+}
 
 /* Clone, finalise and compile one stage, handing the driver a copy it may steal. The
  * clone is not freed on failure, for compute_state_for's reason: a driver that refused
@@ -5379,13 +5756,6 @@ blend_operation_name(unsigned op)
 static const char *
 blend_factor_refusal(unsigned f)
 {
-   if (f >= 11 && f <= 14)
-      return "one of Metal's BLEND COLOUR factors, whose colour is ENCODER state "
-             "(-setBlendColorRed:green:blue:alpha:) and not pipeline state: this "
-             "contract has nowhere to carry it and the driver's own setter drops it, so "
-             "the blend would be against the zero a Gallium context starts with -- the "
-             "layer would vanish rather than fail. Serving it is one float[4] in "
-             "rwa_draw and one set_blend_color, on the day something asks";
    if (f >= 15 && f <= 18)
       /* Deliberately short: `why` is 512 bytes here and in the driver, and the prefix
        * naming the field takes some of it, so a longer sentence would arrive truncated
@@ -5420,10 +5790,10 @@ blend_factor_from_metal(unsigned f, bool alpha_channel, unsigned *out, const cha
       PIPE_BLENDFACTOR_DST_ALPHA,          /* ...DestinationAlpha                    8 */
       PIPE_BLENDFACTOR_INV_DST_ALPHA,      /* ...OneMinusDestinationAlpha            9 */
       PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE, /* ...SourceAlphaSaturated               10 */
-      PIPE_BLENDFACTOR_CONST_COLOR,        /* ...BlendColor            11  REFUSED, above */
-      PIPE_BLENDFACTOR_INV_CONST_COLOR,    /* ...OneMinusBlendColor    12  REFUSED */
-      PIPE_BLENDFACTOR_CONST_ALPHA,        /* ...BlendAlpha            13  REFUSED */
-      PIPE_BLENDFACTOR_INV_CONST_ALPHA,    /* ...OneMinusBlendAlpha    14  REFUSED */
+      PIPE_BLENDFACTOR_CONST_COLOR,        /* ...BlendColor            11 */
+      PIPE_BLENDFACTOR_INV_CONST_COLOR,    /* ...OneMinusBlendColor    12 */
+      PIPE_BLENDFACTOR_CONST_ALPHA,        /* ...BlendAlpha            13 */
+      PIPE_BLENDFACTOR_INV_CONST_ALPHA,    /* ...OneMinusBlendAlpha    14 */
       PIPE_BLENDFACTOR_SRC1_COLOR,         /* ...Source1Color          15  REFUSED */
       PIPE_BLENDFACTOR_INV_SRC1_COLOR,     /* ...OneMinusSource1Color  16  REFUSED */
       PIPE_BLENDFACTOR_SRC1_ALPHA,         /* ...Source1Alpha          17  REFUSED */
@@ -5865,6 +6235,7 @@ rwa_render_create(struct rwa_device *device,
                   const struct rwa_render_shape *shape,
                   struct rwa_render_info *info, char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    if (!shape) {
       say(why, why_size, "a render pipeline with no attachment description");
       return NULL;
@@ -6044,6 +6415,7 @@ rwa_render_create(struct rwa_device *device,
              ? _mesa_shader_stage_to_string(render->finfo.stage) : "non-fragment");
       goto fail;
    }
+   uniform_extents(fs, render->fragment_ubo_extent);
    slot_shapes(fs, render->frag_slots, render->frag_compare_sampler);
    count_resources(&render->finfo, render->frag_slots, &out.fragment_buffers,
                    &out.fragment_textures, &out.fragment_samplers);
@@ -6097,6 +6469,7 @@ rwa_render_create(struct rwa_device *device,
                 ? _mesa_shader_stage_to_string(render->vinfo.stage) : "non-vertex");
          goto fail;
       }
+      uniform_extents(vs, render->vertex_ubo_extent);
       /*
        * The vertex attributes, which used to be the end of this road: a shader with a
        * [[stage_in]] input was refused by name because the contract carried no layout,
@@ -6167,6 +6540,55 @@ rwa_render_create(struct rwa_device *device,
       out.vertex_buffers = 0;
       out.generated_vertex_stage = 1;
    }
+
+   /* Metal links stage interfaces by their AIR semantic, not declaration
+    * order. Separate source structs may place identical [[user(...)]] fields
+    * in different positions, or omit fields the fragment shader never reads. */
+   if (!render->generated_vertex) {
+      NIR_PASS(_, fs, nir_opt_dce);
+      NIR_PASS(_, fs, nir_remove_dead_variables, nir_var_shader_in, NULL);
+      uint64_t old_inputs = fs->info.inputs_read;
+      uint64_t new_inputs = old_inputs;
+      for (unsigned i = 0; i < render->finfo.num_varyings; i++)
+         new_inputs &= ~BITFIELD64_BIT(render->finfo.varyings[i].slot);
+      nir_foreach_shader_in_variable(var, fs) {
+         if (var->data.location < VARYING_SLOT_VAR0)
+            continue;
+         const struct air_varying *fv = NULL, *vv = NULL;
+         for (unsigned i = 0; i < render->finfo.num_varyings; i++)
+            if (render->finfo.varyings[i].slot == var->data.location)
+               fv = &render->finfo.varyings[i];
+         if (fv && fv->name)
+            for (unsigned i = 0; i < render->vinfo.num_varyings; i++)
+               if (render->vinfo.varyings[i].name &&
+                   !strcmp(fv->name, render->vinfo.varyings[i].name)) {
+                  vv = &render->vinfo.varyings[i];
+                  break;
+               }
+         if (!vv || vv->components < fv->components) {
+            say(why, why_size, "fragment varying %s has no compatible vertex output",
+                fv && fv->name ? fv->name : "(unnamed)");
+            goto fail;
+         }
+         if (old_inputs & BITFIELD64_BIT(fv->slot))
+            new_inputs |= BITFIELD64_BIT(vv->slot);
+         var->data.location = vv->slot;
+      }
+      fs->info.inputs_read = new_inputs;
+   }
+
+   /* Render-target ordering is handled by Gallium's draw/batch tracking.
+    * Only shader image/SSBO stores need an explicit memory barrier. On
+    * Freedreno a generic barrier flushes the batch, so doing it after every
+    * ordinary draw would prevent tile rendering from batching at all. */
+   const struct air_shader_info *stages[] = { &render->vinfo, &render->finfo };
+   for (unsigned s = 0; s < ARRAY_SIZE(stages); s++)
+      for (unsigned i = 0; i < stages[s]->num_resources; i++) {
+         const struct air_resource *resource = &stages[s]->resources[i];
+         if (resource->write && (resource->kind == AIR_RESOURCE_IMAGE ||
+                                 resource->kind == AIR_RESOURCE_DEVICE_BUFFER))
+            render->writes_resources = true;
+      }
 
    /* Compile both stages now. A failure here is a creation failure and says so; the
     * stages are linked later, at the draw.
@@ -6248,11 +6670,16 @@ rwa_render_create(struct rwa_device *device,
     * util_framebuffer_get_num_samples) and emits with emit_msaa. So this bit is the
     * honest state for a multisample pass and not the thing that turns multisampling on.
     */
-   render->rast = device->pipe->create_rasterizer_state(device->pipe,
-      &(struct pipe_rasterizer_state){
+   render->rasterizer = (struct pipe_rasterizer_state){
          .cull_face = PIPE_FACE_NONE, .half_pixel_center = 1, .bottom_edge_rule = 1,
-         .depth_clip_near = 1, .depth_clip_far = 1, .clip_halfz = zs_format != 0,
-         .multisample = samples > 1 });
+         /* Metal's flat varyings come from the first vertex, including indexed
+          * triangles and strips. Gallium's default is the last vertex. */
+         .flatshade_first = 1,
+         .scissor = 1,
+         .depth_clip_near = 1, .depth_clip_far = 1, .clip_halfz = 1,
+         .line_width = 1.0f, .point_size = 1.0f,
+         .multisample = samples > 1 };
+   render->rast = device->pipe->create_rasterizer_state(device->pipe, &render->rasterizer);
    if (!render->blend || !render->dsa || !render->rast) {
       say(why, why_size, "%s would not make the fixed render state", rwa_device_name(device));
       goto fail;
@@ -6354,6 +6781,7 @@ fail:
 void
 rwa_render_destroy(struct rwa_render *render)
 {
+   RWA_API_GUARD();
    if (!render)
       return;
    struct pipe_context *pipe = render->device->pipe;
@@ -6443,13 +6871,23 @@ int
 rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
                 char *why, size_t why_size)
 {
+   RWA_API_GUARD();
    struct rwa_device *device = render->device;
    struct pipe_context *pipe = device->pipe;
+   device->timing = getenv("REDWOOD_AIR_TIMING") != NULL;
+   uint64_t times[7] = { 0 };
+   if (device->timing) times[0] = os_time_get_nano();
    const char *fname = render->finfo.entry_point ? render->finfo.entry_point
                                                  : "the fragment shader";
 
    if (!draw) {
       say(why, why_size, "a draw with no description");
+      return -1;
+   }
+   if (draw->cull_mode > 2 || draw->front_winding > 1 || draw->fill_mode > 1 ||
+       draw->depth_clip_mode > 1 || !isfinite(draw->depth_bias) ||
+       !isfinite(draw->slope_scale) || !isfinite(draw->depth_bias_clamp)) {
+      say(why, why_size, "invalid Metal rasterizer state");
       return -1;
    }
    /* The attachments of the pass must be the attachments the pipeline was compiled for:
@@ -6717,6 +7155,67 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
    }
 
 
+   /* Metal's viewport is in target pixels, with a top-left origin. Keep its
+    * fractional origin and size; casting to unsigned loses partial-pixel edges and
+    * negative origins. Reject non-finite values before they reach hardware. */
+   double vx = 0, vy = 0, vw = w, vh = h;
+   if (draw->viewport) {
+      for (unsigned i = 0; i < 4; i++) {
+         if (!isfinite(draw->viewport[i]) || fabs(draw->viewport[i]) > FLT_MAX / 4.0) {
+            say(why, why_size, "viewport component %u is not a finite representable coordinate", i);
+            return -1;
+         }
+      }
+      vx = draw->viewport[0]; vy = draw->viewport[1];
+      vw = draw->viewport[2]; vh = draw->viewport[3];
+      if (vw < 0 || vh < 0) {
+         say(why, why_size, "viewport dimensions must be nonnegative");
+         return -1;
+      }
+   }
+   float znear = draw->depth_range ? draw->depth_range[0] : 0.0f;
+   float zfar = draw->depth_range ? draw->depth_range[1] : 1.0f;
+   if (!isfinite(znear) || !isfinite(zfar) || znear < 0 || znear > 1 || zfar < 0 || zfar > 1) {
+      say(why, why_size, "viewport depth endpoints must be finite and in [0,1]");
+      return -1;
+   }
+   struct pipe_scissor_state scissor = { .minx = 0, .miny = 0, .maxx = w, .maxy = h };
+   if (draw->scissor) {
+      uint64_t x = MIN2(draw->scissor[0], w), y = MIN2(draw->scissor[1], h);
+      /* Clamp before addition: NSUInteger sizes can overflow both 32 and 64 bits. */
+      scissor.minx = x; scissor.miny = y;
+      scissor.maxx = x + MIN2(draw->scissor[2], w - x);
+      scissor.maxy = y + MIN2(draw->scissor[3], h - y);
+   }
+
+   /* Encoder raster state is per draw, whereas Gallium caches it as a state object.
+    * Reuse the object until a field changes. Use Metal's winding directly: the
+    * FD660 pixel result agrees with the same quad on Apple's native Metal driver.
+    * An extra viewport-Y inversion here reverses all four cull/winding cases. */
+   struct pipe_rasterizer_state rasterizer = render->rasterizer;
+   rasterizer.cull_face = draw->cull_mode == 1 ? PIPE_FACE_FRONT :
+                          draw->cull_mode == 2 ? PIPE_FACE_BACK : PIPE_FACE_NONE;
+   rasterizer.front_ccw = draw->front_winding != 0;
+   rasterizer.fill_front = rasterizer.fill_back =
+      draw->fill_mode ? PIPE_POLYGON_MODE_LINE : PIPE_POLYGON_MODE_FILL;
+   rasterizer.depth_clip_near = rasterizer.depth_clip_far = draw->depth_clip_mode == 0;
+   rasterizer.depth_clamp = draw->depth_clip_mode != 0;
+   rasterizer.offset_units = draw->depth_bias;
+   rasterizer.offset_scale = draw->slope_scale;
+   rasterizer.offset_clamp = draw->depth_bias_clamp;
+   rasterizer.offset_tri = rasterizer.offset_units != 0 || rasterizer.offset_scale != 0;
+   if (memcmp(&rasterizer, &render->rasterizer, sizeof(rasterizer))) {
+      void *next = pipe->create_rasterizer_state(pipe, &rasterizer);
+      if (!next) {
+         say(why, why_size, "cannot allocate changed rasterizer state");
+         return -1;
+      }
+      pipe->bind_rasterizer_state(pipe, NULL);
+      pipe->delete_rasterizer_state(pipe, render->rast);
+      render->rast = next;
+      render->rasterizer = rasterizer;
+   }
+
    /* Everything each stage declares has to be bound, the same check a dispatch makes. */
    if (check_bindings(&render->finfo, render->frag_slots, &draw->fragment,
                       draw->fragment_buffer_table, draw->fragment_buffer_table_count, fname, why,
@@ -6735,6 +7234,7 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
     * so it is a draw-time cost and not a pipeline one, and it is released again below
     * before the caller may destroy the textures under it.
     */
+   if (device->timing) times[1] = os_time_get_nano();
    struct pipe_surface *surf[PIPE_MAX_COLOR_BUFS] = { 0 };
    struct pipe_surface *zsurf = NULL;
    /* pipe_framebuffer_state.samples is filled in although nothing here reads it: both
@@ -6753,7 +7253,7 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
          say(why, why_size, "%s would not make a render surface of colour attachment %u",
              rwa_device_name(device), i);
          for (unsigned j = 0; j < i; j++)
-            pipe->surface_destroy(pipe, surf[j]);
+            pipe_surface_reference(&surf[j], NULL);
          return -1;
       }
       fb.cbufs[i] = surf[i];
@@ -6765,7 +7265,7 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
          say(why, why_size, "%s would not make a render surface of the depth attachment",
              rwa_device_name(device));
          for (unsigned j = 0; j < draw->color_count; j++)
-            pipe->surface_destroy(pipe, surf[j]);
+            pipe_surface_reference(&surf[j], NULL);
          return -1;
       }
       fb.zsbuf = zsurf;
@@ -6779,8 +7279,6 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
     * freedreno hands exactly that to GRAS_CL_Z_CLAMP). The default is { 0, 1 }, the
     * identity, which is the 1.0/0.0 every draw before depth existed used.
     */
-   float znear = draw->depth_range ? draw->depth_range[0] : 0.0f;
-   float zfar = draw->depth_range ? draw->depth_range[1] : 1.0f;
    pipe->set_viewport_states(pipe, 0, 1, &(struct pipe_viewport_state){
       /* The y scale is NEGATIVE, and that is Metal's rule rather than a convention picked
        * here. Metal's render-target origin is the top left and its NDC y points up, so clip
@@ -6794,10 +7292,15 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
        * it is landed against -- it must turn from (100+x, 200+y, ...) into
        * (100+x, 200+(3-y), ...), the texture mirrored vertically, on both back ends.
        */
-      .scale = { w / 2.0f, -(h / 2.0f), zfar - znear },
-      .translate = { w / 2.0f, h / 2.0f, znear } });
+      .scale = { vw / 2.0, -(vh / 2.0), zfar - znear },
+      .translate = { vx + vw / 2.0, vy + vh / 2.0, znear } });
+   pipe->set_scissor_states(pipe, 0, 1, &scissor);
 
    pipe->bind_blend_state(pipe, render->blend);
+   struct pipe_blend_color blend_color = { 0 };
+   if (draw->blend_color)
+      memcpy(blend_color.color, draw->blend_color, sizeof(blend_color.color));
+   pipe->set_blend_color(pipe, &blend_color);
    /* The caller's depth/stencil state, or the pipeline's zeroed one, which is Metal's
     * behaviour with no MTLDepthStencilState set: no test and no write.
     */
@@ -6887,19 +7390,21 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
    pipe->set_vertex_buffers(pipe, nvb, vbs);
 
    struct rwa_bound fbound = { 0 }, vbound = { 0 };
+   if (device->timing) times[2] = os_time_get_nano();
    int rc = -1;
    if (bind_stage(device, PIPE_SHADER_FRAGMENT, &render->finfo, render->frag_own_sampler,
-                  render->frag_compare_sampler,
+                  render->frag_compare_sampler, render->fragment_ubo_extent,
                   &draw->fragment, draw->fragment_buffer_table, draw->fragment_buffer_table_count,
                   fname, &fbound, why, why_size) != 0)
       goto unbind;
    if (!render->generated_vertex &&
        bind_stage(device, PIPE_SHADER_VERTEX, &render->vinfo, render->vert_own_sampler,
-                  render->vert_compare_sampler,
+                  render->vert_compare_sampler, render->vertex_ubo_extent,
                   &draw->vertex, draw->vertex_buffer_table, draw->vertex_buffer_table_count, vname,
                   &vbound, why, why_size) != 0)
       goto unbind;
 
+   if (device->timing) times[3] = os_time_get_nano();
    /* clear_color NULL is MTLLoadActionLoad: keep what the attachment holds. A pointer
     * to four floats is MTLLoadActionClear, and the union is filled from them -- for an
     * integer attachment the bits of the float land in the right place when the colour
@@ -6971,22 +7476,80 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
     * come back (docs/air.md section 5). A link error between the stages, which ir3 only
     * finds now, surfaces as this not finishing.
     */
-   rc = finish_or_say_why(device, true, "draw", why, why_size);
+   if (device->timing) times[4] = os_time_get_nano();
+   rc = finish_maybe_deferred(device, true, render->writes_resources ? PIPE_BARRIER_ALL : 0,
+                              "draw", why, why_size);
+   if (device->timing) times[5] = os_time_get_nano();
 
 unbind:
    unbind_stage(device, PIPE_SHADER_FRAGMENT, &fbound);
    if (!render->generated_vertex)
       unbind_stage(device, PIPE_SHADER_VERTEX, &vbound);
-   /* The framebuffer is released before the surfaces are destroyed, and both before the
-    * caller's next call, which may be rwa_texture_destroy on one of these attachments:
-    * a context still holding a surface of a freed resource is the same trap as a bound
-    * sampler state (rwa_sampler_destroy).
-    */
-   pipe->set_framebuffer_state(pipe, &(struct pipe_framebuffer_state){ 0 });
+   /* Release our references, not the objects: an unsubmitted Gallium batch can
+    * still own these surfaces for tile load/store. Calling surface_destroy
+    * directly bypasses its references and leaves the eventual flush dangling. */
+   if (!device->batch_active)
+      pipe->set_framebuffer_state(pipe, &(struct pipe_framebuffer_state){ 0 });
    for (unsigned i = 0; i < draw->color_count; i++)
-      if (surf[i])
-         pipe->surface_destroy(pipe, surf[i]);
-   if (zsurf)
-      pipe->surface_destroy(pipe, zsurf);
+      pipe_surface_reference(&surf[i], NULL);
+   pipe_surface_reference(&zsurf, NULL);
+   if (device->timing && !rc) {
+      times[6] = os_time_get_nano();
+      for (unsigned i = 0; i < 6; i++) device->draw_times[i] += times[i + 1] - times[i];
+      if (index_size) device->indexed_vertices += draw->vertex_count;
+      if (++device->timed_draws == 512) {
+         printf("redwoodair: timing draws=512 validate_us=%llu state_us=%llu bind_us=%llu draw_us=%llu flush_us=%llu unbind_us=%llu uniform_bytes=%llu indices=%llu\n",
+            (unsigned long long)(device->draw_times[0]/1000), (unsigned long long)(device->draw_times[1]/1000),
+            (unsigned long long)(device->draw_times[2]/1000), (unsigned long long)(device->draw_times[3]/1000),
+            (unsigned long long)(device->draw_times[4]/1000), (unsigned long long)(device->draw_times[5]/1000),
+            (unsigned long long)device->uniform_upload_bytes, (unsigned long long)device->indexed_vertices);
+         fflush(stdout);
+         memset(device->draw_times, 0, sizeof(device->draw_times));
+         device->timed_draws = 0; device->uniform_upload_bytes = 0; device->indexed_vertices = 0;
+      }
+   }
    return rc;
+}
+
+/* Load actions do not require a pipeline or a draw. Keep each attachment separate
+ * so a clear of target zero cannot accidentally clear every MRT to that colour. */
+int
+rwa_texture_clear(struct rwa_texture *texture, unsigned level, unsigned slice,
+                  unsigned aspect, const double color[4], double depth,
+                  unsigned stencil, char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!texture || !aspect || aspect > 7 || (aspect & 1 && aspect != 1) ||
+       level > texture->res->last_level || texture->res->target == PIPE_BUFFER ||
+       slice >= (texture->res->target == PIPE_TEXTURE_3D ?
+                 u_minify(texture->res->depth0, level) : texture->res->array_size)) {
+      say(why, why_size, "invalid attachment clear region or aspect"); return -1;
+   }
+   enum pipe_format format = texture->res->format;
+   if ((aspect == 1 && (!color || format_is_depth_stencil(format))) ||
+       (aspect & 2 && !format_has_depth(format)) ||
+       (aspect & 4 && !format_has_stencil(format))) {
+      say(why, why_size, "attachment clear aspect does not match its format"); return -1;
+   }
+   struct pipe_context *pipe = texture->device->pipe;
+   struct pipe_surface templ = { .format = format,
+      .u.tex = { .level = level, .first_layer = slice, .last_layer = slice } };
+   struct pipe_surface *surface = pipe->create_surface(pipe, texture->res, &templ);
+   if (!surface) { say(why, why_size, "cannot create attachment clear surface"); return -1; }
+   unsigned width = u_minify(texture->res->width0, level);
+   unsigned height = u_minify(texture->res->height0, level);
+   if (aspect == 1) {
+      union pipe_color_union value;
+      for (unsigned c=0;c<4;c++) {
+         if (util_format_is_pure_uint(format)) value.ui[c] = (uint32_t)fmin(fmax(color[c], 0), UINT32_MAX);
+         else if (util_format_is_pure_sint(format)) value.i[c] = (int32_t)fmin(fmax(color[c], INT32_MIN), INT32_MAX);
+         else value.f[c] = (float)color[c];
+      }
+      pipe->clear_render_target(pipe, surface, &value, 0, 0, width, height, false);
+   } else {
+      unsigned flags = (aspect & 2 ? PIPE_CLEAR_DEPTH : 0) | (aspect & 4 ? PIPE_CLEAR_STENCIL : 0);
+      pipe->clear_depth_stencil(pipe, surface, flags, depth, stencil & 255, 0, 0, width, height, false);
+   }
+   pipe_surface_reference(&surface, NULL);
+   return 0;
 }
