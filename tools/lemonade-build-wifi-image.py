@@ -53,11 +53,25 @@ def current_network():
     return helper.read_current(ROOT)
 
 
-def network_services():
+def network_services(browser=False):
     """Use the stock iOS daemons already present in the verified System image."""
     programs = {'com.apple.configd': '/usr/libexec/configd',
                 'com.apple.mDNSResponder': '/usr/sbin/mDNSResponder',
                 'com.apple.mDNSResponderHelper': '/usr/sbin/mDNSResponderHelper'}
+    if browser:
+        programs.update({
+            'com.apple.trustd': '/usr/libexec/trustd',
+            'com.apple.securityd': '/usr/libexec/securityd',
+            'com.apple.nsurlsessiond': '/usr/libexec/nsurlsessiond',
+            'com.apple.safarifetcherd': '/System/Cryptexes/App/usr/libexec/safarifetcherd',
+            'com.apple.Safari.History': '/System/Cryptexes/App/usr/libexec/com.apple.Safari.History',
+            'com.apple.webkit.webpushd': '/System/Cryptexes/App/usr/libexec/webpushd',
+            'com.apple.SafariBookmarksSyncAgent': '/System/Cryptexes/App/System/Library/CoreServices/SafariSupport.bundle/SafariBookmarksSyncAgent',
+            'com.apple.Safari.SafeBrowsing.Service': '/System/Library/PrivateFrameworks/SafariSafeBrowsing.framework/com.apple.Safari.SafeBrowsing.Service',
+            'com.apple.Safari.passwordbreachd': '/System/Cryptexes/App/usr/libexec/passwordbreachd',
+            'com.apple.webkit.adattributiond': '/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Daemons/adattributiond',
+            'com.apple.WebBookmarks.webbookmarksd': '/System/Cryptexes/App/usr/libexec/webbookmarksd',
+        })
     container = apfs.Container(str(ROOT / 'userland/system.apfs'))
     try:
         volume = apfs.pick_volume(container, None)
@@ -79,15 +93,30 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--driver-files', action='store_true', help='include verified original M3, board and regulatory data')
     parser.add_argument('--connect-current', action='store_true', help='RAM-only acceptance using this exact phone\'s current Android Wi-Fi')
+    parser.add_argument('--show-wifi-settings', action='store_true', help='open the real iOS Wi-Fi page for a framebuffer screenshot')
+    parser.add_argument('--wifi-settings-details', action='store_true', help='navigate the observed Wi-Fi page into current-network details')
+    parser.add_argument('--show-bilibili', action='store_true', help='open the requested Bilibili page in the real iOS browser')
     args = parser.parse_args()
+    if args.wifi_settings_details:
+        args.show_wifi_settings = True
+    if args.show_bilibili and args.show_wifi_settings:
+        parser.error('Choose Wi-Fi Settings or the browser for this bounded capture')
     if args.connect_current and not args.driver_files:
         parser.error('--connect-current requires --driver-files')
+    if (args.show_wifi_settings or args.show_bilibili) and not args.connect_current:
+        parser.error('UI capture requires --connect-current')
     os.umask(0o077)
     output = ROOT / 'out/lemonade-wifi'
     output.mkdir(parents=True, exist_ok=True)
     output.chmod(0o700)
     network = None
     probe = ROOT / 'out/lemonade-net-test'
+    ui_probe = ROOT / 'out/lemonade-wifi-ui'
+    if args.show_wifi_settings or args.show_bilibili:
+        receipt = json.loads((ROOT / 'out/lemonade-wifi-ui.manifest.json').read_text())
+        if (receipt.get('arch') != 'arm64' or receipt.get('sha256') != digest(ui_probe) or
+                receipt.get('source_sha256') != digest(ROOT / 'tools/lemonade-wifi-ui.c')):
+            raise SystemExit('Settings navigation helper differs from its build receipt')
     if args.connect_current:
         receipt_path = ROOT / 'out/lemonade-net-test.manifest.json'
         if not probe.is_file() or not receipt_path.is_file():
@@ -172,7 +201,17 @@ def main():
             additions = {'fw/lemonade-network': (0o100600, 0, 0, network),
                          'bin/lemonade-net-test': (0o100755, 0, 0, probe.read_bytes()),
                          'LaunchDaemons/com.lemonade.wifi-test.plist': (0o100644, 0, 0, plistlib.dumps(job))}
-            additions.update(network_services())
+            additions.update(network_services(browser=args.show_bilibili))
+            if args.show_wifi_settings or args.show_bilibili:
+                ui_job = {'Label': 'com.lemonade.wifi-ui', 'RunAtLoad': True,
+                          'ProgramArguments': ['/redwood/bin/lemonade-wifi-ui'],
+                          'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
+                if args.wifi_settings_details:
+                    ui_job['ProgramArguments'].append('details')
+                if args.show_bilibili:
+                    ui_job['ProgramArguments'].append('bilibili')
+                additions['bin/lemonade-wifi-ui'] = (0o100755, 0, 0, ui_probe.read_bytes())
+                additions['LaunchDaemons/com.lemonade.wifi-ui.plist'] = (0o100644, 0, 0, plistlib.dumps(ui_job))
             for relative, (mode, uid, gid, data) in additions.items():
                 target = tree / relative
                 target.write_bytes(data)
@@ -200,6 +239,10 @@ def main():
               'acceptance_program_sha256': digest(probe) if network is not None else None,
               'network_services': ['configd', 'mDNSResponder', 'mDNSResponderHelper'] if network is not None else [],
               'network_reconnect_test': network is not None,
+              'show_wifi_settings': args.show_wifi_settings,
+              'wifi_settings_details': args.wifi_settings_details,
+              'show_bilibili': args.show_bilibili,
+              'settings_program_sha256': digest(ui_probe) if args.show_wifi_settings or args.show_bilibili else None,
               'normal_root_unchanged': True, 'other_file_contents_and_modes_verified': True,
               'deployed': False}
     (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')

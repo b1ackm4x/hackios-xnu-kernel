@@ -171,6 +171,35 @@ python3 tools/lemonade-build-wifi-image.py --driver-files
 
 已验证范围是当前 5 GHz WPA2 网络上的基本 STA。WPA3-only、企业认证、休眠、漫游、峰值速度以及与 GPU/触控同时开启尚未验收；当前仍是定时 RAM 研究环境，没有安装到手机分区。
 
+## 原生设置页面截图（2026-10-24）
+
+`1792776765-screen.png` 是运行中读取的 1080×2400 帧缓冲：原生设置 Wi-Fi 开关开启，当前网络有勾选、加密与信号图标，附近网络列表可见。`1792777392-screen.png` 是点击当前网络信息按钮后的页面，显示自动 IPv4、已分配地址、子网掩码、路由器、IPv6 条目与自动 DNS。它们不是绘制的界面，也未改写截图内容；图片和逐图哈希记录只在私有 `local/lemonade/`，因为包含网络标识和地址。
+
+详情页对应日志 `1792777417` 的 61 项检查全部通过，首次连接及重连各 3/3 次 HTTP 请求成功。上一轮列表截图日志 `1792776886` 中重连后的第一次 DNS 查询失败，其余两次 HTTP 成功，不能计为该轮完整重连验收通过；两轮均正常退出。设置里的 Wi-Fi 地址目前仍来自加载器设备树占位值，不能当作无线芯片的真实地址；这不影响截图中 DHCP 地址和数据传输的实测记录。
+
+截图辅助程序 `tools/lemonade-wifi-ui.c` 只调用系统打开页面的接口及已有的虚拟触控入口，不提供假界面或修改显示值。设置页面的软件渲染需等待约 3–5 分钟；一次打开请求的返回值不替代屏幕证据。编译后，在已授权同机网络输入的临时镜像中启用：
+
+```sh
+# 在已配置 THEOS 的构建容器内：
+bash tools/lemonade-build-wifi-ui.sh
+# Android 在线且持有租约时，选其一：
+python3 tools/lemonade-build-wifi-image.py --driver-files --connect-current --show-wifi-settings
+python3 tools/lemonade-build-wifi-image.py --driver-files --connect-current --wifi-settings-details
+# 启动、上传系统镜像后，使用同一已验证内核运行 300 秒；
+# 运行中或正常返回加载器后读取实际画面：
+python3 tools/lemonade-usb.py screenshot
+```
+
+`--wifi-settings-details` 中的信息按钮坐标来自这台手机的上述实际截图，只适用于该布局。采集完成后仍须按前文清理私有输入并恢复 Android。
+
+## Safari 页面截图（2026-10-24）
+
+同一已验证内核、单 CPU 和软件渲染条件下，使用 `--driver-files --connect-current --show-bilibili` 构建临时镜像，辅助程序实际打开 `https://m.bilibili.com/`。浏览器模式额外加载本地 System 镜像中已有的 11 个原生安全与 Safari 服务，包含 trustd、securityd、nsurlsessiond 和 Safari/WebKit 相关服务；镜像构建会验证每个服务的可执行文件存在。
+
+私有 `1792777881-screen.png` 与 `1792777993-screen.png` 来自运行中的真实 1080×2400 帧缓冲，可见 Safari 的 bilibili.com 地址、HTTPS 锁图标，以及哔哩哔哩首页视频标题和播放量。封面仍为占位图，加载进度尚未结束，不能声称页面全部资源加载完成，也未测试视频播放。逐图哈希和来源记录保存在同目录 JSON，截图不进入仓库。
+
+本轮 `1792777966-run-cp0.log` 的 61 项联网和退出检查全部通过，首次连接、主动断开重连各完成 3/3 次 HTTP 验收；这与上述网页的视觉证据分开记录。含网络输入的临时镜像与上传载荷已在运行结束后自动删除，普通固件镜像已恢复。01:54 的 `android-roundtrip-20261024T015417.json` 确认原 Android 启动完成、精确 USB 目标与五个活动启动分区哈希一致，随后 wlan0 连通检查 3/3 成功。
+
 ## 验证与后续顺序
 
 先恢复原 Android，核对启动状态与既有五个启动分区备份哈希，再继续临时 RAM 测试。高通故障模式没有 ADB/Fastboot 通道时，需要实体键重启，不使用刷机或清除数据作为恢复手段。
