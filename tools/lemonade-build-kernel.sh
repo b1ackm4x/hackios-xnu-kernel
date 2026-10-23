@@ -18,6 +18,7 @@ from pathlib import Path
 paths = ['bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
          'bsd/dev/lemonade_touch.c', 'bsd/dev/lemonade_touch_protocol.h',
          'bsd/dev/lemonade_wifi.c', 'bsd/dev/lemonade_mhi_protocol.h', 'bsd/dev/redwood_wifi.c', 'bsd/dev/redwood_goodix.c',
+         'bsd/dev/redwood_lx.c', 'bsd/sys/redwood_lx.h', 'bsd/sys/redwood_qrtr.h', 'bsd/sys/lemonade_wifi.h',
          'bsd/dev/redwood_buttons.c', 'bsd/dev/redwood_input.c', 'bsd/sys/redwood_input.h',
          'osfmk/arm64/loader_return.c']
 inputs = {}
@@ -80,9 +81,14 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'touch_driver_supported': 'lemonade-s6sy792-v1',
           'touch_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch.c').read_bytes()).hexdigest(),
           'touch_protocol_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch_protocol.h').read_bytes()).hexdigest(),
-          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'phy', 'root', 'radio', 'link', 'endpoint', 'mmio', 'smmu', 'sid', 'dma', 'dma-fault', 'bhi', 'mhi', 'bhie', 'ipcr', 'qmi'],
+          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'phy', 'root', 'radio', 'link', 'endpoint', 'mmio', 'smmu', 'sid', 'dma', 'dma-fault', 'bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'],
           'wifi_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_wifi.c').read_bytes()).hexdigest(),
           'build_log': str(log), 'gpu_hardware_verified': False}
+ath = Path('xnu-deps/build/ath11k/out/ath11k.o')
+profile = Path('xnu-deps/build/ath11k/obj/.source-profile')
+if ath.exists() and profile.exists() and profile.read_text().strip() == 'src-lemonade':
+    record['wifi_driver_profile'] = 'qca6490-hw10-v1'
+    record['wifi_ath11k_sha256'] = hashlib.sha256(ath.read_bytes()).hexdigest()
 Path('out/lemonade-kernel.manifest.json').write_text(json.dumps(record, indent=2) + '\n')
 print(f'Checked lemonade XNU: {len(data)} bytes, SHA-256 {record["sha256"]}')
 PY

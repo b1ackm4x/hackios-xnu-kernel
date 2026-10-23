@@ -10,6 +10,7 @@
  * lemonade_wifi=1 only reads; it never starts the redwood AHB/WPSS path.
  */
 #include <kern/clock.h>
+#include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -17,6 +18,10 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <sys/redwood_input.h>
+#include <sys/errno.h>
+#include <sys/lemonade_wifi.h>
+#include <sys/redwood_lx.h>
+#include <sys/redwood_qrtr.h>
 #include <sys/systm.h>
 #include <vm/memory_types.h>
 #include <vm/vm_kern.h>
@@ -40,6 +45,19 @@ extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern lck_mtx_t redwood_smmu_lock;
 static void dma_restore(void);
+static void driver_quiesce(void);
+static bool driver_receive(const uint8_t *, unsigned);
+static LCK_GRP_DECLARE(lemonade_wifi_group, "lemonade-wifi");
+static LCK_MTX_DECLARE(lemonade_mhi_lock, &lemonade_wifi_group);
+static LCK_MTX_DECLARE(lemonade_window_lock, &lemonade_wifi_group);
+static unsigned wifi_mode;
+struct lemonade_packet { struct lemonade_packet *next; unsigned length; uint8_t data[]; };
+static struct {
+    volatile bool enabled, wanted, running, failed;
+    bool attached, called;
+    unsigned queued;
+    struct lemonade_packet *first, *last;
+} driver_runtime;
 
 /* Qualcomm's hypervisor emulates some SMMU registers. Use simple register
  * operands, as the existing Adreno driver does; never STR WZR or indexed STR. */
@@ -111,7 +129,27 @@ static void change_gcc(unsigned offset, uint32_t mask, uint32_t value) {
     saved_gcc[i].mask |= mask;
     wr(gcc + offset, (rd(gcc, offset) & ~mask) | (value & mask));
 }
+/* Final, non-sleeping fallback after other CPUs have stopped. Normal return
+ * calls lemonade_wifi_stop() while threads can still drain their queues. */
 void lemonade_wifi_quiesce(void) {
+    if (!bar_saved && !link_started && !radio_started) { return; }
+    driver_runtime.wanted = false;
+    driver_runtime.enabled = false;
+    if (bar_saved && (rd(dbi, 0x80) & (1u << 29))) {
+        if (msi_saved) { wr16(config + msi_offset + 2, msi_old_control & ~1u); }
+        wr16(config + 4, endpoint_command_old & ~6u);
+    }
+    if (pins && perst_saved) {
+        wr(pins + 94 * 0x1000 + 4, rd(pins, 94 * 0x1000 + 4) & ~2u);
+    }
+    if (pins && radio_started) {
+        wr(pins + 64 * 0x1000 + 4, rd(pins, 64 * 0x1000 + 4) & ~2u);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    redwood_tl("wifi-lemonade: emergency endpoint reset; DMA pages retained; Android reboot required\n");
+}
+void lemonade_wifi_stop(void) {
+    driver_quiesce();
     if (!saved_count && !parf_count && !perst_saved) { return; }
     if (bar_saved) {
         if (rd(dbi, 0x80) & (1u << 29)) {
@@ -835,6 +873,8 @@ static struct {
     uint64_t pending_command;
     uint32_t service_node, service_port, service_instance;
     bool channels, hello_sent, capability_seen, capability_ok;
+    uint8_t announcement[128];
+    unsigned announcement_length;
     unsigned transaction, message, response_result, response_error, memory_count;
     bool response_seen, memory_ready;
     struct { uint32_t size, type, configs; uint64_t address; } memory[16];
@@ -868,6 +908,7 @@ static bool ipcr_qrtr_send(uint32_t type, uint32_t source_port, uint32_t node, u
     return ipcr_send(packet, sizeof(header) + ((size + 3) & ~3u));
 }
 static bool ipcr_receive(const uint8_t *data, unsigned size) {
+    if (driver_runtime.enabled) { ipcr.rx_packets++; return driver_receive(data, size); }
     struct lemonade_qrtr_header header = {0};
     unsigned offset;
     if (size >= sizeof(header) && data[0] == 1) {
@@ -907,6 +948,9 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
             if (control.words[0] == 0x45 && (control.words[1] & 255) == 1) {
                 ipcr.service_node = control.words[2]; ipcr.service_port = control.words[3];
                 ipcr.service_instance = control.words[1] >> 8;
+                if (size <= sizeof(ipcr.announcement)) {
+                    memcpy(ipcr.announcement, data, size); ipcr.announcement_length = size;
+                }
             }
         }
     } else if (header.type == 1 && header.dest_port == 0x4000 &&
@@ -1273,7 +1317,7 @@ static bool ipcr_probe(unsigned step) {
         ipcr.service_port != 0, ipcr.service_instance, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if (!ready || !mhi_dma_ok()) { return false; }
     redwood_tl("wifi-lemonade: stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found\n");
-    if (step == 20) { return true; }
+    if (step == 20 || step >= 22) { return true; }
     /* WLFW requires the client registration and host capabilities before a
      * target capability query. Subscribe to the PCIe memory handshake. */
     static const uint8_t registration[] = {
@@ -1321,11 +1365,140 @@ static bool ipcr_probe(unsigned step) {
     return true;
 }
 
+unsigned lemonade_wifi_driver_mode(void) {
+    return driver_runtime.enabled ? wifi_mode : 0;
+}
+void *lemonade_wifi_driver_memory(unsigned long size, unsigned long long *iova) {
+    vm_offset_t memory = 0; uint64_t address = 0;
+    if (!lemonade_wifi_driver_mode() || driver_runtime.failed || size > 64u * 1024 * 1024 || !dma_allocate(size, true, &memory, &address)) { return NULL; }
+    *iova = address; return (void *)memory;
+}
+const uint8_t *lemonade_wifi_driver_file(const char *name, uint64_t *size) {
+    static const char prefix[] = "ath11k/QCA6490/hw1.0/";
+    if (!lemonade_wifi_driver_mode() || strncmp(name, prefix, sizeof(prefix) - 1)) { return NULL; }
+    const char *file = name + sizeof(prefix) - 1;
+    if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin")) { return NULL; }
+    const uint8_t *data = redwood_image_file("fw", file, size, NULL);
+    if (!data || !*size || *size > 1024 * 1024) { return NULL; }
+    redwood_tl("wifi-lemonade: ath11k original firmware file %s bytes %u\n", file, (unsigned)*size);
+    return data;
+}
+void *lemonade_wifi_driver_bar(void) { return lemonade_wifi_driver_mode() ? (void *)bar : NULL; }
+static bool driver_window(uint32_t offset, unsigned *windowed) {
+    if (!lemonade_wifi_driver_mode() || driver_runtime.failed || !bar || (offset & 3) || offset >= 0x2000000) { return false; }
+    if (offset < 0x80000) { *windowed = offset; return true; }
+    uint32_t value = 0x40000000u | ((offset >> 19) & 0x3f);
+    if (rd(bar, 0x310c) != value) {
+        wr(bar + 0x310c, value);
+        if (rd(bar, 0x310c) != value) { driver_runtime.failed = true; return false; }
+    }
+    *windowed = 0x80000 + (offset & 0x7ffff);
+    return true;
+}
+uint32_t lemonade_wifi_register_read(uint32_t offset) {
+    unsigned at; uint32_t value = 0;
+    lck_mtx_lock(&lemonade_window_lock);
+    if (driver_window(offset, &at)) { value = rd(bar, at); }
+    lck_mtx_unlock(&lemonade_window_lock);
+    return value;
+}
+void lemonade_wifi_register_write(uint32_t offset, uint32_t value) {
+    unsigned at;
+    lck_mtx_lock(&lemonade_window_lock);
+    if (driver_window(offset, &at)) { wr(bar + at, value); }
+    lck_mtx_unlock(&lemonade_window_lock);
+}
+static bool driver_receive(const uint8_t *data, unsigned length) {
+    if (!length || length > 8192 + 32 || driver_runtime.queued >= 32) { return false; }
+    struct lemonade_packet *packet = kalloc_data(sizeof(*packet) + length, Z_WAITOK | Z_ZERO);
+    if (!packet) { return false; }
+    packet->length = length; memcpy(packet->data, data, length);
+    if (driver_runtime.last) { driver_runtime.last->next = packet; }
+    else { driver_runtime.first = packet; }
+    driver_runtime.last = packet; driver_runtime.queued++;
+    return true;
+}
+static int driver_send(const void *packet, unsigned length) {
+    lck_mtx_lock(&lemonade_mhi_lock);
+    int error = !driver_runtime.enabled || driver_runtime.failed ? ENXIO : ipcr_send(packet, length) ? 0 : ENOBUFS;
+    lck_mtx_unlock(&lemonade_mhi_lock);
+    return error;
+}
+static void driver_wait(void) {
+    lx_os_lock(); lx_os_sleep(&driver_runtime.wanted, 1000000); lx_os_unlock();
+}
+static void driver_worker(void *unused) {
+    (void)unused;
+    redwood_qrtr_deliver(ipcr.announcement, ipcr.announcement_length);
+    while (driver_runtime.wanted) {
+        lck_mtx_lock(&lemonade_mhi_lock);
+        bool ok = mhi_events();
+        lck_mtx_unlock(&lemonade_mhi_lock);
+        if (!ok) { driver_runtime.failed = true; break; }
+        /* QRTR callbacks can send QMI replies and take sleeping locks. Never
+         * call them under the transport lock or while an RX slot is owned. */
+        while (driver_runtime.first) {
+            struct lemonade_packet *packet = driver_runtime.first;
+            driver_runtime.first = packet->next;
+            if (!driver_runtime.first) { driver_runtime.last = NULL; }
+            driver_runtime.queued--;
+            redwood_qrtr_deliver(packet->data, packet->length);
+            kfree_data(packet, sizeof(*packet) + packet->length);
+        }
+        redwood_qrtr_poll();
+        driver_wait();
+    }
+    driver_runtime.running = false;
+}
+static void driver_quiesce(void) {
+    if (driver_runtime.called) { redwood_lx_stop(); driver_runtime.called = false; }
+    driver_runtime.wanted = false;
+    lx_os_wakeup(&driver_runtime.wanted);
+    for (unsigned n = 0; driver_runtime.running && n < 2000; n++) { driver_wait(); }
+    lck_mtx_lock(&lemonade_mhi_lock);
+    driver_runtime.enabled = false;
+    lck_mtx_unlock(&lemonade_mhi_lock);
+    if (driver_runtime.running) {
+        /* An unjoined worker must not lose its mappings. The caller still
+         * resets the endpoint; RAM is reclaimed by the next kernel boot. */
+        dma_space.retain_pages = true;
+        redwood_tl("wifi-lemonade: driver worker stop timed out; DMA pages retained\n");
+        return;
+    }
+    if (driver_runtime.attached) { redwood_qrtr_detach(); driver_runtime.attached = false; }
+    while (driver_runtime.first) {
+        struct lemonade_packet *packet = driver_runtime.first;
+        driver_runtime.first = packet->next;
+        kfree_data(packet, sizeof(*packet) + packet->length);
+    }
+    driver_runtime.last = NULL; driver_runtime.queued = 0;
+}
+static bool driver_probe(void) {
+    if (!ipcr.announcement_length || !redwood_qrtr_attach(driver_send)) { return false; }
+    driver_runtime.attached = driver_runtime.enabled = driver_runtime.wanted = driver_runtime.running = true;
+    if (lx_os_thread("lemonade-mhi", driver_worker, NULL)) {
+        driver_runtime.running = false; return false;
+    }
+    if (wifi_mode == 24) {
+        uint8_t address[6];
+        if (!lx_os_radio_address(address)) { return false; }
+        lx_os_net_attach(address);
+    }
+    driver_runtime.called = true;
+    int result = redwood_lx_start();
+    bool ok = result == 0 && !driver_runtime.failed && mhi_dma_ok();
+    redwood_tl("wifi-lemonade: ath11k driver result %d transport_failed %u FSR %#x global %#x\n",
+        result, driver_runtime.failed, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    if (ok) { redwood_tl("wifi-lemonade: stage 22 QCA6490 major-1 ath11k startup completed\n"); }
+    return ok;
+}
 static bool mhi_probe(unsigned step) {
     if (!mhi_ready()) { return false; }
     if (step == 18) { return true; }
     if (!mhi_full_firmware()) { return false; }
-    return step == 19 || ipcr_probe(step);
+    if (step == 19) { return true; }
+    if (!ipcr_probe(step)) { return false; }
+    return step < 22 || driver_probe();
 }
 
 static bool power_root(unsigned step) {
@@ -1518,7 +1691,7 @@ void lemonade_wifi_init(void) {
         redwood_tl("wifi-lemonade: refused on another platform\n");
         return;
     }
-    if (mode < 1 || mode > 21) {
+    if (mode < 1 || mode > 24) {
         redwood_tl("wifi-lemonade: mode %u unsupported; no hardware access\n", mode);
         return;
     }
@@ -1541,11 +1714,16 @@ void lemonade_wifi_init(void) {
         }
     }
     redwood_tl("wifi-lemonade: begin PCIe/CNSS survey mode %u\n", mode);
+    wifi_mode = mode;
     bool ok = inspect();
     redwood_tl("wifi-lemonade: inspection %s; hardware writes=0; network unavailable\n", ok ? "complete" : "failed");
     if (ok && mode >= 2) {
         ok = power_root(mode);
-        redwood_tl("wifi-lemonade: stage %u %s; network unavailable\n", mode, ok ? "passed" : "failed");
-        lemonade_wifi_quiesce();
+        redwood_tl("wifi-lemonade: stage %u %s; networking not yet verified\n", mode, ok ? "passed" : "failed");
+        if (ok && mode == 24) {
+            redwood_tl("wifi-lemonade: station offered to iOS; runtime kept until normal stop\n");
+        } else {
+            lemonade_wifi_stop();
+        }
     }
 }

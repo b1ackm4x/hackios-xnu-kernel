@@ -5,13 +5,16 @@ The device is selected by the hardware serial hash in the private baseline,
 never by the first Android device in a list. Acquire its Device Hub lease first.
 """
 import argparse
+import atexit
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import time
 import zlib
 
@@ -54,6 +57,7 @@ def verified_firmware_overlay(kernel_hash):
 
 
 def main():
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("status", "boot", "log", "memmap", "selftest", "run", "ramdisk", "screenshot", "reboot"))
     parser.add_argument("--checkpoint", type=int, default=0, help="XNU bring-up checkpoint; 0 runs normally")
@@ -66,13 +70,16 @@ def main():
     parser.add_argument("--boot-cpu", type=int, choices=range(8), help="physical boot core, 0..7; 7 is the SM8350 prime core")
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
+    parser.add_argument('--network-test', action='store_true', help='explicit RAM-only association/DHCP/traffic acceptance with a private current-network overlay')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
-    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi"), help="bounded PCIe bring-up stages; none enables networking")
+    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
                         help="SM8350 EPSS policy: inspect only, or capped stock OPPs with restore on return")
     parser.add_argument("--profile", choices=("performance",),
                         help="bounded desktop session: adapted kernel, four big cores, capped CPU policy and GPU")
     args = parser.parse_args()
+    if args.network_test and (args.action != 'run' or args.wifi != 'station' or not args.userland):
+        parser.error('--network-test requires run --wifi station --userland')
     if args.profile:
         if args.action != "run" or args.checkpoint or args.gpu_step:
             parser.error("Performance profile requires a normal run, without a checkpoint or GPU step")
@@ -95,7 +102,7 @@ def main():
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
     if args.wifi and args.wifi != "inspect" and (args.touch or args.gpu or args.cpu_policy != "firmware"):
         parser.error("Wi-Fi root-power probe must run without touch, GPU or CPU-policy changes")
-    if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi') and not args.userland:
+    if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station') and not args.userland:
         parser.error('BHI firmware test requires --userland and the verified private firmware overlay')
     if args.cpu_policy != "firmware" and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU policy requires run --kernel built")
@@ -274,11 +281,42 @@ def main():
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
         if args.wifi:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
-            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17, "mhi": 18, "bhie": 19, "ipcr": 20, "qmi": 21}[args.wifi])
+            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17, "mhi": 18, "bhie": 19, "ipcr": 20, "qmi": 21, "driver": 22, "scan": 23, "station": 24}[args.wifi])
         firmware_record = guard_record = None
+        network_record = network_helper = None
         firmware_overlay = None
-        if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi'):
+        if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'):
             firmware_overlay, firmware_record, guard_record = verified_firmware_overlay(expected_kernel)
+            if bool(firmware_record.get('network_private')) != args.network_test:
+                raise SystemExit('Private network overlay and --network-test must be selected together')
+            if args.network_test:
+                sys.path.insert(0, str(ROOT / 'tools/apfs'))
+                import apfs
+                container = apfs.Container(str(firmware_overlay))
+                try:
+                    volume = apfs.pick_volume(container, None)
+                    found = volume.lookup('fw/lemonade-network')
+                    if found is None:
+                        raise SystemExit('Private network file is missing')
+                    inode = volume.inode(found[0])
+                    if inode.mode != 0o100600 or inode.owner != 0 or inode.group != 0:
+                        raise SystemExit('Invalid private network file permissions')
+                    network_record = inode.contents()
+                finally:
+                    container.close()
+                spec = importlib.util.spec_from_file_location('private_network', ROOT / 'tools/lemonade-network.py')
+                network_helper = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(network_helper)
+                network_helper.unpack(network_record)
+                # These are temporary secret-bearing artifacts, including on failure.
+                atexit.register(firmware_overlay.unlink, missing_ok=True)
+                atexit.register((ROOT / 'out/lemonade-xnu.bin').unlink, missing_ok=True)
+            if args.wifi in ('driver', 'scan', 'station'):
+                if kernel_manifest.get('wifi_driver_profile') != 'qca6490-hw10-v1':
+                    raise SystemExit('Refusing: kernel does not include the dedicated QCA6490 major-1 driver')
+                for name in ('m3.bin', 'board.bin', 'regdb.bin'):
+                    if not firmware_record.get('firmware', {}).get(name, {}).get('sha256'):
+                        raise SystemExit('Refusing: original driver firmware is missing: ' + name)
             cmdline += ' lemonade_dma_verified=1'
         if args.cpu_policy != "firmware":
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("cpufreq="))
@@ -309,6 +347,7 @@ def main():
         record["profile"] = args.profile
         record["touch"] = args.touch
         record["wifi"] = args.wifi
+        record['network_test'] = args.network_test
         if firmware_record:
             record['wifi_firmware'] = firmware_record
             record['dma_guard'] = guard_record
@@ -321,7 +360,11 @@ def main():
                 record['images'].pop('userland/root.apfs')
                 record['images']['out/lemonade-wifi/root.apfs'] = firmware_record
         (ROOT / "out/lemonade-xnu.manifest.json").write_text(json.dumps(record, indent=2) + "\n")
-        fb(serial, "stage", str(payload), timeout=60)
+        try:
+            fb(serial, "stage", str(payload), timeout=60)
+        finally:
+            if args.network_test:
+                payload.unlink(missing_ok=True)
     if args.action == "selftest":
         payload = ROOT / "out/lemonade-selftest.bin"
         manifest = json.loads((ROOT / "out/lemonade-selftest.manifest.json").read_text())
@@ -347,6 +390,19 @@ def main():
                 delay = min(10, remaining)
                 time.sleep(delay)
                 remaining -= delay
+                if args.network_test and args.boot_cpu == 7 and not record['live_logs']:
+                    # Preserve early driver trace from this same run while the
+                    # loader is alive on core 0. The separate printf message
+                    # buffer can still rotate before the final collection.
+                    live_path = ROOT / 'local/lemonade' / f'{int(time.time())}-network-early.log'
+                    try:
+                        fb(serial, 'oem', 'log', timeout=5)
+                        fb(serial, 'get_staged', str(live_path), timeout=10)
+                    finally:
+                        if live_path.exists():
+                            live_path.write_bytes(network_helper.redact(live_path.read_bytes(), network_record))
+                    record['live_logs'].append({'path': str(live_path.relative_to(ROOT)),
+                                               'sha256': hashlib.sha256(live_path.read_bytes()).hexdigest()})
                 if args.metrics and args.boot_cpu == 7 and remaining > 8:
                     # The loader remains on core 0. Preserve the rolling kernel
                     # trace before a busy animation can overwrite its 1 MiB ring.
@@ -370,9 +426,25 @@ def main():
     if args.action in ("log", "memmap", "selftest", "run"):
         label = args.action if args.action != "run" else f"run-cp{args.checkpoint}"
         dest = ROOT / "local/lemonade" / f"{int(time.time())}-{label}.log"
-        fb(serial, "get_staged", str(dest), timeout=30)
+        try:
+            fb(serial, "get_staged", str(dest), timeout=30)
+        finally:
+            if args.action == 'run' and network_record is not None:
+                if dest.exists():
+                    dest.write_bytes(network_helper.redact(dest.read_bytes(), network_record))
+                    record['network_identity_redacted'] = True
+                firmware_overlay.unlink(missing_ok=True)
         print(f"Saved private device evidence: {dest}")
         if args.action == "run":
+            if network_record is not None and record['live_logs']:
+                pieces = []
+                for item in record['live_logs']:
+                    part = (ROOT / item['path']).read_bytes()
+                    if hashlib.sha256(part).hexdigest() != item['sha256']:
+                        raise SystemExit('Same-run early evidence changed before completion')
+                    pieces.append(part)
+                pieces.append(dest.read_bytes())
+                dest.write_bytes(b'\n=== same-run network evidence segment ===\n'.join(pieces))
             record.update({"result": result, "log_sha256": hashlib.sha256(dest.read_bytes()).hexdigest()})
             dest.with_suffix(".manifest.json").write_text(json.dumps(record, indent=2) + "\n")
             if args.gpu_step and f"adreno: step {args.gpu_step}: done" not in dest.read_text(errors="replace"):

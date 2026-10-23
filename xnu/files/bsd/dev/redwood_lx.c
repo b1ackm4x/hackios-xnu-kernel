@@ -23,6 +23,7 @@
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
+#include <sys/lemonade_wifi.h>
 #include <sys/random.h>
 #include <sys/redwood_input.h>
 #include <sys/redwood_lx.h>
@@ -65,6 +66,7 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
 {
 	vm_offset_t cached = 0, uncached;
 	uint64_t physical;
+	if (lemonade_wifi_driver_mode()) { return lemonade_wifi_driver_memory(size, address); }
 
 	size = round_page(size);
 	if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
@@ -84,6 +86,11 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
 	}
 	return (void *)uncached;
 }
+
+unsigned lx_os_radio_platform(void) { return lemonade_wifi_driver_mode() ? 1 : 0; }
+void *lx_os_pcie_bar(void) { return lemonade_wifi_driver_bar(); }
+unsigned lx_os_pcie_read(unsigned offset) { return lemonade_wifi_register_read(offset); }
+void lx_os_pcie_write(unsigned offset, unsigned value) { lemonade_wifi_register_write(offset, value); }
 
 void *
 lx_os_map_registers(unsigned long long physical, unsigned long size)
@@ -208,6 +215,15 @@ lx_os_random(void *buffer, unsigned long size)
 unsigned
 lx_os_option(const char *name)
 {
+	unsigned mode = lemonade_wifi_driver_mode();
+	if (mode) {
+		if (!strcmp(name, "wifi_lx")) { return 2; }
+		if (!strcmp(name, "wifi_quiet")) { return 1; }
+		if (!strcmp(name, "wifi_irq")) { return 0; }
+		if (!strcmp(name, "wifi_scan")) { return mode == 23; }
+		if (!strcmp(name, "wifi_station")) { return mode == 24; }
+		if (!strcmp(name, "wifi_join")) { return 0; }
+	}
 	return redwood_wifi_option(name);
 }
 
@@ -215,7 +231,8 @@ int
 lx_os_firmware(const char *name, const void **data, unsigned long *size)
 {
 	uint64_t length = 0;
-	const uint8_t *file = redwood_wifi_driver_file(name, &length);
+	const uint8_t *file = lemonade_wifi_driver_mode() ? lemonade_wifi_driver_file(name, &length) :
+	    redwood_wifi_driver_file(name, &length);
 
 	if (file == NULL) {
 		return ENOENT;
@@ -228,12 +245,20 @@ lx_os_firmware(const char *name, const void **data, unsigned long *size)
 int
 lx_os_rproc_boot(void)
 {
+	if (lemonade_wifi_driver_mode()) { return 0; }
 	return redwood_wifi_dsp_is_up() ? 0 : ENXIO;
 }
 
 int
 lx_os_radio_address(unsigned char *address)
 {
+	if (lemonade_wifi_driver_mode()) {
+		static unsigned char local[6];
+		static bool ready;
+		if (!ready) { read_random(local, sizeof(local)); local[0] = (local[0] & 0xfe) | 2; ready = true; }
+		memcpy(address, local, sizeof(local));
+		return 1;
+	}
 	return redwood_wifi_radio_address(address);
 }
 

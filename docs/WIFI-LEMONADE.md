@@ -1,8 +1,8 @@
 # OnePlus 9 Wi-Fi 移植记录
 
-截至 2026-10-23，Wi-Fi 尚不能扫描、连接或联网。当前已完成 PCIe 上电/链路、BDF→SID、独立 SMMU 地址空间、真实越界 DMA 拦截、BHI/SBL、MSI/MHI M0、BHIE 全镜像启动，以及 IPCR 20/21 双向收发和 WLFW 服务发现。QMI 客户端登记、主机能力、固件内存握手和能力查询均已通过；射频初始化与网络收发尚未实现。首次整段上电的历史故障及后续修正见下文。
+截至 2026-10-24，QCA6490 major 1 已在本机 iOS RAM 环境完成 ath11k 启动、扫描、WPA2 关联、DHCP 分配 IPv4、DNS 和真实 HTTP 传输。最终 240 秒测试中，首次连接与主动断开后的重新连接各完成 3/3 次 HTTP 请求，阶段、联网及正常退出检查全部通过。01:17 已恢复原 Android，五个启动分区哈希与备份一致，原 Wi-Fi 连通检查 3/3 成功。历史失败及修正见下文。
 
-major 1 的源码核对结果和具体实施顺序见 [QCA6490 major 1 适配方案](WIFI-QCA6490-PLAN.md)。目前有明确的原厂参考和部分寄存器/描述符复用证据，目前已有首段固件进入 SBL 的本机证据，尚无完整运行固件的握手或联网结果。
+major 1 的源码核对结果和具体实施顺序见 [QCA6490 major 1 适配方案](WIFI-QCA6490-PLAN.md)。当前已有完整固件握手、无线扫描、iOS 接口和基本联网的本机证据。
 
 开发分支：`codex/lemonade-wifi`。`device/lemonade` 保留此前 GPU、实体触控和研究文档的基线。本轮不修改手机分区、启动槽位、Android Wi-Fi 配置或设备校准数据。
 
@@ -73,7 +73,7 @@ PCI ID `17cb:1103` 相同不代表芯片修订相同。项目 `tools/mk-ath11k.s
 
 OnePlus 原厂 `cnss_pci_update_fw_name()` 对 QCA6490 major 2 选择 `amss20.bin`，其他修订选择 `amss.bin`。已按此规则从同一台原 Android 读取 `amss.bin`（5,178,848 字节）和 `m3.bin`（266,684 字节），与手机端哈希匹配；只保存在被 Git 忽略的 `local/lemonade/wifi/firmware/`。本轮把 `amss.bin` 加入独立的私有 RAM 镜像，前 512 KiB 已通过 BHI 传输；`m3.bin` 尚未发送给固件。23:05 又只读取得原机板级 ELF（59,908 字节）和原厂日志确认使用的监管数据库（19,348 字节），设备端 SHA-256 与主机一致；它们与 M3 已加入新的私有测试镜像，正常镜像未改变。
 
-MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execution environment `0`（PBL），状态 `0`；PBL 阶段 MHIVER 读数为 `0xdeadbeef`，不作为运行固件已经就绪的证据。19:30 之前的测试保持 endpoint Bus Master 关闭。后续受限 DMA/BHI 结果见下节；后续 MSI/MHI/IPCR 结果见下节；CPU 中断处理、扫描、关联或 IP 网络仍未验证。
+MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execution environment `0`（PBL），状态 `0`；PBL 阶段 MHIVER 读数为 `0xdeadbeef`，不作为运行固件已经就绪的证据。19:30 之前的测试保持 endpoint Bus Master 关闭。后续受限 DMA/BHI 结果见下节；后续 MSI/MHI/IPCR 结果见下节；CPU 中断处理仍未接入，当前使用轮询；后续扫描和接口结果见下文，后续关联与 IP 网络结果见下文。
 
 已完成 **BDF → SID → SMMU → 受限 DMA 缓冲区 → BHI/SBL**。原厂 `msm_pcie_config_sid()` 使用的 PARF CRC8 索引表已在独立阶段设置和恢复；实际端点故障确认请求确实携带 `0x1c01`。现已进一步验证 MHI context/event ring、READY→M0 和完整固件 BHIE；下一边界为 WLFW 内存/板级数据握手和网络驱动接入。现有 redwood 驱动的 SMMU/缓存维护代码可作参考，但它的 WPSS/AHB 启动和固定 WCN6750 配置不能直接调用。
 
@@ -111,6 +111,66 @@ MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execu
 
 以上都不是射频 ready、扫描、关联或获取 IP 的证据。原始日志、镜像和失败尝试仅在忽略目录 `local/lemonade/wifi/mhi-20261023/` 下保存。23:03 已恢复同一 USB 目标的原 Android，五个活动启动分区哈希与备份全部一致；随后 `wlan0` 实际 IP 连通测试 3/3 成功。记录为 `android-roundtrip-20261023T230331.json`。
 
+## 完整 ath11k 接入中的实测边界
+
+23:22 后新增 `driver`（22）和 `scan`（23）入口：独立 QCA6490 major 1 profile、PCIe 动态窗口、受限 DMA 池（后续修正为 64 MiB）、MHI 到现有 QRTR/QMI 的工作线程，以及原机 board/regdb/M3 的私有文件桥接，已编译进内核。未把硬件版本伪装为 major 2，WLAN CE2 的 host/target 上限同时设为原厂 3200 字节。
+
+首次完整驱动测试 `1792769074` 能找到 WLFW 并发送登记/主机能力消息，但回复固件内存请求后收到 MHI SYSTEM_ERROR，阶段 22 失败。日志 `1792769478` 在修正 coherent 分配到 16 KiB 对齐后仍复现：type 1 / 5,111,808 字节和 type 4 / 3,735,552 字节的请求正确解码，SMMU `FSR=0x400`、全局状态 0，但固件没有进入 memory-ready。不能据此把错误归因于越界 DMA，也不能宣称对齐修正已解决启动问题。
+
+内核 `126c6a26149088333e960b147a17518d68c375398f6011ece40114792605c7a6` 的实测 `1792770188` 已越过该错误：DMA 地址按覆盖申请大小的二次幂对齐（5,111,808 字节申请得到 8 MiB 对齐），池扩为 64 MiB 后，完整 ath11k 成功完成内存交接、能力查询、regdb/board 分段传输、M3 信息、WLAN 配置和运行模式请求。MHI 未再报 SYSTEM_ERROR，SMMU 无故障。仅去掉主机能力中的内存模式字段的对比测试 `1792769885` 未解决问题，该试改已撤回。
+
+补齐 `mem_ce=mem` 后，内核 `ede2f723af317083d5d14dcd54fe129db63aaff40cf0051c09381edf774e4e57` 在日志 `1792770642` 中**通过阶段 22**：收到 HTC/WMI 控制回复与真实 unified-ready，注册无线接口及双频能力，驱动返回 0、transport_failed=0、SMMU 无故障。随后正常卸载并退回加载器，MSI、Bus Master、BAR、SMMU/SID 的清理读回通过。已确认此前错误偏移来自 PCIe `mem_ce` 未初始化，不是芯片未知寄存器。
+
+同一内核在日志 `1792770802` 中通过阶段 23：35 个信道的被动扫描在 3,764 ms 完成，收到 20 个接入点（2.4 GHz 13 个、5 GHz 7 个），共 28 帧，随后驱动及映射正常清理。扫描日志不保存 SSID/BSSID。该次扫描本身不证明关联或联网；后续联网实测见下文。
+
+原机 `board.bin`、`regdb.bin`、`m3.bin` 已分别核对设备来源与 SHA-256，只进入忽略目录中的测试 APFS；正常根镜像和 System 镜像保持原哈希。`tools/qmi-test/run.sh` 在地址/未定义行为检查下完成 56,628 项测试（含 PCIe 内存回复的独立字节向量），无失败。这是主机编解码证据，不替代固件执行结果。
+
+## iOS 无线接口与联网验收
+
+2026-10-24 的内核 `fbc1f929a818d09973ce3e30102c3348e7853f53ab498f8f9d04d1e27b9f4c9a` 新增 `station`（24）。同内核 guard 日志 `1792771598` 通过；接口测试日志 `1792771726` 通过阶段 24，en0 已附着，STA interface 添加成功，驱动保持运行至 90 秒定时结束。正常停止先退出 station/ath11k，再停止 MHI 工作线程并恢复 MSI、Bus Master、BAR、SMMU 和 SID；未进入紧急复位后保留 DMA 页的回退路径。
+
+`tools/lemonade-net-test.m` 是单独编译、仅装入测试根镜像的用户态程序，通过 iOS Apple80211 发起关联，然后请求 configd DHCP，排除链路本地 IPv4，再解析域名并完成三次绑定 en0 的 HTTP 请求。每次都要求 HTTP 200、非空数据和预期响应内容；随后主动断开并重复关联和网络请求。编译和合成测试不替代实际运行证据。构建入口为 `bash tools/lemonade-build-net-test.sh`，会记录可执行文件与源码哈希；镜像构建拒绝与记录不符的程序。
+
+`--connect-current` 只用于用户明确批准的凭据转送：在核对 USB 目标后，从当前 Android Wi-Fi 配置中选择唯一匹配网络；临时文件权限 0600。`--network-test` 与私有网络镜像必须同时选择，上传后的合成载荷会删除，测试日志去除网络名、密码和 MAC 地址，进程退出时删除含凭据的 APFS。普通固件、扫描和 station 测试不读取密码。该入口仅在用户明确授权后使用。离线集成使用虚构凭据通过了 3 项测试：APFS 只改变指定固件、程序、私有输入和启动项及其权限，模拟传送后的日志脱敏与临时文件清理，以及上传失败时的清理；这些测试没有运行任何真实设备命令。
+
+00:12 已恢复原 Android，五个活动启动分区哈希全部保持一致，记录为 `android-roundtrip-20261024T001206.json`；随后 wlan0 实际连通测试 3/3 成功、零丢包。
+
+## DHCP 与真实网络传输
+
+首轮日志 `1792774109` 已完成 5 GHz / 5240 MHz 的 WPA2-PSK/CCMP 认证、关联和四次握手，但 DHCP 查询返回服务不存在。检查证实精简根镜像未启用 configd、mDNSResponder 和 mDNSResponderHelper；三个程序及 IPConfiguration 插件都已在原 System 镜像中。测试根镜像现在从本机原版 iOS 文件中加入这三个启动项，System 镜像不变。
+
+第二轮日志 `1792774726` 中，关联耗时 3.7 秒，configd 接受 DHCP 请求，3.4 秒后 en0 得到有效 IPv4。DNS 成功，三个绑定 en0 的独立 HTTP 请求均收到 200、402 字节和预期 `Success` 内容；停止时仍保持连接，51 帧发送失败为 0。其滚动消息缓冲覆盖了最早的 en0 附着行，旧验证器因此拒绝全项通过。工具现于同次运行第 10 秒保存并脱敏早期驱动 trace，结束时校验哈希后与末尾记录拼接；独立的 printf 消息缓冲仍可能覆盖附着行，不补写任何硬件事件。联网模式允许用成功的 Apple80211 关联、DHCP、有效 IPv4 和三次绑定 en0 的实际传输共同证明无线接口可用；`redwood_net.c` 仅允许无线接口处理 Apple80211 ioctl。普通 station 测试仍要求原始附着行。
+
+最终日志 `1792775487-run-cp0.log` 使用上述同一内核，所有阶段、联网和正常退出检查均通过，验证器输出 `networking_verified: true`：
+
+| 验收项 | 首次连接 | 主动断开后重连 |
+|---|---|---|
+| WPA2 关联成功 | 3.5 秒 | 0.4 秒 |
+| configd 接受 DHCP；en0 有效 IPv4 | 2.9 秒 | 0.5 秒 |
+| DNS 与绑定 en0 的 HTTP | 3/3，均 200、406 字节、预期内容 | 3/3，均 200、402 字节、预期内容 |
+
+两轮之间明确发送断开命令并观察到 idle。240 秒结束后 station/ath11k 正常停止，MSI、Bus Master、BAR、SMMU/SID 清理读回通过，没有进入紧急复位路径。01:17 的 `android-roundtrip-20261024T011718.json` 确认精确 USB 目标恢复 Android、B 槽和解锁状态不变、五个活动启动分区哈希一致；随后原 Android 的 wlan0 连通测试 3/3 成功。含凭据的 APFS 与上传载荷均已删除，普通固件测试镜像已恢复，正常 root/System 镜像哈希未变。私有验收归档位于 `local/lemonade/wifi/mhi-20261023/network-verified/`，不含凭据镜像。
+
+普通固件镜像与含网络输入的镜像分开使用。联网复现需要明确批准本机已保存网络凭据的临时使用，然后在 Android 在线时生成测试镜像：
+
+```sh
+# 在已配置 THEOS 的构建容器内执行：
+bash tools/lemonade-build-net-test.sh
+# 在持有精确设备租约的宿主机上，Android 仍在线时执行：
+python3 tools/lemonade-build-wifi-image.py --driver-files --connect-current
+python3 tools/lemonade-usb.py boot
+python3 tools/lemonade-usb.py ramdisk
+# 同一内核须已有通过的真实 DMA guard 记录。
+python3 tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi station --network-test --seconds 240
+python3 tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
+python3 tools/lemonade-usb.py reboot
+python3 tools/lemonade-verify-android.py
+# 恢复不含网络输入的普通固件测试镜像：
+python3 tools/lemonade-build-wifi-image.py --driver-files
+```
+
+已验证范围是当前 5 GHz WPA2 网络上的基本 STA。WPA3-only、企业认证、休眠、漫游、峰值速度以及与 GPU/触控同时开启尚未验收；当前仍是定时 RAM 研究环境，没有安装到手机分区。
+
 ## 验证与后续顺序
 
 先恢复原 Android，核对启动状态与既有五个启动分区备份哈希，再继续临时 RAM 测试。高通故障模式没有 ADB/Fastboot 通道时，需要实体键重启，不使用刷机或清除数据作为恢复手段。
@@ -140,19 +200,19 @@ python3 tools/lemonade-verify-android.py
 
 内核变化后，旧 guard 记录不再满足前置条件。`bhi` 使用单独的 `out/lemonade-wifi/root.apfs`；正常镜像仍保留原哈希。
 
-验证器检查日志哈希、模式、返回状态、阶段完成标记和恢复标记；即使全部通过，也固定输出 `networking_verified: false`。主机测试包含旧内核能力拒绝、错误目标拒绝、阶段参数和并发资源限制等场景。
+验证器检查日志哈希、模式、返回状态、阶段完成标记和恢复标记；普通阶段即使通过，也输出 `networking_verified: false`；显式联网验收则额外要求实际关联、DHCP、有效 IPv4、DNS 和三次绑定 en0 的 HTTP 证据。当前重连验收配置还要求主动断开到 idle，以及第二轮完整联网成功。主机测试包含旧内核能力拒绝、错误目标拒绝、阶段参数和并发资源限制等场景。
 
-最新主机验证包含 32 项 USB/固件前置条件、15 项阶段证据与故障掩码反例，以及独立 C 协议布局/环指针测试，全部通过。此前 3 项 Android 校验边界测试也已通过。另验证了首段 CRC32 标准向量及 APFS 内容/权限/符号链接读取。它们不替代上述实机日志，也不证明网络协议栈可用。
+最新主机验证包含 32 项 USB/固件前置条件、18 项阶段/联网证据与故障掩码反例，以及独立 C 协议布局/环指针测试，全部通过。此前 3 项 Android 校验边界测试也已通过。另验证了首段 CRC32 标准向量及 APFS 内容/权限/符号链接读取。它们不替代上述实机日志，也不证明网络协议栈可用。
 
-后续按依赖推进：
+已完成的依赖链与后续边界：
 
 1. 已完成电源/时钟/复位/PARF/PHY/DBI 与退出恢复；每级保留日志和内核哈希。
 2. 已训练链路、读取 `17cb:1103` 端点及内部硬件版本；固件阶段仅在受限 SMMU 已就绪后开启 Bus Master，退出前确认清零。
-3. 已验证 PARF BDF-to-SID、SMMU DMA 隔离、BHI/SBL、MHI M0、BHIE 全镜像及 IPCR/WLFW；继续补齐 QMI 初始化、内存请求和板级文件传输。
-4. 补充 QCA6490 major 1 的兼容性证据和 ath11k 参数，为已有兼容层补 PCIe/MHI 与相应芯片数据路径，再接入扫描、关联和 en0；不将上游 AHB 总线假设继续套用。
-5. 使用用户指定网络验证 DHCP、DNS、实际 HTTP 传输、重连及退出恢复。只有这些结果完成后，才能报告 Wi-Fi 可用。
+3. 已验证 PARF BDF-to-SID、SMMU DMA 隔离、BHI/SBL、MHI M0、BHIE 全镜像及 IPCR/WLFW；QMI 初始化、内存请求和板级文件传输也已通过。
+4. 独立 QCA6490 major 1 profile、PCIe/MHI 兼容层、扫描、en0 和实际关联已通过。
+5. 用户授权的当前网络已通过 DHCP、DNS、六次 HTTP 传输、主动断开重连及退出恢复；基本 STA 联网目标完成。后续另行验证长期稳定性、其他认证方式和 GPU/触控同时运行。
 
-固件内容、板级校准、MAC、SSID、密码及原始设备树只留在被 Git 忽略的私有目录。本轮采集器不读取网络凭据，也不输出网络标识。
+固件内容、板级校准及原始设备树仅保存在被 Git 忽略的私有目录。扫描日志不保存网络标识；联网测试的凭据仅用于明确批准的临时传送，完成后删除，不进入仓库。
 
 ## 可复核的公开来源
 

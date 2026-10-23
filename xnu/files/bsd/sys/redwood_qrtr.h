@@ -46,4 +46,12 @@ struct redwood_qrtr_ops {
 /* The transport there is; NULL takes it away (handles made before keep the one they were made with). */
 void redwood_qmi_set_transport(const struct redwood_qrtr_ops *ops);
 
+/* A different packet transport may reuse the router without starting GLINK.
+ * Attach/detach with no clients or delivery thread running. Deliver and poll
+ * from one thread, outside the packet transport's lock; callbacks may send. */
+bool redwood_qrtr_attach(int (*send)(const void *, unsigned));
+void redwood_qrtr_deliver(const void *packet, unsigned length);
+void redwood_qrtr_poll(void);
+void redwood_qrtr_detach(void);
+
 #endif /* _SYS_REDWOOD_QRTR_H_ */

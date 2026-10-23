@@ -628,7 +628,7 @@ linuxkpi_ieee80211_scan_completed(struct ieee80211_hw *hw, struct cfg80211_scan_
 	lx_os_unlock();
 }
 
-/* What was heard, the strongest first. Names and addresses of other people's networks: for the log of the run only. */
+/* What was heard, strongest first. Never log network names or addresses. */
 static void
 say_heard(struct lx_radio *radio)
 {
@@ -639,7 +639,6 @@ say_heard(struct lx_radio *radio)
 
 	for (unsigned n = 0; n < radio->heard_count; n++) {
 		const struct lx_heard *network = NULL;
-		char name[33];
 		unsigned which = 0, channel;
 		bool wanted;
 
@@ -650,10 +649,7 @@ say_heard(struct lx_radio *radio)
 			}
 		}
 		said[which] = true;
-		for (unsigned i = 0; i < network->name_length; i++) {
-			name[i] = network->name[i] >= 0x20 && network->name[i] < 0x7f ? (char)network->name[i] : '?';
-		}
-		name[network->name_length] = 0;
+
 		channel = channel_of(network->frequency);
 		if (channel < nitems(on_channel)) {
 			on_channel[channel]++;
@@ -666,10 +662,10 @@ say_heard(struct lx_radio *radio)
 		/* (the network that is wanted is the user's own: its name is not said even here) */
 		wanted = radio->want_length != 0 && network->name_length == radio->want_length &&
 		    memcmp(network->name, radio->want, radio->want_length) == 0;
-		printf("lx: heard: channel %3u (%u MHz) %4d dBm  %02x:%02x:%02x:%02x:%02x:%02x  %s, %u times  \"%s\"\n", channel,
-		    network->frequency, network->signal, network->sender[0], network->sender[1], network->sender[2], network->sender[3],
-		    network->sender[4], network->sender[5], !(network->capability & 0x10) ? "open" : network->protected ? "RSN" :
-		    "protected", network->times, wanted ? "(the network that is wanted)" : name);
+		(void)wanted;
+		printf("lx: heard: channel %3u (%u MHz) %4d dBm %s, %u times; identity omitted\n", channel,
+		    network->frequency, network->signal, !(network->capability & 0x10) ? "open" :
+		    network->protected ? "RSN" : "protected", network->times);
 	}
 	for (unsigned channel = 0; channel < nitems(on_channel); channel++) {
 		if (on_channel[channel] != 0) {

@@ -2762,6 +2762,8 @@ static struct {
 static uint32_t qrtr_peer;                      /* the DSP's node; 0: it has not said */
 static uint32_t qrtr_next_port = QRTR_FIRST_PORT, qrtr_in, qrtr_out, qrtr_hellos;
 static thread_t link_thread_is;
+static int (*qrtr_packet_send)(const void *, unsigned);
+static bool qrtr_external_transport;
 
 /* One datagram out, of any type. */
 static int
@@ -2786,7 +2788,8 @@ qrtr_out_packet(uint32_t type, uint32_t from_port, uint32_t to_node, uint32_t to
 	packet->to_node = to_node;
 	packet->to_port = to_port;
 	memcpy(packet + 1, data, length);
-	error = glink_send(packet, (uint32_t)sizeof(*packet) + padded);
+	error = qrtr_packet_send != NULL ? qrtr_packet_send(packet, (uint32_t)sizeof(*packet) + padded) :
+	    qrtr_external_transport ? ENXIO : glink_send(packet, (uint32_t)sizeof(*packet) + padded);
 	kfree_data(packet, sizeof(*packet) + padded);
 	qrtr_out += error == 0;
 	return error;
@@ -2912,7 +2915,7 @@ qrtr_input(const uint8_t *data, uint32_t length)
 		printf("wifi: qrtr: %u bytes that are no datagram (they begin %#x)\n", length, length ? data[0] : 0);
 		return;
 	}
-	if (header.size == 0 || at + header.size > length) {
+	if (at > length || header.size == 0 || header.size > length - at) {
 		printf("wifi: qrtr: a datagram of %u bytes in a message of %u: dropped\n", header.size, length);
 		return;
 	}
@@ -3052,6 +3055,51 @@ qrtr_close(struct redwood_qrtr_port *port)
 }
 
 static const struct redwood_qrtr_ops qrtr_ops = { .open = qrtr_open, .send = qrtr_send, .lookup = qrtr_lookup, .close = qrtr_close };
+
+bool
+redwood_qrtr_attach(int (*send)(const void *, unsigned))
+{
+	if (send == NULL || qrtr_packet_send != NULL || link_thread_is != NULL) { return false; }
+	lck_mtx_lock(&qrtr_lock);
+	for (unsigned i = 0; i < 16; i++) {
+		if (qrtr_ports[i].number) { lck_mtx_unlock(&qrtr_lock); return false; }
+	}
+	bzero(qrtr_servers, sizeof(qrtr_servers));
+	bzero(qrtr_ports, sizeof(qrtr_ports));
+	qrtr_peer = qrtr_in = qrtr_out = qrtr_hellos = 0;
+	qrtr_next_port = QRTR_FIRST_PORT;
+	qrtr_packet_send = send;
+	qrtr_external_transport = true;
+	lck_mtx_unlock(&qrtr_lock);
+	redwood_qmi_set_transport(&qrtr_ops);
+	return true;
+}
+
+void
+redwood_qrtr_deliver(const void *packet, unsigned length)
+{
+	lck_mtx_lock(&qrtr_calling);
+	link_thread_is = current_thread();
+	qrtr_input(packet, length);
+	lck_mtx_unlock(&qrtr_calling);
+}
+
+void
+redwood_qrtr_poll(void)
+{
+	lck_mtx_lock(&qrtr_calling);
+	link_thread_is = current_thread();
+	qrtr_fresh();
+	lck_mtx_unlock(&qrtr_calling);
+}
+
+void
+redwood_qrtr_detach(void)
+{
+	redwood_qmi_set_transport(NULL);
+	qrtr_packet_send = NULL;
+	link_thread_is = NULL;
+}
 
 /* ---- the link's thread -------------------------------------------------------------------------------- */
 

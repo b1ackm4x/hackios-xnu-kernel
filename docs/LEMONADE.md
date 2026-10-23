@@ -2,6 +2,8 @@
 
 这是本地一加 9 LE2110 的移植工作记录，不是已经验证可用的 ROM。
 
+2026-10-24 更新：QCA6490 Wi-Fi 已在 iOS RAM 环境通过 WPA2 关联、DHCP 分配 IPv4、DNS、六次真实 HTTP 请求、主动断开重连和正常退出；已恢复原 Android 并核对五个启动分区哈希。具体证据与未验证范围见 [Wi-Fi 实测记录](WIFI-LEMONADE.md)。本次 Wi-Fi 验收未与 GPU/触控同时运行。
+
 ## 固定源码基线
 
 - [HackiOS kernel](https://github.com/oosexgang/hackios-xnu-kernel): `8e61187098f2c26c5daee8f9f72b6416aa64b9ab`

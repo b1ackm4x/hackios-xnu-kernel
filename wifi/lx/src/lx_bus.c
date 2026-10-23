@@ -58,6 +58,7 @@ static struct {
 
 	/* the radio's interrupts (wifi_irq=1): what the copy engines and the data path's groups are taken care of on */
 	bool irq;
+	bool pcie;
 	struct mutex service;			/* one thing at a time looks at the rings: an interrupt's or the thread */
 	int ce_vector[CE_COUNT_MAX];		/* a copy engine's vector, -1: it has none (ce.c: CE_ATTR_DIS_INTR) */
 	int group_vector[ATH11K_EXT_IRQ_GRP_NUM_MAX];
@@ -182,7 +183,7 @@ window(struct ath11k_base *ab, u32 offset)
 static bool
 refused(struct ath11k_base *ab, u32 offset)
 {
-	bool known = offset < ATH11K_PCI_WINDOW_START || (offset ^ HAL_SEQ_WCSS_UMAC_OFFSET) < ATH11K_PCI_WINDOW_RANGE_MASK ||
+	bool known = bus.pcie ? (!(offset & 3) && offset < 0x2000000) : offset < ATH11K_PCI_WINDOW_START || (offset ^ HAL_SEQ_WCSS_UMAC_OFFSET) < ATH11K_PCI_WINDOW_RANGE_MASK ||
 	    (offset ^ HAL_SEQ_WCSS_UMAC_CE0_SRC_REG(ab)) < ATH11K_PCI_WINDOW_RANGE_MASK;
 
 	if (known && bus.mission && !bus.closed) {
@@ -251,7 +252,7 @@ bus_read32(struct ath11k_base *ab, u32 offset)
 	}
 	bus.reads++;
 	if (bus.how >= 2 && ab->mem != NULL) {
-		value = ioread32((u8 *)ab->mem + window(ab, offset));
+		value = bus.pcie ? lx_os_pcie_read(offset) : ioread32((u8 *)ab->mem + window(ab, offset));
 	}
 	if (bus.said < SAID_FIRST) {
 		say_repeats();
@@ -276,7 +277,8 @@ bus_write32(struct ath11k_base *ab, u32 offset, u32 value)
 	}
 	if (bus.how >= 2 && ab->mem != NULL) {
 		__asm __volatile("dsb sy");	/* (what was written to a ring is in memory before the radio is told of it) */
-		iowrite32(value, (u8 *)ab->mem + window(ab, offset));
+		if (bus.pcie) { lx_os_pcie_write(offset, value); }
+		else { iowrite32(value, (u8 *)ab->mem + window(ab, offset)); }
 	}
 }
 
@@ -370,6 +372,22 @@ int
 lx_qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi_txn *txn, int msg_id, size_t largest,
     const struct qmi_elem_info *ei, const void *structure)
 {
+	if (bus.pcie) {
+		printf("lx: PCIe QMI request %#x\n", msg_id);
+
+		if (msg_id == QMI_WLANFW_RESPOND_MEM_REQ_V01) {
+			const struct qmi_wlanfw_respond_mem_req_msg_v01 *req = structure;
+			if (req->mem_seg_len > ATH11K_QMI_WLANFW_MAX_NUM_MEM_SEG_V01) {
+				return (-EINVAL);
+			}
+			printf("lx: PCIe firmware memory segments %u\n", req->mem_seg_len);
+			for (u32 i = 0; i < req->mem_seg_len; i++) {
+				printf("lx: PCIe firmware memory %u address %#llx size %u type %u restore %u\n",
+				    i, (unsigned long long)req->mem_seg[i].addr, req->mem_seg[i].size,
+				    req->mem_seg[i].type, req->mem_seg[i].restore);
+			}
+		}
+	}
 	if (msg_id == QMI_WLANFW_WLAN_MODE_REQ_V01) {
 		u32 mode = ((const struct qmi_wlanfw_wlan_mode_req_msg_v01 *)structure)->mode;
 
@@ -685,9 +703,8 @@ say_radio(struct ath11k_base *ab)
 	    t->txrx_chainmask, t->max_num_scan_channels, t->max_supported_macs, (int)t->hw_min_tx_power, (int)t->hw_max_tx_power,
 	    t->phy_capability, t->ht_cap_info, t->vht_cap_info, t->vht_supp_mcs, t->sys_cap_info);
 	/* (the second number is from the same structure of "ready" as the address: it shows that was read) */
-	printf("lx: its address, by the firmware: %02x:%02x:%02x:%02x:%02x:%02x (and its check sum of the packet log's "
-	    "definitions: %#x)\n", ab->mac_addr[0], ab->mac_addr[1], ab->mac_addr[2], ab->mac_addr[3], ab->mac_addr[4],
-	    ab->mac_addr[5], ab->pktlog_defs_checksum);
+	printf("lx: firmware address present %u; packet-log definitions checksum %#x\n",
+	    !is_zero_ether_addr(ab->mac_addr), ab->pktlog_defs_checksum);
 	for (unsigned i = 0; i < ab->num_radios && i < MAX_RADIOS; i++) {
 		const struct ath11k_hal_reg_capabilities_ext *r = &ab->hal_reg_cap[i];
 		const struct ath11k_pdev_cap *c = &ab->pdevs[i].cap;
@@ -726,6 +743,10 @@ lx_start(void)
 	int ret;
 
 	bus.how = lx_os_option("wifi_lx");
+	bus.pcie = lx_os_radio_platform() == 1;
+#ifndef LEMONADE_WIFI
+	if (bus.pcie) { lx_tell("lx: QCA6490 profile was not built\n"); return ENOTSUP; }
+#endif
 	if (lx_prepare() != 0) {
 		lx_tell("lx: no thread, or no memory the radio can be given\n");
 		return (ENOMEM);
@@ -747,7 +768,7 @@ lx_start(void)
 	device.kobj.name = "wifi";
 
 	/* ahb.c: ath11k_ahb_probe(), for this chip */
-	ab = ath11k_core_alloc(&device, 0, ATH11K_BUS_AHB);
+	ab = ath11k_core_alloc(&device, 0, bus.pcie ? ATH11K_BUS_PCI : ATH11K_BUS_AHB);
 	if (ab == NULL) {
 		return (ENOMEM);
 	}
@@ -772,6 +793,15 @@ lx_start(void)
 		}
 	}
 	ab->hw_rev = ATH11K_HW_WCN6750_HW10;
+#ifdef LEMONADE_WIFI
+	if (bus.pcie) {
+		ab->hw_rev = ATH11K_HW_QCA6490_HW10;
+		ab->mem = lx_os_pcie_bar();
+		ab->mem_ce = ab->mem; /* PCIe CE register offsets share BAR0. */
+		ab->mem_len = 0x200000;
+		if (!ab->mem) { return ENXIO; }
+	}
+#endif
 	ab->fw_mode = ATH11K_FIRMWARE_MODE_NORMAL;
 	if ((ret = ath11k_core_pre_init(ab)) != 0 || (ret = ath11k_hal_srng_init(ab)) != 0 || (ret = ath11k_ce_alloc_pipes(ab)) != 0) {
 		lx_tell("lx: the driver does not get as far as its exchange with the firmware: %d\n", ret);

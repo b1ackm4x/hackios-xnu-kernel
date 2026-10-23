@@ -306,7 +306,7 @@ class DeviceSafety(unittest.TestCase):
         self.assertEqual([x for x in args if x.startswith("touchscreen=")], ["touchscreen=2"])
 
     def test_firmware_modes_require_verified_ram_overlay_before_device_access(self):
-        for mode in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi'):
+        for mode in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'):
             with self.subTest(mode=mode), self.assertRaises(SystemExit):
                 self.run_action('run', '--kernel', 'built', '--wifi', mode)
             self.assertFalse(self.calls)

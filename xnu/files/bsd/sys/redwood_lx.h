@@ -26,6 +26,11 @@ void	 lx_os_free(void *memory, unsigned long size);
  */
 void	*lx_os_radio_memory(unsigned long size, unsigned long long *address);
 void	*lx_os_map_registers(unsigned long long physical, unsigned long size);	/* never unmapped */
+/* 0: original AHB platform; 1: verified lemonade PCIe runtime. */
+unsigned lx_os_radio_platform(void);
+void *lx_os_pcie_bar(void);
+unsigned lx_os_pcie_read(unsigned offset);
+void lx_os_pcie_write(unsigned offset, unsigned value);
 
 /* ---- saying things ---- */
 void	 lx_os_print(const char *text);				/* for whoever looks for a fault: may be kept back */

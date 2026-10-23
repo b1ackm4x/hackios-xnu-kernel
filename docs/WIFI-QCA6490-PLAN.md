@@ -1,6 +1,6 @@
 # OnePlus 9：QCA6490 major 1 的适配方案
 
-调查时间：2026-10-23。对象是本机实测 `17cb:1103`、`TCSR_SOC_HW_VERSION=0x400c0110`，即 major 1 / minor `0x10`。本文记录适配依据和验收计划；后续实现已通过 DMA、完整固件启动和 IPCR/WLFW 发现，实测状态以 [Wi-Fi 记录](WIFI-LEMONADE.md) 为准，尚未联网。
+调查时间：2026-10-23；验收状态更新至 2026-10-24。对象是本机实测 `17cb:1103`、`TCSR_SOC_HW_VERSION=0x400c0110`，即 major 1 / minor `0x10`。本文记录适配依据和验收计划；后续实现已在 iOS RAM 环境通过驱动启动、扫描、WPA2 关联、DHCP、DNS、六次 HTTP 传输、主动断开重连和 Android 恢复，实测状态以 [Wi-Fi 记录](WIFI-LEMONADE.md) 为准。
 
 结论：优先保留已经通过测试的 PCIe 底层，按原厂流程启动本机固件，再为 ath11k 增加独立的 QCA6490 major 1 配置及 PCIe/MHI 适配。已核对的硬件定义有较大重合，支持这条路线；不能把版本伪装成 major 2，也不能把“支持 QCA6490”的其他设备案例视为本机兼容证据。
 
@@ -90,7 +90,7 @@
 
 如果 BHI 未完成、出现 SMMU fault、无法停止设备访问或不能恢复加载器，停在对应阶段修正。只有进入固件运行态后才处理 QMI/CE 差异。若真实 WMI/HTT 与现有 ath11k 不兼容，再从公开 QCA6490 HAL/协议定义补差异；目前没有证据表明必须整体搬入 Android qcacld 或重做网络栈。
 
-最初研究轮次仅运行源码比较；随后硬件实现和各次失败/通过记录见 [实测记录](WIFI-LEMONADE.md)。网络验收仍未完成。
+最初研究轮次仅运行源码比较；随后硬件实现和各次失败/通过记录见 [实测记录](WIFI-LEMONADE.md)。基本 STA 联网验收已完成；WPA3-only、企业认证、休眠、漫游、峰值速度及与 GPU/触控同时运行仍未验收。
 
 [linux-pci]: https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux/+/refs/tags/v7.0.14/drivers/net/wireless/ath/ath11k/pci.c
 [linux-hw]: https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux/+/refs/tags/v7.0.14/drivers/net/wireless/ath/ath11k/hw.c

@@ -2,11 +2,13 @@
 """Build a private RAM-only firmware overlay; preserve both normal APFS images."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
 import stat
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -44,14 +46,61 @@ def contents(image):
     return records
 
 
+def current_network():
+    spec = importlib.util.spec_from_file_location('private_network', ROOT / 'tools/lemonade-network.py')
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper.read_current(ROOT)
+
+
+def network_services():
+    """Use the stock iOS daemons already present in the verified System image."""
+    programs = {'com.apple.configd': '/usr/libexec/configd',
+                'com.apple.mDNSResponder': '/usr/sbin/mDNSResponder',
+                'com.apple.mDNSResponderHelper': '/usr/sbin/mDNSResponderHelper'}
+    container = apfs.Container(str(ROOT / 'userland/system.apfs'))
+    try:
+        volume = apfs.pick_volume(container, None)
+        additions = {}
+        for name, program in programs.items():
+            source = ROOT / 'ios165/rootfs/System/Library/LaunchDaemons' / (name + '.plist')
+            job = plistlib.loads(source.read_bytes())
+            if (job.get('Program') or job.get('ProgramArguments', [None])[0]) != program or not volume.lookup(program):
+                raise SystemExit('Missing or mismatched iOS network service: ' + name)
+            job['StandardOutPath'] = job['StandardErrorPath'] = '/dev/console'
+            job.pop('_LimitLoadToDeviceTree', None)
+            additions['LaunchDaemons/' + name + '.plist'] = (0o100644, 0, 0, plistlib.dumps(job))
+        return additions
+    finally:
+        container.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--driver-files', action='store_true', help='include verified original M3, board and regulatory data')
+    parser.add_argument('--connect-current', action='store_true', help='RAM-only acceptance using this exact phone\'s current Android Wi-Fi')
     args = parser.parse_args()
+    if args.connect_current and not args.driver_files:
+        parser.error('--connect-current requires --driver-files')
     os.umask(0o077)
     output = ROOT / 'out/lemonade-wifi'
     output.mkdir(parents=True, exist_ok=True)
     output.chmod(0o700)
+    network = None
+    probe = ROOT / 'out/lemonade-net-test'
+    if args.connect_current:
+        receipt_path = ROOT / 'out/lemonade-net-test.manifest.json'
+        if not probe.is_file() or not receipt_path.is_file():
+            raise SystemExit('Build the arm64 lemonade network acceptance program first')
+        receipt = json.loads(receipt_path.read_text())
+        if (receipt.get('arch') != 'arm64' or receipt.get('acceptance_profile') != 'apple80211-dhcp-http-reconnect-v1' or
+                receipt.get('sha256') != digest(probe) or
+                receipt.get('source_sha256') != digest(ROOT / 'tools/lemonade-net-test.m')):
+            raise SystemExit('Acceptance program differs from its verified build')
+        try:
+            network = current_network()
+        except Exception:
+            raise SystemExit('Could not privately read one supported current network from the verified phone') from None
     images = json.loads((ROOT / 'local/lemonade/images.json').read_text())
     original = ROOT / 'userland/root.apfs'
     original_hash = digest(original)
@@ -115,6 +164,21 @@ def main():
                 destination_fw.unlink()
             shutil.copy2(firmware_dir / name, destination_fw)
             destination_fw.chmod(0o644)
+        additions = {}
+        if network is not None:
+            job = {'Label': 'com.lemonade.wifi-test',
+                   'ProgramArguments': ['/redwood/bin/lemonade-net-test'], 'RunAtLoad': True,
+                   'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
+            additions = {'fw/lemonade-network': (0o100600, 0, 0, network),
+                         'bin/lemonade-net-test': (0o100755, 0, 0, probe.read_bytes()),
+                         'LaunchDaemons/com.lemonade.wifi-test.plist': (0o100644, 0, 0, plistlib.dumps(job))}
+            additions.update(network_services())
+            for relative, (mode, uid, gid, data) in additions.items():
+                target = tree / relative
+                target.write_bytes(data)
+                target.chmod(stat.S_IMODE(mode))
+                metadata.append(f'{mode:o}\t{uid}\t{gid}\t{relative}\n')
+            metadata_path.write_text(''.join(metadata))
         candidate = work / 'wifi.apfs'
         pack(candidate)
         after = contents(candidate)
@@ -122,6 +186,7 @@ def main():
         allowed.setdefault('fw', (0o40755, 0, 0, b''))
         for name in names:
             allowed['fw/' + name] = (0o100644, 0, 0, (firmware_dir / name).read_bytes())
+        allowed.update(additions)
         if after != allowed:
             raise SystemExit('Firmware overlay changes files outside the selected verified firmware')
         if digest(original) != original_hash:
@@ -131,6 +196,10 @@ def main():
               'base_root_sha256': original_hash, 'sha256': digest(output / 'root.apfs'),
               'bytes': (output / 'root.apfs').stat().st_size,
               'firmware': verified,
+              'network_private': network is not None,
+              'acceptance_program_sha256': digest(probe) if network is not None else None,
+              'network_services': ['configd', 'mDNSResponder', 'mDNSResponderHelper'] if network is not None else [],
+              'network_reconnect_test': network is not None,
               'normal_root_unchanged': True, 'other_file_contents_and_modes_verified': True,
               'deployed': False}
     (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')

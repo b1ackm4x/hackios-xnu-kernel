@@ -59,6 +59,7 @@ extern void redwood_mic_quiesce(void);
 extern void redwood_ufs_quiesce(void);
 extern void lemonade_touch_quiesce(void);
 extern void lemonade_wifi_quiesce(void);
+extern void lemonade_wifi_stop(void);
 extern void redwood_var_save_on_return(void);   /* bsd/dev/redwood_ufs.c: the data volume into the flash */
 void loader_checkpoint(uint64_t n);
 
@@ -442,6 +443,7 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
 	if (!as_panic) {
 		redwood_var_save_on_return();   /* the data volume kept, while the system is still whole */
 		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
+		lemonade_wifi_stop();
 		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
 		redwood_adsp_stop();            /* and the audio DSP */
 	}
@@ -488,6 +490,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		}
 		redwood_var_save_on_return();
 		redwood_adreno_stop();
+		lemonade_wifi_stop();
 		redwood_wifi_stop();
 		redwood_adsp_stop();
 		loader_return();

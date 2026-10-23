@@ -68,6 +68,11 @@ if [ "$(cat src/.release 2>/dev/null)" != "$VERSION $SHA256" ]; then
 fi
 [ "$1" = fetch ] && { echo "mk-ath11k.sh: ath11k of Linux $VERSION: $B/src/ath11k"; exit 0; }
 W=$ROOT/wifi/lx
+ATH_SOURCE=src
+if [ "${LEMONADE_WIFI:-0}" = 1 ]; then
+	python3 "$ROOT/tools/lemonade-ath11k-profile.py" "$B/src" "$B/src-lemonade"
+	ATH_SOURCE=src-lemonade
+fi
 
 # --- FreeBSD's LinuxKPI and the kernel headers under it, with our patches on top. When the patches
 # change, the tree is taken from the archive again (as tools/mk-mesa.sh does with Mesa's).
@@ -123,8 +128,9 @@ CFLAGS="-mkernel -mgeneral-regs-only -fno-builtin -fno-common -ffreestanding -fn
 	-I$W/include -Igen -I$S -I$S/contrib/ck/include
 	-I$S/compat/linuxkpi/common/include -I$S/compat/linuxkpi/dummy/include
 	-include $S/compat/linuxkpi/common/include/linux/kconfig.h -DLINUXKPI_VERSION=70000"
-DFLAGS="-Isrc/ath11k -Isrc -include $W/include/lx_prelude.h -DCONFIG_ATH11K_AHB -DCONFIG_ATH11K_DEBUG
+DFLAGS="-I$ATH_SOURCE/ath11k -I$ATH_SOURCE -include $W/include/lx_prelude.h -DCONFIG_ATH11K_AHB -DCONFIG_ATH11K_DEBUG
 	-DKBUILD_MODNAME=\"ath11k\""
+if [ "$ATH_SOURCE" = src-lemonade ]; then DFLAGS="$DFLAGS -DLEMONADE_WIFI=1"; fi
 # two headers are the kernel's: what it offers this object (wifi/lx/include/lx_os.h), and its QMI
 # helpers (wifi/lx/include/linux/soc/qcom/qmi.h)
 source "$ROOT/xnu-env.sh"
@@ -133,6 +139,10 @@ for h in lx qmi; do
 done
 DFLAGS="$DFLAGS -DLX_REDWOOD_LX_H=\"$XNU_SRC/bsd/sys/redwood_lx.h\" -DLX_REDWOOD_QMI_H=\"$XNU_SRC/bsd/sys/redwood_qmi.h\""
 mkdir -p obj out
+if [ "$(cat obj/.source-profile 2>/dev/null)" != "$ATH_SOURCE" ]; then
+	rm -f obj/*.o obj/*.d
+	echo "$ATH_SOURCE" > obj/.source-profile
+fi
 rm -f obj/*.err
 compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than anything it was made of
 	local src=$1 obj=$2
@@ -142,7 +152,7 @@ compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than
 	fi
 	$CC $CFLAGS "$@" -MMD -MF "$obj.d" -c "$src" -o "$obj" 2> "$obj.err" || rm -f "$obj"
 }
-for f in $DRIVER; do compile src/ath11k/$f.c obj/ath11k_$f.o $DFLAGS & done
+for f in $DRIVER; do compile $ATH_SOURCE/ath11k/$f.c obj/ath11k_$f.o $DFLAGS & done
 for f in "$W"/src/*.c; do [ -f "$f" ] && compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & done
 wait
 bad=

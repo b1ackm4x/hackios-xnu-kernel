@@ -199,6 +199,87 @@ class StageEvidence(unittest.TestCase):
             manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
             self.assertFalse(wifi.check(manifest, bad)['passed'])
 
+    def test_driver_needs_real_unified_ready_and_transport_cleanup(self):
+        manifest, raw = self.transport_record('ipcr')
+        manifest.update(wifi='driver', cmdline='wifi=0 lemonade_wifi=22')
+        raw = raw.replace(b'stage 20 passed;', b'stage 22 passed;')
+        raw += (b'qca6490 hw1.0 (lemonade)\n'
+                b'ath11k driver result 0 transport_failed 0 FSR 0x400 global 0\n'
+                b'stage 22 QCA6490 major-1 ath11k startup completed\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertFalse(wifi.check(manifest, raw)['passed'])
+        raw += b'IS UP as far as it is built: the firmware has said "unified ready"\n'
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(wifi.check(manifest, raw)['passed'])
+        for bad in (raw.replace(b'transport_failed 0', b'transport_failed 1'),
+                    raw + b'driver worker stop timed out; DMA pages retained\n'):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
+
+    def test_station_requires_interface_and_normal_stop(self):
+        manifest, raw = self.transport_record('station')
+        raw += (b'qca6490 hw1.0 (lemonade)\n'
+                b'ath11k driver result 0 transport_failed 0 FSR 0x400 global 0\n'
+                b'stage 22 QCA6490 major-1 ath11k startup completed\n'
+                b'IS UP as far as it is built: the firmware has said "unified ready"\n'
+                b"net: en0 attached on the phone's radio (ath11k) (a radio)\n"
+                b'station offered to iOS; runtime kept until normal stop\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        report = wifi.check(manifest, raw)
+        self.assertTrue(report['passed'])
+        self.assertFalse(report['networking_verified'])
+        for bad in (raw.replace(b'net: en0 attached', b'net: no en0'),
+                    raw.replace(b'runtime kept until normal stop', b'runtime stopped'),
+                    raw + b'emergency endpoint reset; DMA pages retained\n'):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
+
+    def test_networking_requires_dhcp_and_each_real_http_transfer(self):
+        manifest, raw = self.transport_record('station')
+        manifest.update(network_test=True, network_identity_redacted=True)
+        manifest['wifi_firmware']['network_private'] = True
+        raw += (b'qca6490 hw1.0 (lemonade)\n'
+                b'ath11k driver result 0 transport_failed 0 FSR 0x400 global 0\n'
+                b'stage 22 QCA6490 major-1 ath11k startup completed\n'
+                b'IS UP as far as it is built: the firmware has said "unified ready"\n'
+                b"net: en0 attached on the phone's radio (ath11k) (a radio)\n"
+                b'station offered to iOS; runtime kept until normal stop\n'
+                b'lx: THE NETWORK IS JOINED: frames can pass\n'
+                b'lemonade-net: association result 1 after 4.2 s\n'
+                b'lemonade-net: DHCP request accepted 1 transport 0 result 0 status 0\n'
+                b'lemonade-net: en0 usable IPv4 1 after 3.1 s\n'
+                b'lemonade-net: DNS resolved IPv4\n'
+                b'lemonade-net: acceptance association 1 dhcp 1 ipv4 1 http 3/3\n')
+        for attempt in range(1, 4):
+            raw += f'lemonade-net: HTTP attempt {attempt} en0_bound 1 status 200 bytes 512 expected_body 1\n'.encode()
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(wifi.check(manifest, raw)['networking_verified'])
+        without_early_printf = raw.replace(b"net: en0 attached on the phone's radio (ath11k) (a radio)\n", b'')
+        manifest['log_sha256'] = hashlib.sha256(without_early_printf).hexdigest()
+        self.assertTrue(wifi.check(manifest, without_early_printf)['networking_verified'])
+        no_wireless_association = without_early_printf.replace(b'association result 1', b'association result 0')
+        manifest['log_sha256'] = hashlib.sha256(no_wireless_association).hexdigest()
+        self.assertFalse(wifi.check(manifest, no_wireless_association)['networking_verified'])
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        manifest['wifi_firmware']['network_reconnect_test'] = True
+        self.assertFalse(wifi.check(manifest, raw)['networking_verified'])
+        reconnect = raw + (b'lemonade-net: intentional disconnect reached idle 1\n'
+                           b'lemonade-net: reconnect complete association 1 dhcp 1 ipv4 1 http 3/3\n')
+        manifest['log_sha256'] = hashlib.sha256(reconnect).hexdigest()
+        self.assertTrue(wifi.check(manifest, reconnect)['networking_verified'])
+        del manifest['wifi_firmware']['network_reconnect_test']
+        for bad in (raw.replace(b'HTTP attempt 3', b'HTTP attempt 4'),
+                    raw.replace(b'en0_bound 1', b'en0_bound 0'),
+                    raw.replace(b'usable IPv4 1', b'usable IPv4 0'),
+                    raw.replace(b'DHCP request accepted 1', b'DHCP request accepted 0'),
+                    raw.replace(b'status 200', b'status 302'),
+                    raw.replace(b'bytes 512', b'bytes 0'),
+                    raw.replace(b'expected_body 1', b'expected_body 0')):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            report = wifi.check(manifest, bad)
+            self.assertFalse(report['passed'])
+            self.assertFalse(report['networking_verified'])
+
 
 if __name__ == '__main__':
     unittest.main()

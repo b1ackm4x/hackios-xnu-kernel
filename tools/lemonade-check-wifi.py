@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate one bounded Wi-Fi bring-up stage; never equate it with networking."""
+"""Validate staged bring-up; networking additionally needs live DHCP and traffic."""
 import argparse
 import hashlib
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 MODES = {'inspect': 1, 'rails': 2, 'domain': 3, 'clocks': 4,
-         'resets': 5, 'controller': 6, 'phy': 7, 'root': 8, 'radio': 9, 'link': 10, 'endpoint': 11, 'mmio': 12, 'smmu': 13, 'sid': 14, 'dma': 15, 'dma-fault': 16, 'bhi': 17, 'mhi': 18, 'bhie': 19, 'ipcr': 20, 'qmi': 21}
+         'resets': 5, 'controller': 6, 'phy': 7, 'root': 8, 'radio': 9, 'link': 10, 'endpoint': 11, 'mmio': 12, 'smmu': 13, 'sid': 14, 'dma': 15, 'dma-fault': 16, 'bhi': 17, 'mhi': 18, 'bhie': 19, 'ipcr': 20, 'qmi': 21, 'driver': 22, 'scan': 23, 'station': 24}
 
 
 def check(manifest, raw):
@@ -60,26 +60,26 @@ def check(manifest, raw):
         if MODES[mode] >= 16:
             checks['dma_stopped_before_unmap'] = 'endpoint DMA stopped before unmap' in log
             checks['endpoint_bus_master_cleared'] = 'endpoint bus master clear verified' in log
-        if mode in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi'):
+        if mode in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'):
             checks['firmware_reached_sbl'] = 'stage 17 BHI transfer complete; execution environment SBL; no SMMU fault' in log
             status = re.search(r'BHI result status (0x[0-9a-f]+|0) EE (\d+) MHI (0x[0-9a-f]+|0) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
             checks['bhi_status_and_fault_registers'] = bool(status and int(status[1], 0) >> 30 == 2 and
                 int(status[2]) == 1 and not (int(status[4], 0) & 0xc00001fe) and int(status[5], 0) == 0)
             checks['guard_evidence_matches_kernel'] = manifest.get('dma_guard', {}).get('kernel_sha256') == manifest.get('kernel_sha256') and bool(manifest.get('kernel_sha256'))
             checks['original_firmware_verified'] = manifest.get('wifi_firmware', {}).get('firmware', {}).get('amss.bin', {}).get('sha256') == '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'
-        if mode in ('mhi', 'bhie', 'ipcr', 'qmi'):
+        if mode in ('mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'):
             checks['mhi_dma_arena_verified'] = 'MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias' in log
             checks['mhi_m0_event_confirmed'] = 'stage 18 MHI M0 confirmed by device-written event; polling transport ready' in log
             event = re.search(r'MHI ready result status (0x[0-9a-f]+|0) EE (\d+) events (\d+) M0events (\d+) EEevents (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
             checks['mhi_registers_and_event_count'] = bool(event and (int(event[1], 0) >> 8) & 255 == 2 and
                 int(event[3]) > 0 and int(event[4]) > 0 and not (int(event[6], 0) & 0xc00001fe) and int(event[7], 0) == 0)
             checks['no_mhi_transport_failure'] = not re.search(r'MHI DMA fault|invalid read pointer|unsupported MHI event|IPCR transfer rejected|IPCR command completion mismatch|PCI MSI restore readback failed', log)
-        if mode in ('bhie', 'ipcr', 'qmi'):
+        if mode in ('bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'):
             checks['full_firmware_event_confirmed'] = 'stage 19 full firmware running; mission environment confirmed by event; no SMMU fault' in log
             result = re.search(r'BHIE result status (0x[0-9a-f]+|0) EE (\d+) MHI (0x[0-9a-f]+|0) events (\d+) mission_event (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
             checks['bhie_status_and_fault_registers'] = bool(result and int(result[1], 0) >> 30 == 2 and
                 int(result[2]) in (2, 4) and int(result[5]) == 1 and not (int(result[6], 0) & 0xc00001fe) and int(result[7], 0) == 0)
-        if mode in ('ipcr', 'qmi'):
+        if mode in ('ipcr', 'qmi', 'driver', 'scan', 'station'):
             checks['msi_restore_readback'] = 'PCI MSI restore readback verified' in log
             checks['ipcr_channel_commands_completed'] = all(f'IPCR channel {channel} START completion 1' in log for channel in (20, 21))
             checks['qrtr_wlfw_discovered'] = 'stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found' in log
@@ -93,8 +93,49 @@ def check(manifest, raw):
             result = re.search(r'QMI result response (\d+) success (\d+) tx_completed (\d+) rx (\d+) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
             checks['qmi_reply_and_no_fault'] = bool(result and int(result[1]) == 1 and int(result[2]) == 1 and
                 int(result[3]) > 0 and int(result[4]) > 0 and not (int(result[5], 0) & 0xc00001fe) and int(result[6], 0) == 0)
-    return {'passed': all(checks.values()), 'mode': mode, 'checks': checks,
-            'scope': 'bounded PCIe bring-up stage only', 'networking_verified': False}
+        if mode in ('driver', 'scan', 'station'):
+            checks['dedicated_qca6490_profile'] = 'qca6490 hw1.0 (lemonade)' in log
+            checks['ath11k_unified_ready'] = 'IS UP as far as it is built: the firmware has said "unified ready"' in log
+            checks['driver_and_transport_success'] = bool(re.search(r'ath11k driver result 0 transport_failed 0 FSR (?:0x[246]00|0) global 0', log))
+            checks['driver_cleanup_no_timeout'] = 'driver worker stop timed out' not in log
+            checks['driver_startup_marker'] = 'stage 22 QCA6490 major-1 ath11k startup completed' in log
+        if mode == 'station':
+            checks['ios_station_offered'] = 'station offered to iOS; runtime kept until normal stop' in log
+            checks['ios_interface_attached'] = 'net: en0 attached on the phone\'s radio (ath11k) (a radio)' in log
+            checks['normal_stop_completed'] = 'emergency endpoint reset' not in log
+        if mode == 'scan':
+            checks['scan_completed'] = 'ms later the scan is OVER' in log
+            result = re.search(r'THE SCAN HEARD (\d+) NETWORKS', log)
+            checks['scan_received_networks'] = bool(result and int(result[1]) > 0)
+    network = bool(manifest.get('network_test'))
+    if network:
+        checks['network_test_used_station'] = mode == 'station'
+        checks['private_network_handling'] = bool(manifest.get('network_identity_redacted') and
+            manifest.get('wifi_firmware', {}).get('network_private'))
+        checks['association_completed'] = ('lx: THE NETWORK IS JOINED: frames can pass' in log and
+            bool(re.search(r'lemonade-net: association result 1 after [0-9.]+ s', log)))
+        checks['dhcp_accepted'] = 'lemonade-net: DHCP request accepted 1 transport 0 result 0 status 0' in log
+        checks['usable_ipv4'] = 'lemonade-net: en0 usable IPv4 1 after ' in log
+        checks['dns_resolved'] = 'lemonade-net: DNS resolved IPv4' in log
+        for attempt in range(1, 4):
+            checks[f'http_attempt_{attempt}'] = bool(re.search(
+                rf'lemonade-net: HTTP attempt {attempt} en0_bound 1 status 200 bytes [1-9][0-9]* expected_body 1', log))
+        checks['network_summary_success'] = 'lemonade-net: acceptance association 1 dhcp 1 ipv4 1 http 3/3' in log
+        # The initial printf is in XNU's rolling msgbuf, not the live trace.
+        # A successful Apple80211 ioctl on en0 is stronger evidence: net_ioctl
+        # rejects it for non-wireless links. Require actual en0-bound traffic
+        # as well, so a missing startup message alone never becomes success.
+        if mode == 'station' and not checks['ios_interface_attached']:
+            checks['ios_interface_attached'] = all(checks[name] for name in
+                ('association_completed', 'dhcp_accepted', 'usable_ipv4',
+                 'http_attempt_1', 'http_attempt_2', 'http_attempt_3'))
+        if manifest.get('wifi_firmware', {}).get('network_reconnect_test'):
+            checks['disconnect_completed'] = 'lemonade-net: intentional disconnect reached idle 1' in log
+            checks['reconnect_completed'] = 'lemonade-net: reconnect complete association 1 dhcp 1 ipv4 1 http 3/3' in log
+    passed = all(checks.values())
+    return {'passed': passed, 'mode': mode, 'checks': checks,
+            'scope': 'iOS association, DHCP and en0-bound traffic' if network else 'bounded PCIe bring-up stage only',
+            'networking_verified': network and passed}
 
 
 def main():

@@ -438,6 +438,30 @@ test_wlfw_by_hand(void)
 		    ind.mem_seg[1].size == 0x80000 && ind.mem_seg[1].type == 4 && ind.mem_seg[1].mem_cfg_len == 0,
 		    "WLFW memory request: the fields are not what the bytes say");
 	}
+
+	/* PCIe WLFW memory response: a count followed by 17-byte wire entries,
+	 * with no C-structure padding between them. These match the successful
+	 * original-firmware probe's two requested sizes and types. */
+	{
+		const uint8_t expected[] = {
+			0, 4, 0, 0x36, 0, 38, 0,
+			1, 35, 0, 2,
+			0, 0, 0, 0xa1, 0, 0, 0, 0, 0, 0, 0x4e, 0, 1, 0, 0, 0, 0,
+			0, 0x40, 0x4e, 0xa1, 0, 0, 0, 0, 0, 0, 0x39, 0, 4, 0, 0, 0, 0,
+		};
+		struct qmi_wlanfw_respond_mem_req_msg_v01 req = {0};
+		req.mem_seg_len = 2;
+		req.mem_seg[0].addr = 0xa1000000;
+		req.mem_seg[0].size = 5111808;
+		req.mem_seg[0].type = 1;
+		req.mem_seg[1].addr = 0xa14e4000;
+		req.mem_seg[1].size = 3735552;
+		req.mem_seg[1].type = 4;
+		check_bytes(buffer, redwood_qmi_encode(QMI_REQUEST, 0x36, 4,
+		    qmi_wlanfw_respond_mem_req_msg_v01_ei, &req, buffer, sizeof(buffer)),
+		    expected, sizeof(expected), "PCIe WLFW memory response");
+	}
+
 }
 
 /* ---- 2. the coding against itself, with every table of ath11k -------------------------------------- */
