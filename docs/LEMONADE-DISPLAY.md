@@ -208,6 +208,26 @@ python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
 [ARM SMMU](https://github.com/torvalds/linux/blob/v6.12/drivers/iommu/arm/arm-smmu/arm-smmu.h)、
 [MISR 控制](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_util.c)。
 
+### 编码阶段资源生命周期候选（待真机复测）
+
+后续主机检查发现，原先仅在 draw/dispatch 记录入队时保留资源，编码器的当前绑定、
+未执行 clear 的颜色/深度附件此前都是弱引用。应用在绑定后、首次绘制前释放对象，
+或者清空创建附件的 descriptor，就会留下悬空引用。原代码在新增的实际编码器方法
+测试中于首次绘制之前触发释放断言，证据为 `metal-ownership-before.log`。
+
+候选现在让编码器持有当前 pipeline、buffer、texture、sampler、深度状态和附件；
+先保留新绑定再释放旧绑定，同一对象重复绑定安全。每条已记录的工作继续持有独立快照，
+编码结束即释放编码器的引用，未用过的绑定和替换掉的资源也能释放；`set*Bytes` 不依赖
+调用者的 autorelease pool。这与 [Metal 默认保留命令所需资源](https://developer.apple.com/documentation/metal/mtlcommandbufferdescriptor/retainedreferences)
+的契约一致。
+
+新增五项提前释放/清空 descriptor/pool drain 的像素与计算结果测试，Mac 原生 Metal
+全部通过，整套达到 93 项（`native-metal-lifetime.log`）。另有五组主机测试编译实际
+编码器方法、ivar 和工作对象持有逻辑，以析构计数检查提前释放、重绑、结束编码与最终释放，
+AddressSanitizer / UndefinedBehaviorSanitizer 均通过（`metal-ownership-host-tests.log`）。
+这些主机替身不模拟 GPU 或 iOS 私有父类。iOS 前端和两种独立测试镜像已构建、回读验证，
+原 root/System 未改动；手机仍待物理重启，因此新增五项尚未在 Adreno 上验收。
+
 ## 复现
 
 先准备项目的 Linux 构建环境、iOS 16.5 SDK、核验过的系统镜像和有权使用的 Metal 编译器。
@@ -222,6 +242,7 @@ tools/lemonade-build-kernel.sh
 python3 tools/test-lemonade-usb.py
 python3 tools/test-lemonade-display-stop.py
 python3 tools/test-lemonade-check-display.py
+python3 tools/test-lemonade-metal-lifetime.py
 python3 tools/lemonade-usb.py run --profile performance --metal-test --display sync --metrics --seconds 100
 ```
 

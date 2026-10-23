@@ -10,7 +10,7 @@
     "repository": "https://github.com/b1ackm4x/hackios-xnu-userland",
     "upstream": "https://github.com/oosexgang/hackios-xnu-userland",
     "upstream_base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
-    "commit": "75bd72a870793accdcf7978c375db24dc96372b7"
+    "commit": "2dc315944e001fa05e613f5667dba68ebc1896d0"
   },
   "validation_document": "docs/LEMONADE-DISPLAY.md",
   "private_evidence_directory": "local/lemonade/"
