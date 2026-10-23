@@ -1,0 +1,3 @@
+# Bounded GLES shader/readback diagnostic. The desktop then keeps drawing.
+/redwood/bin/rwtouch wait 25
+/redwood/bin/gl_test --require-renderer FD660 3 384 384

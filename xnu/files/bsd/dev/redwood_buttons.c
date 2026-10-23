@@ -43,6 +43,7 @@
  * and the phone's own device tree (qcom,spmi@c440000, pon_hlos@1300, gpio_keys).
  */
 #include <kern/clock.h>
+#include <pexpert/device_tree.h>
 #include <kern/locks.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -536,6 +537,15 @@ redwood_buttons_init(void)
 {
 	uint32_t enabled = 0, steps = 5;
 	thread_t thread;
+	DTEntry entry;
+	const void *value;
+	unsigned size;
+	/* touchscreen=1 on another board must not start redwood's PMIC mapping. */
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess ||
+	    size != sizeof("redwood") || memcmp(value, "redwood", size)) {
+		return;
+	}
 
 	/*
 	 * On with the touch screen (the phone, somebody at it) unless buttons=0 says otherwise: a hand

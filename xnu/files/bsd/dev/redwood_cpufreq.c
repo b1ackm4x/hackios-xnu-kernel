@@ -1,13 +1,13 @@
 /*
- * The clock speed of the processor cores the kernel runs on, on the POCO X5 Pro (redwood).
- * Only with boot-arg cpufreq=1: the addresses are this phone's.
+ * CPU clocks for the POCO X5 Pro (redwood) and OnePlus 9 (lemonade).
+ * Only with boot-arg cpufreq=1; lemonade cpufreq=2 reads without changing them.
  *
  * The boot loader leaves each group of cores at a modest frequency and expects the operating
  * system to ask for more. On this SoC that is one register write: the hardware ("EPSS") has
  * a table of frequencies per group and switches the clock source and the supply voltage by
- * itself when told which row is wanted. There is no reason for us ever to want less than the
- * top row, for every group that has a core of ours in it (one core, unless boot-arg cpus=N
- * says more).
+ * itself when told which row is wanted. Redwood retains its original top-row policy.
+ * Lemonade selects capped, device-verified stock OPPs and restores the firmware's
+ * rows on return; it never uses redwood's DDR/RPMh programming.
  *
  * Register layout: Linux drivers/cpufreq/qcom-cpufreq-hw.c ("epss" variant).
  */
@@ -18,6 +18,7 @@
 #include <mach/mach_types.h>
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/redwood_input.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
@@ -62,6 +63,69 @@ tell(const char *format, ...)
 #define EPSS_PERF_STATE         0x320           /* the row that is wanted */
 #define XO_KHZ                  19200
 #define ALTERNATE_KHZ           300000          /* source 0: a fixed 300 MHz */
+
+/* SM8350 uses the same EPSS layout but a different RPMh controller. Keep its
+ * memory votes untouched. Caps below are actual LE2110 stock OPPs, below the
+ * Android maxima (1804800 / 2419200 / 2841600 kHz). EPSS controls voltage. */
+static bool lemonade_cpu;
+static struct {
+	vm_offset_t base;
+	uint32_t original, selected, khz;
+	bool changed;
+} lemonade_domains[EPSS_DOMAINS];
+
+static bool
+cpu_platform(void)
+{
+	DTEntry entry;
+	const void *value;
+	unsigned size;
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess) {
+		return false;
+	}
+	lemonade_cpu = size == sizeof("lemonade") && memcmp(value, "lemonade", size) == 0;
+	return lemonade_cpu || (size == sizeof("redwood") && memcmp(value, "redwood", size) == 0);
+}
+
+static bool
+lemonade_cpu_prepare(uint32_t domain)
+{
+	static const uint32_t caps[] = { 1497600, 1996800, 2150400 };
+	static const uint32_t maxima[] = { 1804800, 2419200, 2841600 };
+	vm_offset_t base = ml_io_map(EPSS_PHYS + domain * EPSS_DOMAIN_SIZE, EPSS_DOMAIN_SIZE);
+	uint32_t was = *(volatile uint32_t *)(base + EPSS_PERF_STATE), previous = 0;
+	bool found = false;
+	if (!(*(volatile uint32_t *)base & 1) || was >= EPSS_TABLE_ROWS) {
+		tell("cpufreq: lemonade group %u: invalid/disabled EPSS; no writes\n", domain);
+		return false;
+	}
+	lemonade_domains[domain].base = base;
+	lemonade_domains[domain].original = was;
+	for (uint32_t row = 0; row < EPSS_TABLE_ROWS; row++) {
+		uint32_t entry = *(volatile uint32_t *)(base + EPSS_FREQ_TABLE + 4 * row);
+		uint32_t khz = (entry >> 30) ? XO_KHZ * (entry & 0xff) : ALTERNATE_KHZ;
+		if (row && khz == previous) {
+			break;
+		}
+		if (khz < previous || khz > maxima[domain]) {
+			tell("cpufreq: lemonade group %u: unexpected LUT at row %u; no writes\n", domain, row);
+			return false;
+		}
+		if (khz == caps[domain]) {
+			lemonade_domains[domain].selected = row;
+			lemonade_domains[domain].khz = khz;
+			found = true;
+		}
+		previous = khz;
+	}
+	uint32_t old_entry = *(volatile uint32_t *)(base + EPSS_FREQ_TABLE + 4 * was);
+	uint32_t old_khz = (old_entry >> 30) ? XO_KHZ * (old_entry & 0xff) : ALTERNATE_KHZ;
+	tell("cpufreq: lemonade group %u: firmware row %u (%u kHz); balanced row %u (%u kHz), table max %u kHz%s\n",
+	    domain, was, old_khz, lemonade_domains[domain].selected, lemonade_domains[domain].khz,
+	    previous, found ? "" : "; requested stock OPP absent");
+	return found;
+}
 
 /* How fast a simple loop runs, in thousands of iterations per millisecond. */
 static uint32_t
@@ -542,6 +606,16 @@ redwood_ddr_quiesce(void)
 	uint32_t address[2] = { ddr_mc0, ddr_sh0 };
 	uint32_t rest = DDR_REST, data[2];
 	bool done;
+	for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
+		if (lemonade_domains[domain].changed) {
+			vm_offset_t base = lemonade_domains[domain].base;
+			*(volatile uint32_t *)(base + EPSS_PERF_STATE) = lemonade_domains[domain].original;
+			__asm__ volatile("dsb sy" ::: "memory");
+			lemonade_domains[domain].changed = false;
+			tell("cpufreq: lemonade group %u restored row %u, readback %u\n", domain,
+			    lemonade_domains[domain].original, *(volatile uint32_t *)(base + EPSS_PERF_STATE));
+		}
+	}
 
 	if (!ddr_voted) {
 		return;
@@ -561,6 +635,32 @@ redwood_cpufreq_init(void)
 	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
 	load_start();
+	if (!cpu_platform()) {
+		return;
+	}
+	if (lemonade_cpu) {
+		if (!PE_parse_boot_argn("cpufreq", &enabled, sizeof(enabled)) || !enabled) {
+			return;
+		}
+		bool valid = true;
+		for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
+			valid = lemonade_cpu_prepare(domain) && valid;
+		}
+		/* cpufreq=2 inspects only. Never touch SC7280 DDR votes on this SoC. */
+		if (!valid || enabled != 1) {
+			return;
+		}
+		for (uint32_t domain = 0; domain < EPSS_DOMAINS; domain++) {
+			vm_offset_t base = lemonade_domains[domain].base;
+			lemonade_domains[domain].changed = true;
+			*(volatile uint32_t *)(base + EPSS_PERF_STATE) = lemonade_domains[domain].selected;
+			__asm__ volatile("dsb sy" ::: "memory");
+			tell("cpufreq: lemonade group %u requested %u kHz, row %u readback %u\n", domain,
+			    lemonade_domains[domain].khz, lemonade_domains[domain].selected,
+			    *(volatile uint32_t *)(base + EPSS_PERF_STATE));
+		}
+		return;
+	}
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));
 	if (enabled == 1) {

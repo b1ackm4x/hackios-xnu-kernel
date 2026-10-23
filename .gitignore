@@ -80,3 +80,21 @@ __pycache__/
 !/xnu-deps/build/lzbitmap/libzbitmap.c
 !/xnu-deps/build/lzbitmap/libzbitmap.h
 /tools/android/f2fs-resize
+
+# Local device material stays local, even if the source whitelist above grows.
+/.userland.git/
+/local/
+/out/
+/logs/
+/fw-*/
+/ios165/rootfs/
+/ios165/*.ipsw
+/ios165/*.dmg
+/userland/root/
+/userland/obj/
+/userland/*.apfs
+.env
+.env.*
+!.env.example
+*.pem
+*.key

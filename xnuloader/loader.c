@@ -163,6 +163,23 @@ str_eq(const char *a, const char *b)
 	return *a == *b;
 }
 
+/* USB replies must not borrow the diagnostic log: it can already be full. */
+static char *
+format_uint(char *out, uint64_t value, unsigned base)
+{
+	char digits[24];
+	unsigned n = 0;
+	do {
+		digits[n++] = "0123456789abcdef"[value % base];
+		value /= base;
+	} while (value);
+	while (n) {
+		*out++ = digits[--n];
+	}
+	*out = 0;
+	return out;
+}
+
 /*
  * Set once the loader takes commands over USB: its log travels that way, and
  * the screen is left to the kernel (and to "oem screenshot").
@@ -298,6 +315,8 @@ static char out_buf[2 * 1024 * 1024];
 static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));
 static const char *staged_data = out_buf;   /* what "upload" sends: normally the log in out_buf */
 static uint64_t staged_len;
+static const char *last_kernel_log;
+static uint64_t last_kernel_log_len;
 
 static void
 compose_logs(const char *klog, uint64_t klog_len)
@@ -326,16 +345,21 @@ static int hc_list_is_uefis(void);
 static int hc_log_skips;                /* logs not written this run (said twice at most) */
 static void hc_print_state(const char *when);
 static void hc_take_back(const char *when);
+/* An unvalidated port must keep logs in RAM/USB, never in a phone partition. */
+static int persistent_logs_allowed;
 
 static void
 write_logs(const char *klog, uint64_t klog_len)
 {
-	efi_block_io *bio = find_log_partition();
+	efi_block_io *bio = persistent_logs_allowed ? find_log_partition() : NULL;
 
+	last_kernel_log = klog;
+	last_kernel_log_len = klog_len;
 	compose_logs(klog, klog_len);
 	if (bio == NULL) {
-		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
-		if (klog != NULL) {
+		/* USB already has the complete staged log. Echo only in console mode;
+		 * otherwise a large kernel log also fills the tiny loader log buffer. */
+		if (klog != NULL && !screen_quiet) {
 			print("\n== KERNEL LOG ==\n");
 			for (uint64_t i = 0; i < klog_len; i++) {
 				put_char(klog[i]);
@@ -553,6 +577,16 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
+static const struct platform platform_lemonade = {
+	/* GIC/MPIDR/capacities verified against the LE2110's running Android FDT. */
+	.name = "lemonade", .io_base = 0x00400000, .io_size = 0x3FC00000,
+	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000,
+	.uart = 0, .psci_hvc = 0, .log_other_cpu = 0,
+	.cores = 8, .core_shift = 8, .small_cores = 0x0f,
+	/* Expected from Mu-Silicium lemonadePkg; physical GOP verification pending. */
+	.fb_base = 0xE4D00000,
+};
+
 /*
  * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
  * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
@@ -560,6 +594,7 @@ static const struct platform platform_redwood = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
+	&platform_lemonade,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -2623,16 +2658,17 @@ static char last_result[64] = "idle";
 static void
 set_result(const char *what, uint64_t a, uint64_t b)
 {
-	uint32_t saved = log_len;
-	uint32_t start = log_len;
-	print("%s %d %x", what, a, b);
-	uint32_t n = log_len - start;
-	if (n > sizeof(last_result) - 1) {
-		n = sizeof(last_result) - 1;
+	size_t n = str_len(what);
+	/* 20 decimal digits + 16 hex digits + two spaces + terminator. */
+	if (n > sizeof(last_result) - 39) {
+		n = sizeof(last_result) - 39;
 	}
-	memcpy(last_result, log_buf + start, n);
-	last_result[n] = 0;
-	log_len = saved;
+	memcpy(last_result, what, n);
+	char *p = last_result + n;
+	*p++ = ' ';
+	p = format_uint(p, a, 10);
+	*p++ = ' ';
+	format_uint(p, b, 16);
 }
 
 /* Every range of the firmware's memory map of 1 MB or more, and the total of each type. */
@@ -3451,7 +3487,11 @@ static const uint8_t usb_bos[42] = {
 static const uint8_t usb_str0[4] = { 4, 3, 0x09, 0x04 };
 static const uint8_t usb_str_mfr[8] = { 8, 3, 'X', 0, 'N', 0, 'U', 0 };
 static const uint8_t usb_str_prod[20] = { 20, 3, 'x', 0, 'n', 0, 'u', 0, 'l', 0, 'o', 0, 'a', 0, 'd', 0, 'e', 0, 'r', 0 };
-static const uint8_t usb_str_serial[20] = { 20, 3, 'x', 0, 'n', 0, 'u', 0, 'l', 0, 'o', 0, 'a', 0, 'd', 0, 'e', 0, 'r', 0 };
+#ifndef HACKIOS_USB_SERIAL
+#define HACKIOS_USB_SERIAL "xnuloader"
+#endif
+/* A per-device build can keep its USB identity across the Android -> loader transition. */
+static uint8_t usb_str_serial[64];
 static const uint8_t usb_str_iface[18] = { 18, 3, 'f', 0, 'a', 0, 's', 0, 't', 0, 'b', 0, 'o', 0, 'o', 0, 't', 0 };
 
 static void EFIAPI
@@ -3468,6 +3508,14 @@ usb_start(void)
 	static const void *strings[5] = { usb_str0, usb_str_mfr, usb_str_prod, usb_str_serial, usb_str_iface };
 	static usb_device_descriptor_set set;
 	void *event;
+	static const char serial[] = HACKIOS_USB_SERIAL;
+	_Static_assert(sizeof(serial) <= 32, "USB serial must fit its string descriptor");
+	usb_str_serial[0] = 2 + 2 * (sizeof(serial) - 1);
+	usb_str_serial[1] = 3;
+	for (unsigned i = 0; i < sizeof(serial) - 1; i++) {
+		usb_str_serial[2 + i * 2] = serial[i];
+		usb_str_serial[3 + i * 2] = 0;
+	}
 
 	/* Ask the platform to bring the controller up in peripheral mode (as the stock fastboot does). */
 	if (!EFI_ERROR(BS->create_event_ex(0x200 /* EVT_NOTIFY_SIGNAL */, 8 /* TPL_CALLBACK */, usb_dummy_notify, NULL,
@@ -3628,11 +3676,11 @@ fb_command(char *cmd)
 				fb_reply("OKAY", last_result);
 			} else if (str_eq(var, "screen") && SCREEN.base != 0) {
 				/* width height bytes-per-row */
-				uint32_t mark = log_len;
-				print("%d %d %d", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, (uint64_t)SCREEN.stride);
-				log_buf[log_len] = 0;
-				fb_reply("OKAY", log_buf + mark);
-				log_len = mark;
+				char geometry[64], *p = geometry;
+				p = format_uint(p, SCREEN.width, 10); *p++ = ' ';
+				p = format_uint(p, SCREEN.height, 10); *p++ = ' ';
+				format_uint(p, SCREEN.stride, 10);
+				fb_reply("OKAY", geometry);
 			} else {
 				fb_reply("OKAY", "");
 			}
@@ -3742,6 +3790,8 @@ fb_command(char *cmd)
 			set_result("running", cp, 0);
 			fb_reply("OKAY", "");
 			log_len = 0;
+			last_kernel_log = NULL;
+			last_kernel_log_len = 0;
 			print("== XNULOADER run (usb) ==\n");
 			if (!run_kernel(have_cp, cp)) {
 				set_result("not-started", 0, 0);
@@ -3759,7 +3809,7 @@ fb_command(char *cmd)
 			if (busy) {
 				compose_live_log(running_live, running_slide);
 			} else {
-				compose_logs(NULL, 0);
+				compose_logs(last_kernel_log, last_kernel_log_len);
 			}
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "reboot") || starts_with(cmd, "oem reboot")) {
@@ -3949,6 +3999,7 @@ efi_main(efi_handle image, efi_system_table *st)
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
+	persistent_logs_allowed = (PLAT == &platform_redwood);
 
 	install_exception_hook();
 	wdt_arm();

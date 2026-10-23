@@ -9,6 +9,9 @@
 # brings back Android. The session's log is printed (QEMU) or saved in logs/ (phones).
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 load_device "$1"
+# xl still assumes one unqualified Android/fastboot device and rebuilds redwood.
+# The initial lemonade port deliberately does not expose that entry point.
+[ "$DEVICE" != lemonade ] || die "lemonade bring-up: use the explicit-device steps in docs/LEMONADE.md; xl is not ported yet"
 SECS=${2:-$DEFAULT_SECS}
 mkdir -p logs
 [ -f userland/root.apfs ] && [ -f userland/system.apfs ] || die "no images: run common/build.sh $DEVICE first"

@@ -1,0 +1,2 @@
+# First userspace bring-up: one bounded message, no CPU load or peripheral tests.
+/redwood/bin/hello_dyn lemonade initial userspace bring-up

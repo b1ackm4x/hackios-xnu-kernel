@@ -57,6 +57,7 @@ extern void redwood_torch_quiesce(void);
 extern void redwood_camera_quiesce(void);
 extern void redwood_mic_quiesce(void);
 extern void redwood_ufs_quiesce(void);
+extern void lemonade_touch_quiesce(void);
 extern void redwood_var_save_on_return(void);   /* bsd/dev/redwood_ufs.c: the data volume into the flash */
 void loader_checkpoint(uint64_t n);
 
@@ -370,6 +371,7 @@ loader_return(void)
 	psci_smp_stop_others();
 #endif
 	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
+	lemonade_touch_quiesce();      /* touch bus pins restored after other cores have stopped */
 	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
 	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
 	redwood_adsp_quiesce();         /* nor the audio DSP */

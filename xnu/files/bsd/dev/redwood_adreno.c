@@ -96,6 +96,7 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/redwood_input.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
@@ -111,6 +112,36 @@ static uint32_t speed_bin;              /* which of the GPUs of this kind the fu
 static uint32_t newest_step;            /* the highest one asked for: the one that has not been seen to work */
 static char last_write[96] = "nothing written";
 static bool quiet;                      /* repeating accesses that have been announced and seen to work: say nothing */
+
+/* The loader identifies the physical board independently of the iPhone identity
+ * presented to user space. Never probe a different Qualcomm SoC with these MMIO
+ * addresses merely because gpu=1 was supplied. SM8350 values are from the
+ * OnePlus LE2110 live DT, OnePlusOSS's SM8350 kernel and Linux gpucc-sm8350.c. */
+static bool lemonade;
+static uint32_t chip_id = 0x06030500;
+static uint32_t highest_bank_bit = 14;
+static uint32_t gmem_bytes = 512 * 1024;
+
+static bool
+select_gpu_platform(void)
+{
+	DTEntry entry;
+	const void *value;
+	unsigned size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess) {
+		return false;
+	}
+	if (size == sizeof("lemonade") && memcmp(value, "lemonade", size) == 0) {
+		lemonade = true;
+		chip_id = 0x06060001;             /* Adreno 660v2, qcom,chipid */
+		highest_bank_bit = 16;           /* this phone's LPDDR5 / UBWC layout */
+		gmem_bytes = 1536 * 1024;
+		return true;
+	}
+	return size == sizeof("redwood") && memcmp(value, "redwood", size) == 0;
+}
 
 /*
  * The kernel's log reaches the loader when a run is over, and a run that ends in a reset
@@ -435,6 +466,15 @@ step_fuses(void)
 {
 	uint32_t bin, gaming;
 
+	if (lemonade) {
+		/* The only GPU nvmem cell in sm8350: efuse@784000, byte 0x17b,
+		 * bits 5..7. Do not read SC7280's unrelated raw/gaming fuses. */
+		announce("read SM8350 GPU speed bin from the device-tree nvmem cell");
+		speed_bin = get8(&qfprom, "speed bin", QFPROM_CORRECTED + 0x17b) >> 5 & 7;
+		printf("adreno: %u: Adreno 660v2, chip %#x, speed bin %u\n", step, chip_id, speed_bin);
+		return true;
+	}
+
 	announce("read the GPU's fuses in the error-corrected copy (0x784000), which Linux reads");
 	bin = get8(&qfprom, "speed bin, low", QFPROM_CORRECTED + QFPROM_GPU_SPEED_BIN);
 	bin |= get8(&qfprom, "speed bin, high", QFPROM_CORRECTED + QFPROM_GPU_SPEED_BIN + 1) << 8;
@@ -696,7 +736,7 @@ step_clocks(void)
  * clk-debug.c (mainline Linux has no counterpart).
  */
 #define GCC_DEBUG_MUX           0x62000         /* [9:0] which clock goes to the counter */
-#define GCC_DEBUG_MUX_GPUCC     0x146           /* ... the debug output of the GPU's clock controller */
+#define GCC_DEBUG_MUX_GPUCC     (lemonade ? 0x153 : 0x146) /* debugcc-lahaina.c / debugcc-yupik.c */
 #define GCC_DEBUG_DIV           0x62004         /* [3:0] divider - 1; both controllers divide by 2 */
 #define GCC_DEBUG_CBCR          0x62008
 #define GCC_XO_DIV4_CBCR        0x6200c         /* the counter's time base: the crystal / 4, 4.8 MHz */
@@ -1875,7 +1915,7 @@ step_gmu_firmware(void)
 #define GMU_RSCC_CONTROL_REQ    GMU_WORD(0x9307)
 #define GMU_AO_AHB_FENCE_CTRL   GMU_WORD(0x9310)
 #define GMU_AHB_FENCE_RANGE_0   GMU_WORD(0x9311)
-#define GMU_CHIP                0x06035000      /* dt qcom,chipid 0x06030500 the way the firmware wants it */
+#define GMU_CHIP                ((chip_id & 0xffff0000u) | ((chip_id << 4) & 0xf000u) | ((chip_id << 8) & 0xf00u))
 #define GMU_STARTED_MASK        0x1ff           /* of fw_init_result, for firmware newer than core 0x20010004 */
 #define GMU_STARTED             0x100
 #define GMU_FAILED              0xe00
@@ -2282,9 +2322,11 @@ static uint32_t core_khz;               /* the 3D core's speed, as asked of the 
 static bool
 step_core_power(void)
 {
-	static const struct {
+	static const struct gpu_speed {
 		uint32_t khz, level;
-	} speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } };
+	} redwood_speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } },
+	  lemonade_speeds[] = { { 0, 0 }, { 315000, 64 } };
+	const struct gpu_speed *speeds = lemonade ? lemonade_speeds : redwood_speeds;
 	static struct hfi_perf_table perf;
 	static struct hfi_bw_table bw;
 	uint32_t core_start[2] = { 0, 0 }, start[1] = { 0 }, vote[4] = { 0, 1, 3, HFI_NO_INDEX }, granted = 0, speed = 0;
@@ -2299,7 +2341,13 @@ step_core_power(void)
 		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
 		return false;
 	}
-	perf.gpu_levels = sizeof(speeds) / sizeof(speeds[0]);
+	/* Start SM8350 at its stock minimum OPP; do not apply SC7280's 450/550 MHz
+	 * voltage table or overclock the device during bring-up. */
+	perf.gpu_levels = lemonade ? sizeof(lemonade_speeds) / sizeof(lemonade_speeds[0]) :
+	    sizeof(redwood_speeds) / sizeof(redwood_speeds[0]);
+	if (lemonade) {
+		vote[2] = 1;
+	}
 	for (unsigned i = 0; i < perf.gpu_levels; i++) {
 		perf.gpu[i].khz = speeds[i].khz;
 		perf.gpu[i].acd = 0xffffffff;           /* no adaptive clocking */
@@ -2728,22 +2776,27 @@ step_core_start(void)
 	put(&gpu, "cp_roq_thresholds_1", CP_ROQ_THRESHOLDS_1, 0x8040362c);
 	put(&gpu, "cp_lpac_prog_fifo_size", CP_LPAC_PROG_FIFO_SIZE, 0x20);
 	put(&gpu, "cp_mem_pool_size", CP_MEM_POOL_SIZE, 128);
-	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, 0x00200200);
+	put(&gpu, "pc_dbg_eco_cntl", PC_DBG_ECO_CNTL, lemonade ? 0x00300000 : 0x00200200);
 	put(&gpu, "cp_ahb_cntl", CP_AHB_CNTL, 1);
 	/*
 	 * How textures in the GPU's own tiled and compressed layouts are laid out in memory (Linux's
 	 * a6xx_calc_ubwc_config, a6xx_set_ubwc_config for this GPU: highest bank bit 14, and the
 	 * rest as below); Mesa is told the same (redwood_gpu_parameter()).
 	 */
-	put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 11 | 1u << 4 | 1u << 1);
-	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), 1u << 1);
-	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), 2u << 4 | 1u << 1);
-	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), 1u << 21);
+	uint32_t bank = highest_bank_bit - 13;
+	put(&gpu, "rb_nc_mode_cntl", GPU_WORD(0x8e08), 1u << 11 | (bank >> 2) << 10 | 1u << 4 | (bank & 3) << 1);
+	put(&gpu, "tpl1_nc_mode_cntl", GPU_WORD(0xb604), (bank >> 2) << 4 | (bank & 3) << 1);
+	put(&gpu, "sp_nc_mode_cntl", GPU_WORD(0xae02), (bank >> 2) << 10 | 2u << 4 | (bank & 3) << 1);
+	put(&gpu, "uche_mode_cntl", GPU_WORD(0x0e01), (bank & 3) << 21);
 	put(&gpu, "rbbm_nc_mode_cntl", GPU_WORD(0x0534), 1);
 	put(&gpu, "rbbm_perfctr_cntl", RBBM_PERFCTR_CNTL, 1);
 	put(&gpu, "rbbm_interface_hang_int_cntl", RBBM_INTERFACE_HANG_INT_CNTL, 1u << 30 | 0x1fffff);
 	put(&gpu, "uche_client_pf", UCHE_CLIENT_PF, 1u << 7 | 1);
 	put(&gpu, "cp_chicken_dbg", CP_CHICKEN_DBG, 1);
+	if (lemonade) {
+		/* A660 dual queue and afull workaround (adreno_a6xx.c). */
+		put(&gpu, "uche_cmdq_config", GPU_WORD(0x0e3c), 0x66906);
+	}
 	put(&gpu, "rbbm_gbif_client_qos_cntl", RBBM_GBIF_CLIENT_QOS_CNTL, 0);
 	put(&gpu, "cp_apriv_cntl", CP_APRIV_CNTL, 1u << 6 | 1u << 5 | 1u << 3 | 1u << 2 | 1u << 1);
 	put(&gpu, "rb_dbg_eco_cntl", RB_DBG_ECO_CNTL, 0x04100000);     /* Mesa's value for this GPU */
@@ -3170,7 +3223,6 @@ redwood_adreno_quiesce(void)
  * (redwood_gpu_recover() below, which says what is done and which source says so). Without it
  * such a submission is only reported, and the GPU stays stopped.
  */
-#define GPU_CHIP_ID             0x06030500ull   /* dt: qcom,chipid */
 #define GPU_ADDRESSES_START     0x20000000ull   /* above everything the steps use; below 4 GB, as Linux keeps them */
 #define GPU_ADDRESSES_SIZE      0xe0000000ull
 #define GPU_FENCE_AT            0x40            /* in the scratch page */
@@ -3346,10 +3398,10 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
 		*value = 0;
 		return true;
 	case 0x02:                              /* GMEM_SIZE */
-		*value = 512 * 1024;
+		*value = gmem_bytes;
 		return true;
 	case 0x03:                              /* CHIP_ID, with the speed bin above it */
-		*value = GPU_CHIP_ID | (uint64_t)speed_bin << 32;
+		*value = chip_id | (uint64_t)speed_bin << 32;
 		return true;
 	case 0x04:                              /* MAX_FREQ */
 		*value = core_khz * 1000ull;
@@ -3361,7 +3413,7 @@ redwood_gpu_parameter(uint32_t which, uint64_t *value)
 		*value = 1;
 		return true;
 	case 0x10:                              /* HIGHEST_BANK_BIT */
-		*value = 14;
+		*value = highest_bank_bit;
 		return true;
 	case 0x12:                              /* UBWC_SWIZZLE */
 		*value = 6;
@@ -4027,6 +4079,24 @@ redwood_adreno_init(void)
 	};
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
+	uint32_t requested = 0, probe = 0, display = 0;
+
+	PE_parse_boot_argn("gpu", &requested, sizeof(requested));
+	PE_parse_boot_argn("adreno", &probe, sizeof(probe));
+	PE_parse_boot_argn("display_probe", &display, sizeof(display));
+	if (!requested && !probe && !display) {
+		return;
+	}
+	if (!select_gpu_platform()) {
+		printf("adreno: refusing GPU MMIO on an unrecognized loader platform\n");
+		return;
+	}
+	printf("adreno: platform %s, chip %#x, GMEM %u KiB, highest bank bit %u\n",
+	    lemonade ? "lemonade" : "redwood", chip_id, gmem_bytes / 1024, highest_bank_bit);
+	if (lemonade && display) {
+		printf("adreno: display_probe is SC7280-specific; refusing it on SM8350\n");
+		return;
+	}
 
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
 		display_probe();

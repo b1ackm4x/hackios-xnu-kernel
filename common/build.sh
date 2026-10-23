@@ -54,6 +54,11 @@ if ! skip boot && [ "$KIND" = phone ]; then
 	L=xnuloader/loader.efi; [ -f $L ] || L=prebuilt/loader.efi
 	python3 xnuloader/mkpayload.py -o out/usb-payload.bin loader.efi=$L --usb > /dev/null
 	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
+		BOOT_HEADER_VERSION=${BOOT_HEADER_VERSION:-1} \
 		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img
-	echo "build: out/$DEVICE-boot.img -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
+	if [ "$DEVICE" = lemonade ]; then
+		echo "build: out/$DEVICE-boot.img -- verify/package with tools/lemonade-pack.py, then use tools/lemonade-usb.py boot"
+	else
+		echo "build: out/$DEVICE-boot.img -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
+	fi
 fi

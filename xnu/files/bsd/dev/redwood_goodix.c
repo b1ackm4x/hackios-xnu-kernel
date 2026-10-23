@@ -33,6 +33,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/redwood_input.h>
 #include <sys/systm.h>
 
@@ -1504,8 +1505,17 @@ redwood_goodix_init(void)
 {
 	uint32_t enabled = 0;
 	thread_t thread;
+	DTEntry entry;
+	const void *value;
+	unsigned size;
 
 	if (!PE_parse_boot_argn("touchscreen", &enabled, sizeof(enabled)) || !enabled) {
+		return;
+	}
+	/* The addresses in this driver belong only to redwood. */
+	if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess ||
+	    size != sizeof("redwood") || memcmp(value, "redwood", size)) {
 		return;
 	}
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));

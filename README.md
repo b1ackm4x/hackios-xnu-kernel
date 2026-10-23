@@ -1,5 +1,13 @@
 # HackiOS — XNU kernel
 
+> **OnePlus 9 / lemonade development branch.** This private derivative retains the history and
+> license of [oosexgang/hackios-xnu-kernel](https://github.com/oosexgang/hackios-xnu-kernel).
+> Our kernel and userland changes are maintained together on `device/lemonade` in
+> [b1ackm4x/hackios-xnu-kernel](https://github.com/b1ackm4x/hackios-xnu-kernel) and
+> [b1ackm4x/hackios-xnu-userland](https://github.com/b1ackm4x/hackios-xnu-userland).
+> Start with [repository workflow](docs/REPOSITORY.md) and [OnePlus 9 bring-up and measured limits](docs/LEMONADE.md).
+> The upstream feature matrix below describes redwood/QEMU, not the capabilities of this port.
+
 **HackiOS** boots Apple's open-source **XNU kernel** (`xnu-8796.121.2`, the kernel of iOS 16.5) on Android phone
 hardware and runs the **unmodified iOS 16.5 user space** on top of it: launchd → backboardd → SpringBoard →
 apps. Our own EFI loader, our own replacements for Apple's closed drivers, a UEFI port, and a Linux Wi-Fi driver

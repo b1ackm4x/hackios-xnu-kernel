@@ -1,0 +1,12 @@
+# Same workload for every candidate. Synthetic input only; physical touch stays disabled.
+/redwood/bin/rwtouch wait 25
+/redwood/bin/gl_test --require-renderer FD660 1 384 384
+/redwood/bin/rwtouch wait 35 notify com.redwood.unlock wait 15
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 3
+/redwood/bin/rwtouch swipe 0.5 0.4 0.5 0.7 300 wait 3 button home wait 3 swipe 0.92 0.003 0.92 0.5 300 wait 3 button home wait 3
+/redwood/bin/rwtouch tap 0.615 0.71 wait 3 swipe 0.5 0.8 0.5 0.3 150 wait 3 swipe 0.5 0.3 0.5 0.8 150 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 2 swipe 0.85 0.5 0.15 0.5 300 wait 2 swipe 0.15 0.5 0.85 0.5 300 wait 3
+/redwood/bin/rwtouch swipe 0.5 0.4 0.5 0.7 300 wait 3 button home wait 3 swipe 0.92 0.003 0.92 0.5 300 wait 3 button home wait 3
+/redwood/bin/rwtouch tap 0.615 0.71 wait 3 swipe 0.5 0.8 0.5 0.3 150 wait 3 swipe 0.5 0.3 0.5 0.8 150 wait 3 swipe 0.5 0.995 0.5 0.55 150 wait 3
+# Sustained Settings scrolling after the same 24 short gestures (200+ s total run).
+/redwood/bin/rwtouch tap 0.615 0.71 wait 5 zigzag 0.5 0.75 0.3 800 60 8 wait 2 button home
