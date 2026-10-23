@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
+    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "root"), help="bounded PCIe bring-up stages; none enables networking")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
                         help="SM8350 EPSS policy: inspect only, or capped stock OPPs with restore on return")
     parser.add_argument("--profile", choices=("performance",),
@@ -58,6 +59,10 @@ def main():
         parser.error("Performance metrics require run --kernel built")
     if args.touch and (args.action != "run" or args.kernel != "built" or args.checkpoint or args.gpu_step):
         parser.error("Touch requires run --kernel built without a checkpoint or GPU step")
+    if args.wifi and (args.action != "run" or args.kernel != "built" or args.checkpoint or args.gpu_step):
+        parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
+    if args.wifi and args.wifi != "inspect" and (args.touch or args.gpu or args.cpu_policy != "firmware"):
+        parser.error("Wi-Fi root-power probe must run without touch, GPU or CPU-policy changes")
     if args.cpu_policy != "firmware" and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU policy requires run --kernel built")
     session_limit = 900 if args.profile == "performance" and args.touch == "on" else 300
@@ -211,6 +216,8 @@ def main():
                 raise SystemExit("Refusing: kernel has no verified SM8350 CPU policy support")
             if args.touch and kernel_manifest.get("touch_driver_supported") != "lemonade-s6sy792-v1":
                 raise SystemExit("Refusing: kernel has no lemonade S6SY792 touch support")
+            if args.wifi and args.wifi not in kernel_manifest.get("wifi_modes_supported", []):
+                raise SystemExit("Refusing: kernel has no requested lemonade Wi-Fi mode")
             expected_kernel = kernel_manifest["sha256"]
         else:
             kernel = ROOT / "prebuilt/mach.development.bcm2837"
@@ -231,6 +238,9 @@ def main():
         if args.touch:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("touchscreen="))
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
+        if args.wifi:
+            cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
+            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "root": 7}[args.wifi])
         if args.cpu_policy != "firmware":
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("cpufreq="))
             cmdline += " cpufreq=" + ("2" if args.cpu_policy == "inspect" else "1") + " ddr=0"
@@ -257,6 +267,7 @@ def main():
         record["cpu_policy"] = args.cpu_policy
         record["profile"] = args.profile
         record["touch"] = args.touch
+        record["wifi"] = args.wifi
         record["live_logs"] = []
         if args.userland or args.gpu or args.gpu_step:
             image_manifest = json.loads((ROOT / "local/lemonade/images.json").read_text())

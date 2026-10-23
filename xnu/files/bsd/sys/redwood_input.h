@@ -78,6 +78,7 @@ void redwood_adreno_quiesce(void);      /* on the way back to the loader: the GP
 void redwood_adreno_stop(void);         /* before that, where the ending is no panic's: the GPU given back in order */
 void redwood_adreno_minute(void);       /* once a minute: a line about how warm the GPU is, if it is in use */
 void redwood_wifi_init(void);           /* boot-arg wifi=1: the phone's Wi-Fi; wifi_step=N: the first N steps of it */
+void lemonade_wifi_init(void);          /* lemonade_wifi=1: guarded, read-only PCIe survey */
 void redwood_adsp_init(void);           /* boot-arg adsp=1: the phone's audio DSP started and linked; adsp_step=N: the first N steps */
 void redwood_wifi_stop(void);           /* where a run ends in order: the Wi-Fi DSP, if it was started, shut down */
 int redwood_wifi_say(const char *format, ...) __printflike(1, 2);      /* a line of the Wi-Fi steps' log */

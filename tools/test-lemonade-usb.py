@@ -199,6 +199,60 @@ class DeviceSafety(unittest.TestCase):
             self.run_action("run", "--touch", "on")
         self.assertFalse(self.calls)
 
+    def test_wifi_refuses_prebuilt_before_device_access(self):
+        with self.assertRaises(SystemExit):
+            self.run_action("run", "--wifi", "inspect")
+        self.assertFalse(self.calls)
+
+    def test_wifi_refuses_old_kernel_before_upload(self):
+        self.fastboot = self.loader + "\tfastboot\n"
+        self.product = "xnuloader"
+        data = b"kernel without PCIe survey"
+        (self.root / "out/lemonade-kernel").write_bytes(data)
+        (self.root / "out/lemonade-kernel.manifest.json").write_text(json.dumps({
+            "device": "lemonade", "stage": "xnu-kernel", "sha256": hashlib.sha256(data).hexdigest()}))
+        with self.assertRaisesRegex(SystemExit, "Wi-Fi"):
+            self.run_action("run", "--kernel", "built", "--wifi", "inspect")
+        self.assertFalse(any("stage" in c or "run" in c for c in self.calls))
+
+    def test_wifi_write_stages_refuse_concurrent_power_users(self):
+        for extra in (("--touch", "on"), ("--gpu",), ("--cpu-policy", "balanced")):
+            with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                self.run_action("run", "--kernel", "built", "--wifi", "rails", *extra)
+        self.assertFalse(self.calls)
+
+    def test_old_monolithic_wifi_power_mode_is_removed(self):
+        with self.assertRaises(SystemExit):
+            self.run_action("run", "--kernel", "built", "--wifi", "power")
+        self.assertFalse(self.calls)
+
+    def test_inspection_kernel_cannot_run_root_power_probe(self):
+        self.fastboot = self.loader + "\tfastboot\n"
+        self.product = "xnuloader"
+        data = b"read-only Wi-Fi survey kernel"
+        (self.root / "out/lemonade-kernel").write_bytes(data)
+        (self.root / "out/lemonade-kernel.manifest.json").write_text(json.dumps({
+            "device": "lemonade", "stage": "xnu-kernel", "sha256": hashlib.sha256(data).hexdigest(),
+            "wifi_modes_supported": ["inspect"]}))
+        with self.assertRaisesRegex(SystemExit, "Wi-Fi"):
+            self.run_action("run", "--kernel", "built", "--wifi", "root")
+        self.assertFalse(any("stage" in c or "run" in c for c in self.calls))
+
+    def test_wifi_inspection_disables_redwood_hardware_path(self):
+        self.fastboot = self.loader + "\tfastboot\n"
+        self.product = "xnuloader"
+        self.result = "returned 19 0"
+        data = b"PCIe survey kernel"
+        (self.root / "out/lemonade-kernel").write_bytes(data)
+        (self.root / "out/lemonade-kernel.manifest.json").write_text(json.dumps({
+            "device": "lemonade", "stage": "xnu-kernel", "sha256": hashlib.sha256(data).hexdigest(),
+            "wifi_modes_supported": ["inspect"]}))
+        self.run_action("run", "--kernel", "built", "--wifi", "inspect", "--seconds", "1")
+        payload = next(c for c in self.calls if c[0] == "python3")
+        args = payload[payload.index("--cmdline") + 1].split()
+        self.assertEqual([x for x in args if x.startswith("wifi=")], ["wifi=0"])
+        self.assertEqual([x for x in args if x.startswith("lemonade_wifi=")], ["lemonade_wifi=1"])
+
     def test_long_session_requires_performance_and_physical_touch(self):
         with self.assertRaises(SystemExit):
             self.run_action("run", "--profile", "performance", "--seconds", "900")

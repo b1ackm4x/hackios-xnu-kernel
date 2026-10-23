@@ -163,6 +163,7 @@
 #include <mach/vm_param.h>
 #include <vm/memory_types.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 #include <sys/errno.h>
 #include <sys/redwood_input.h>
 #include <sys/redwood_qrtr.h>
@@ -4265,9 +4266,21 @@ redwood_wifi_init(void)
 	uint32_t on = 0, back = 0, done = 0;
 	uint64_t size = 0;
 	thread_t thread;
+	DTEntry platform_entry;
+	const void *platform_name;
+	unsigned platform_size;
 
 	PE_parse_boot_argn("wifi_step", &last_step, sizeof(last_step));
 	if (last_step == 0 && (!PE_parse_boot_argn("wifi", &on, sizeof(on)) || on == 0)) {
+		return;
+	}
+	/* The Qualcomm SoC base is shared by other phones. A named, different
+	 * physical platform must never enter the WCN6750/WPSS register path. */
+	if (SecureDTLookupEntry(NULL, "/arm-io", &platform_entry) == kSuccess &&
+	    SecureDTGetProperty(platform_entry, "device_type", &platform_name, &platform_size) == kSuccess &&
+	    !(platform_size == sizeof("redwood") && !memcmp(platform_name, "redwood", platform_size))) {
+		printf("wifi: redwood hardware path refused on another platform\n");
+		last_step = 0;
 		return;
 	}
 	if (last_step == 0 && on != 1) {

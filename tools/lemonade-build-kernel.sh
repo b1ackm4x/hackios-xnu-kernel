@@ -11,16 +11,17 @@ command -v gawk >/dev/null || { echo 'Install gawk: mawk misgenerates XNU syscal
 [[ -x xnu-deps/host/bin/ld64 ]] || xnu-deps/setup.sh
 cp xnu/files/bsd/dev/redwood_adreno.c "$XNU_SRC/bsd/dev/redwood_adreno.c"
 cp xnu/files/bsd/dev/redwood_cpufreq.c "$XNU_SRC/bsd/dev/redwood_cpufreq.c"
-for path in bsd/dev/lemonade_touch.c bsd/dev/lemonade_touch_protocol.h bsd/dev/redwood_goodix.c bsd/dev/redwood_buttons.c bsd/dev/redwood_input.c bsd/sys/redwood_input.h osfmk/arm64/loader_return.c; do
+for path in bsd/dev/lemonade_touch.c bsd/dev/lemonade_touch_protocol.h bsd/dev/lemonade_wifi.c bsd/dev/redwood_wifi.c bsd/dev/redwood_goodix.c bsd/dev/redwood_buttons.c bsd/dev/redwood_input.c bsd/sys/redwood_input.h osfmk/arm64/loader_return.c; do
     cp "xnu/files/$path" "$XNU_SRC/$path"
 done
 python3 - "$XNU_SRC/bsd/conf/files" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]); s = p.read_text()
-if 'bsd/dev/lemonade_touch.c' not in s:
-    s += '\nbsd/dev/lemonade_touch.c\tstandard\n'
-    p.write_text(s)
+for name in ('lemonade_touch.c', 'lemonade_wifi.c'):
+    if 'bsd/dev/' + name not in s:
+        s += '\nbsd/dev/' + name + '\tstandard\n'
+p.write_text(s)
 PY
 mkdir -p out local/lemonade
 LOG="local/lemonade/gpu-kernel-build-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -53,6 +54,8 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'touch_driver_supported': 'lemonade-s6sy792-v1',
           'touch_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch.c').read_bytes()).hexdigest(),
           'touch_protocol_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch_protocol.h').read_bytes()).hexdigest(),
+          'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'root'],
+          'wifi_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_wifi.c').read_bytes()).hexdigest(),
           'build_log': str(log), 'gpu_hardware_verified': False}
 Path('out/lemonade-kernel.manifest.json').write_text(json.dumps(record, indent=2) + '\n')
 print(f'Checked lemonade XNU: {len(data)} bytes, SHA-256 {record["sha256"]}')
