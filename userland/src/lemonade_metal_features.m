@@ -85,7 +85,7 @@ static void lifetimeTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MT
             [blit endEncoding];BOOL done=finish(command);
             uint8_t pixels[1024];[readback getBytes:pixels bytesPerRow:64 fromRegion:MTLRegionMake2D(0,0,16,16) mipmapLevel:0];
             unsigned different=0;for(unsigned p=0;p<256;p++)for(unsigned c=0;c<4;c++)different+=pixels[p*4+c]!=(c==1||c==3?255:0);
-            result(name,done&&encoder&&!different,command.status,different);
+            result(name,done&&encoder&&encoder.device==device&&!different,command.status,different);
         }
         [pipeline release];[state release];[vb release];[fb release];
         [target release];[readback release];[depth release];[ds release];[pd release];[vs release];[fs release];
@@ -104,7 +104,7 @@ static void lifetimeTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MT
             [encoder dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(16,1,1)];[encoder endEncoding];
             BOOL done=finish(command);unsigned different=0;
             for(unsigned i=0;i<128;i++)different+=((uint32_t*)output.contents)[i]!=(i<64?i*7+3:0xa5a5a5a5);
-            result("compute-release-before-first-dispatch",done&&encoder&&!different,command.status,different);
+            result("compute-release-before-first-dispatch",done&&encoder&&encoder.device==device&&!different,command.status,different);
         } else result("compute-release-before-first-dispatch",NO,0,1);
         [pipeline release];[countBuffer release];[output release];[function release];
     }
@@ -127,7 +127,7 @@ static void lifetimeTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MT
             [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,32,1)];[encoder endEncoding];BOOL done=finish(command);
             [target getBytes:pixels bytesPerRow:68 fromRegion:MTLRegionMake2D(0,0,17,17) mipmapLevel:0];unsigned different=0;
             for(unsigned i=0;i<sizeof(input);i++)different+=abs((int)pixels[i]-input[i])>1;
-            result("compute-texture-sampler-release-before-dispatch",done&&encoder&&!different,command.status,different);
+            result("compute-texture-sampler-release-before-dispatch",done&&encoder&&encoder.device==device&&!different,command.status,different);
         } else result("compute-texture-sampler-release-before-dispatch",NO,0,1);
         [pipeline release];[source release];[target release];[sampler release];[sd release];[function release];
     }

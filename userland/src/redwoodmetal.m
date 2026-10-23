@@ -4502,6 +4502,7 @@ enum {
 
 @implementation RedwoodMetalRenderEncoder {
 	RedwoodMetalCommandBuffer *_commandBuffer;   /* not retained: it owns the encoder */
+	id _device; /* the public device property remains valid after endEncoding */
 	RedwoodMetalRenderPipeline *_pipeline;
 	id _color[8];
 	id _resolve[8];
@@ -4543,6 +4544,7 @@ enum {
 		return nil;
 	}
 	_commandBuffer = commandBuffer;
+	_device = [[commandBuffer device] retain];
 
 	/* What the pass is drawing into, and whether it begins by clearing. Metal keeps this in
 	 * the pass descriptor rather than in the pipeline, so it belongs to the encoder. */
@@ -4614,7 +4616,7 @@ enum {
 	return self;
 }
 
-- (id)device { return [_commandBuffer device]; }
+- (id)device { return _device; }
 
 - (void)setRenderPipelineState:(id)state { rw_replace_binding((id *)&_pipeline, state); }
 
@@ -5871,6 +5873,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 - (void)dealloc
 {
 	[self releaseEncodingResources];
+	[_device release];
 	[super dealloc];
 }
 
@@ -5878,6 +5881,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 
 @implementation RedwoodMetalComputeEncoder {
 	RedwoodMetalCommandBuffer *_commandBuffer;   /* not retained: it owns the encoder's life */
+	id _device;
 	RedwoodMetalComputePipeline *_pipeline;
 	id _buffers[RW_MAX_BUFFERS];
 	NSUInteger _offsets[RW_MAX_BUFFERS];
@@ -5895,10 +5899,11 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 		return nil;
 	}
 	_commandBuffer = commandBuffer;
+	_device = [[commandBuffer device] retain];
 	return self;
 }
 
-- (id)device { return [_commandBuffer device]; }
+- (id)device { return _device; }
 
 - (void)setComputePipelineState:(id)state
 {
@@ -6239,6 +6244,7 @@ controlPointIndexBufferOffset:(NSUInteger)controlPointOffset
 - (void)dealloc
 {
 	[self releaseEncodingResources];
+	[_device release];
 	[super dealloc];
 }
 
