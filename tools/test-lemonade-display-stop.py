@@ -158,7 +158,8 @@ int main(void) {
     assert(host_mdp[0x15018/4]==0x20000000);
     char *pixels=strstr(host_log,"source restore pixels=1");
     char *unmap=strstr(host_log,"mapping restore registers=1");
-    assert(pixels && unmap && pixels<unmap);
+    char *cleanup=strstr(host_log,"mapping cleanup stopping=1 mapped=1 flipping=1 source=0x12000000/0x12000000 fsr=0x400 global=0 underrun=0");
+    assert(cleanup && pixels && unmap && cleanup<pixels && pixels<unmap);
     puts("PASS: pending return observes a complete source pair and restores pixels before unmapping");
 
     reset_fixture();

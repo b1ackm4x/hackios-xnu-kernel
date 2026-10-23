@@ -529,6 +529,16 @@ display_map_restore(void)
 {
 	bool enabled = ml_set_interrupts_enabled(false);
 	if (display_stopping && !display_restoring) goto restored;
+	if (display_map.active || display_map.flip_active) {
+		/* Capture fault latches before restoring the context can clear them.
+		 * An interrupted-run acceptance must also prove that an owned source
+		 * was still being scanned when quiesce began. */
+		tell("lemonade-display: mapping cleanup stopping=%u mapped=%u flipping=%u source=%#x/%#x fsr=%#x global=%#x underrun=%u\n",
+		    display_stopping, display_map.active, display_map.flip_active,
+		    rd(display_map.mdp, 0x4014), rd(display_map.mdp, 0x6014),
+		    rd(display_map.cb, 0x58), rd(display_map.smmu, 0x48),
+		    !!(rd(display_map.mdp, 0x14) & (1u << 26)));
+	}
 	if (display_map.flip_active) {
 		/* Restore the physical GOP source while its identity mapping is still
 		 * live. Confirm actual output before turning translation off. */

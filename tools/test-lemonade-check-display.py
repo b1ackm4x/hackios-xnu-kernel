@@ -28,13 +28,27 @@ lemonade-display: bus vote 0 restored enable=0 expected=0
 
 
 class DisplayEvidence(unittest.TestCase):
-    def checked(self, log=LOG, **overrides):
+    def checked(self, log=LOG, interrupted=False, **overrides):
         raw = log.encode()
         record = {'device': 'lemonade', 'display': 'flip', 'kernel_sha256': 'a' * 64,
                   'log_sha256': hashlib.sha256(raw).hexdigest(), 'result': 'result: returned 2048 0\n',
                   'cmdline': 'ufs_write=0 lemonade_display=7 lemonade_display_flips=64'}
         record.update(overrides)
-        return checker.check(record, raw)
+        return checker.check(record, raw, interrupted)
+
+    def interrupted(self, log=None, **overrides):
+        if log is None:
+            log = self.interrupted_log()
+        return self.checked(log, interrupted=True, seconds=3,
+                            cmdline='ufs_write=0 loader_return_after=3 lemonade_display=7 lemonade_display_flips=64',
+                            **overrides)
+
+    def interrupted_log(self):
+        line = 'lemonade-display: flip completed=64/64 frames=128 MISR=0x4444/0x4444 fsr=0x400 global=0 underrun=0\n'
+        snapshot = ('--- loader_return_after expired ---\n'
+                    'lemonade-display: mapping cleanup stopping=1 mapped=1 flipping=1 source=0x12000000/0x12000000 '
+                    'fsr=0x400 global=0 underrun=0\n')
+        return LOG.replace(line, snapshot) + 'lemonade-display: quiesced; resumed probe access disabled\n'
 
     def test_valid_output_and_read_only_fsr_bits(self):
         self.assertTrue(self.checked()['passed'])
@@ -69,6 +83,40 @@ class DisplayEvidence(unittest.TestCase):
     def test_rejects_missing_evidence(self):
         for line in LOG.splitlines():
             self.assertFalse(self.checked(LOG.replace(line + '\n', ''))['passed'], line)
+
+    def test_interrupted_return_needs_separate_acceptance(self):
+        self.assertTrue(self.interrupted()['passed'])
+        self.assertFalse(self.checked(self.interrupted_log())['passed'])
+        self.assertFalse(self.interrupted(LOG)['passed'])
+
+    def test_rejects_pre_cleanup_faults_even_if_restored_state_is_clean(self):
+        log = self.interrupted_log()
+        for old, new in (('source=0x12000000/0x12000000 fsr=0x400', 'source=0x12000000/0x12000000 fsr=0x402'),
+                         ('global=0 underrun=0', 'global=1 underrun=0'),
+                         ('underrun=0', 'underrun=1')):
+            self.assertFalse(self.interrupted(log.replace(old, new))['passed'])
+
+    def test_requires_actual_interrupted_owned_scanout(self):
+        log = self.interrupted_log()
+        for old, new in (('stopping=1', 'stopping=0'), ('mapped=1', 'mapped=0'), ('flipping=1', 'flipping=0'),
+                         ('source=0x12000000/0x12000000', 'source=0xe4d00000/0xe4d00000'),
+                         ('source=0x12000000/0x12000000', 'source=0x12000000/0x10000000'),
+                         ('--- loader_return_after expired ---', ''),
+                         ('quiesced; resumed probe access disabled', '')):
+            self.assertFalse(self.interrupted(log.replace(old, new))['passed'])
+        for line in log.splitlines():
+            self.assertFalse(self.interrupted(log.replace(line+'\n', ''))['passed'], line)
+
+    def test_interrupted_cleanup_must_follow_timer(self):
+        log = self.interrupted_log()
+        timer = '--- loader_return_after expired ---\n'
+        self.assertFalse(self.interrupted(log.replace(timer, '')+timer)['passed'])
+
+    def test_normal_return_also_checks_pre_cleanup_faults(self):
+        snapshot = ('lemonade-display: mapping cleanup stopping=0 mapped=1 flipping=1 '
+                    'source=0x12000000/0x12000000 fsr=0x400 global=0 underrun=0\n')
+        self.assertTrue(self.checked(LOG+snapshot)['passed'])
+        self.assertFalse(self.checked(LOG+snapshot.replace('fsr=0x400', 'fsr=0x402'))['passed'])
 
 
 if __name__ == '__main__':

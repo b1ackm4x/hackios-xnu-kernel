@@ -72,6 +72,8 @@
 | 常量缓冲读取范围优化 | `1792788259-run-cp0.log` | 88 项特性 + 2 项 MPS + 4 项 CA 全部通过；新增静态索引 3 和动态索引 127 的未对齐缓冲测试，Apple 同一库亦全部通过 |
 | 默认频点连续滚动 | `1792788769-run-cp0.log` | 五分钟运行，192 秒连续滚动后 88 + 2 + 4 项全部通过；12,780 次呈现无越窗、丢弃或异常中断 |
 | 最终进程内回归 | `1792788880-run-cp0.log` | FD660 GLES 回读、26 项 IOSurface、15 项光栅和 88 项特性全部通过；两项非法索引按预期拒绝，90 秒正常返回 |
+| 编码阶段资源持有修复 | `1792797825-run-cp0.log` | 系统 Metal 93 项特性 + 2 项 MPS + 4 项 CA 全部通过，默认 profile 1 的 90 秒桌面运行正常返回 |
+| 资源持有修复的进程内回归 | `1792797958-run-cp0.log` | FD660 GLES 回读、26 项 IOSurface、15 项光栅和 93 项特性全部通过；100 秒正常返回，5,957 次 TE、1,339 次呈现，越窗/丢弃/异常中断为零 |
 
 测试入口是 `--metal-test`。它只在测试进程内注册 Metal，桌面仍使用 GLES。
 `--metal-system apps` 和 `--metal-system desktop` 是另行验收的系统发现/合成路径，
@@ -170,6 +172,8 @@ SMR 6 为 `SID 0x820 / mask 0x402`，四个非安全显示流进入 context 5。
 | --- | --- |
 | `1792790108-run-cp0.log` | 64/64 次切换、128 次刷新，两种画面签名分别为 `0x516eb0cb`、`0x923b1009`，左右 mixer 均一致 |
 | `1792790222-run-cp0.log` | 1,000/1,000 次切换、2,000 次刷新，逐次签名一致；SMMU fault、underrun、异常中断均为零 |
+| `1792797713-run-cp0.log` | 退出竞争修复候选完成 64/64 次切换、128 次刷新；所有输出、错误状态与恢复检查通过 |
+| `1792798195-run-cp0.log` | 增加清理前故障快照后完成 1,000/1,000 次切换、2,000 次刷新；输出、错误状态及恢复全部通过 |
 
 两轮均确认原画面签名和地址、九项 context 配置、MISR 控制位、TE/GIC 设置及两项总线
 时钟请求恢复。32 位显示地址能够访问 4 GiB 以上的实际图像，且两种输出签名随切换改变，
@@ -179,7 +183,9 @@ SMR 6 为 `SID 0x820 / mask 0x402`，四个非安全显示流进入 context 5。
 
 随后故意在双缓冲循环中途以 3 秒定时返回中断运行，设备进入 Qualcomm `05c6:900e`
 调试模式，未取得此次 XNU 日志。因此异常退出未通过，尚不能确定出错位置；
-当前需要物理重启并重新核对 Android。前述 1,000 次正常切换和退出结果仍保留，
+用户物理重启后，`android-roundtrip-20261024T071819.json` 已确认 Android 正常启动、
+精确 USB 身份、原槽和锁状态一致，五个活动分区哈希与备份一致；root 和网关连通性正常。
+前述 1,000 次正常切换和退出结果仍保留，
 不能把它外推为任意时刻中断都可安全恢复。此实验路径暂不用于日常默认启动。
 
 静态检查发现退出线程与同 CPU 上的探测线程可能交错执行。新候选在退出开始时设置
@@ -187,12 +193,25 @@ SMR 6 为 `SID 0x820 / mask 0x402`，四个非安全显示流进入 context 5。
 恢复期间保持中断关闭，随后拒绝所有恢复执行的探测读写。6 个主机场景实际编译该 C 驱动，
 在重新打开中断时注入退出回调，并用不可访问内存检查停止后的寄存器访问；
 AddressSanitizer / UndefinedBehaviorSanitizer 均通过。这只验证 CPU 执行顺序，
-尚不能证明本次 `900e` 的根因或真机异常退出已经修好。新候选已构建，待物理重启后复测。
+尚不能证明本次 `900e` 的根因或真机异常退出已经修好。新候选
+`c6d9208ac7832c12ee55a8eaa7ef22adb6be979d01ef3619c96c89d43d7be49f`
+已完成上述正常 64 次切换和完整恢复，且 `1792797984-run-cp0.log` 的 3 秒中断退出成功返回。
+随后添加清理前故障快照，避免恢复动作清除 fault 后掩盖错误；新内核
+`2c0e23f3faa7cb46b88ef3ed72261a7cd4c50508e83e26ad2393a59e32e05b33`
+在 3 秒（`1792798085`）和 2 秒（`1792798104`）两个中断点均正常返回。
+日志确认退出时映射仍开启、两路源均指向测试 IOVA，清理前 fault/global/underrun 为零；
+随后恢复原画面，再恢复九项映射配置、TLB、MISR、TE/GIC 和时钟。
+`lemonade-check-display.py --interrupted` 专门检查这一顺序，并拒绝已经正常完成、
+未实际扫描测试缓冲、缺少清理前状态或恢复前出现错误的记录。中断时未记录完整切换计数，
+报告使用 null，避免误写为零。两次中断后同一内核又通过上述 1,000 次正常切换。
+这些证据覆盖已测中断点，不证明所有时序均安全，也不能单独确定旧版 `900e` 的唯一根因。
 
 桌面回归另发现测试工具省略 `--metal-profile` 时选择 Apple1 表，导致 MPS 拒绝初始化，
 SpringBoard 反复 abort（`1792790381-run-cp0.log`）。工具已改为默认选择此前实测通过的
 profile 1，并在运行记录中写入实际值；仍可显式选择 profile 0 做对照。
-这项默认值修正尚待设备重启后的完整桌面复测，不代表已全面满足 Apple2 家族的全部能力。
+`1792797825-run-cp0.log` 已验证省略该参数时实际采用 profile 1，93 项 Metal、2 项 MPS
+和 4 项 CoreAnimation 检查全部通过，90 秒桌面运行正常返回；这不代表已全面满足
+Apple2 家族的全部能力。
 
 这仍是独立显示缓冲测试，尚未把桌面 IOSurface 直接送屏，也没有完成生产者 release fence、
 1125×2436 到 1080×2400 的硬件缩放或多图层合成。MISR 是 DPU 内部输出检查，
@@ -202,13 +221,14 @@ profile 1，并在运行记录中写入实际值；仍可显式选择 profile 0 
 python3 tools/lemonade-usb.py run --kernel built --userland --display smmu --seconds 30
 python3 tools/lemonade-usb.py run --kernel built --userland --display flip --display-flips 1000 --seconds 60
 python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
+python3 tools/lemonade-check-display.py local/lemonade/INTERRUPTED-run-cp0.log --interrupted
 ```
 
 寄存器依据：[Linux v6.12 SM8350 设备树](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/qcom/sm8350.dtsi)、
 [ARM SMMU](https://github.com/torvalds/linux/blob/v6.12/drivers/iommu/arm/arm-smmu/arm-smmu.h)、
 [MISR 控制](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_util.c)。
 
-### 编码阶段资源生命周期候选（待真机复测）
+### 编码阶段资源生命周期
 
 后续主机检查发现，原先仅在 draw/dispatch 记录入队时保留资源，编码器的当前绑定、
 未执行 clear 的颜色/深度附件此前都是弱引用。应用在绑定后、首次绘制前释放对象，
@@ -227,7 +247,16 @@ python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
 编码器方法、ivar 和工作对象持有逻辑，以析构计数检查提前释放、重绑、结束编码与最终释放，
 AddressSanitizer / UndefinedBehaviorSanitizer 均通过（`metal-ownership-host-tests.log`）。
 这些主机替身不模拟 GPU 或 iOS 私有父类。iOS 前端和两种独立测试镜像已构建、回读验证，
-原 root/System 未改动；手机仍待物理重启，因此新增五项尚未在 Adreno 上验收。
+原 root/System 未改动。重启后的 `1792797825-run-cp0.log` 已在 Adreno 660 上通过全部
+93 项特性检查，包括新增五项提前释放测试；MPS 2 项和 CA 4 项也全部通过。
+
+同轮省略 `--metal-profile`，确认实际默认值为 1。90 秒、11 个固定输入动作记录
+1,278 次呈现和 5,352 次 TE，越窗、丢弃和异常中断均为零；退出恢复显示中断与总线时钟。
+手指按下期间 55.56 FPS，全部活动窗口 52.09 FPS，间隔 P95 33.060 ms、最大 215.363 ms；
+CPU 复制平均 3.165 ms。GPU 两路温度均为 47.6°C。长帧仍保留，不能据平均值称为满帧。
+`1792797836-screen.png` 显示正常文字、图标颜色和圆角；天气和日历小组件仍为空白占位。
+验收汇总是 `graphics-20261024/metal-lifetime-device-evidence.json`，性能记录是
+`graphics-20261024/metal-lifetime-device-performance.json`。
 
 ## 复现
 
