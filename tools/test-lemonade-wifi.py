@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 from pathlib import Path
+import re
 import unittest
 
 spec = importlib.util.spec_from_file_location('wifi_check', Path(__file__).with_name('lemonade-check-wifi.py'))
@@ -11,6 +12,14 @@ spec.loader.exec_module(wifi)
 
 
 class StageEvidence(unittest.TestCase):
+    def test_smmu_format_bits_are_not_faults(self):
+        source = (Path(__file__).resolve().parents[1] / 'xnu/files/bsd/dev/lemonade_wifi.c').read_text()
+        mask = int(re.search(r'#define WIFI_FSR_FAULT (0x[0-9a-f]+)u', source)[1], 16)
+        for no_fault in (0, 0x200, 0x400, 0x600):
+            self.assertEqual(no_fault & mask, 0)
+        for fault in (0x402, 0x408, 0x410, 0x80000402):
+            self.assertNotEqual(fault & mask, 0)
+
     def record(self, mode='root', extra='', missing=''):
         raw = ('wifi-lemonade: inspection complete; hardware writes=0;\n'
                'wifi-lemonade: stage 7 PHY ready status 0;\n'
@@ -51,6 +60,66 @@ class StageEvidence(unittest.TestCase):
                  'endpoint id 0x110317cb command 0 class/revision 0x2800001\n')
         self.assertTrue(wifi.check(*self.record(mode='endpoint', extra=extra))['passed'])
         self.assertFalse(wifi.check(*self.record(mode='endpoint', extra=extra.replace('command 0 ', 'command 0x4 ')))['passed'])
+
+    def dma_record(self, missing='', extra=''):
+        evidence = ('stage 9 radio rails and WLAN_EN ready;\n'
+                    'WLAN_EN/CLKREQ restored; endpoint held off\n'
+                    'stage 10 PCIe link ready; DMA disabled\n'
+                    'endpoint id 0x110317cb command 0 class/revision 0x2800001\n'
+                    'stage 12 BAR/MHI registers readable; endpoint bus master disabled\n'
+                    'endpoint BAR and memory decode restored\n'
+                    'stage 13 SMMU survey complete; SMMU writes=0\n'
+                    'stage 14 BDF 0x100 -> SID 0x1c01 hash 0x15 table verified; bus master disabled\n'
+                    'BDF/SID table restored after endpoint reset\n'
+                    'stage 15 SMMU configured; table walk verified 128 pages and unmapped guards; bus master disabled\n'
+                    'DMA context/stream release verified; translation registers restored after endpoint reset\n')
+        return self.record(mode='dma', extra=evidence + extra, missing=missing)
+
+    def test_dma_requires_all_pages_and_guards(self):
+        self.assertTrue(wifi.check(*self.dma_record())['passed'])
+        for marker in ('128 pages', 'unmapped guards', 'hash 0x15 table verified'):
+            self.assertFalse(wifi.check(*self.dma_record(missing=marker))['passed'])
+
+    def test_dma_requires_restoration(self):
+        self.assertFalse(wifi.check(*self.dma_record(missing='DMA context/stream release verified'))['passed'])
+        self.assertFalse(wifi.check(*self.dma_record(extra='DMA cleanup failed'))['passed'])
+
+    def test_any_later_failure_overrides_pass(self):
+        self.assertFalse(wifi.check(*self.dma_record(extra='wifi-lemonade: stage 15 failed;'))['passed'])
+
+    def test_real_dma_requires_fault_and_shutdown_evidence(self):
+        manifest, raw = self.dma_record()
+        manifest['wifi'] = 'dma-fault'
+        manifest['cmdline'] = 'wifi=0 lemonade_wifi=16'
+        raw = raw.replace(b'stage 15 passed;', b'stage 16 passed;')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertFalse(wifi.check(manifest, raw)['passed'])
+        raw += (b'stage 16 endpoint DMA guard blocked by owned SMMU context; SID 0x1c01 confirmed\n'
+                b'DMA guard result FSR 0x80000402 FAR 0xa0084000 SID 0x1c01 global 0\n'
+                b'endpoint bus master clear verified\n'
+                b'endpoint DMA stopped before unmap\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(wifi.check(manifest, raw)['passed'])
+        self.assertFalse(wifi.check(manifest, raw)['networking_verified'])
+        wrong_sid = raw.replace(b'SID 0x1c01 global', b'SID 0x1c00 global')
+        manifest['log_sha256'] = hashlib.sha256(wrong_sid).hexdigest()
+        self.assertFalse(wifi.check(manifest, wrong_sid)['passed'])
+
+    def test_firmware_success_requires_sbl_and_no_real_fault(self):
+        manifest, raw = self.dma_record()
+        manifest.update(wifi='bhi', cmdline='wifi=0 lemonade_wifi=17', kernel_sha256='same-kernel',
+                        dma_guard={'kernel_sha256': 'same-kernel'},
+                        wifi_firmware={'firmware': {'amss.bin': {'sha256':
+                            '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'}}})
+        raw = raw.replace(b'stage 15 passed;', b'stage 17 passed;')
+        raw += (b'endpoint bus master clear verified\nendpoint DMA stopped before unmap\n'
+                b'BHI result status 0x80000001 EE 1 MHI 0x101 FSR 0x400 global 0 error 0\n'
+                b'stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n')
+        manifest['log_sha256'] = hashlib.sha256(raw).hexdigest()
+        self.assertTrue(wifi.check(manifest, raw)['passed'])
+        for bad in (raw.replace(b'EE 1 ', b'EE 0 '), raw.replace(b'FSR 0x400 ', b'FSR 0x402 ')):
+            manifest['log_sha256'] = hashlib.sha256(bad).hexdigest()
+            self.assertFalse(wifi.check(manifest, bad)['passed'])
 
 
 if __name__ == '__main__':

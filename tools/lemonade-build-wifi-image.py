@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Build a private RAM-only firmware overlay; preserve both normal APFS images."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools/apfs'))
+import apfs
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def contents(image):
+    container = apfs.Container(str(image))
+    volume = apfs.pick_volume(container, None)
+    root_inode = volume.inode(apfs.ROOT_DIR_INO_NUM)
+    records = {'': (root_inode.mode, root_inode.owner, root_inode.group, b'')}
+    pending = [(apfs.ROOT_DIR_INO_NUM, '')]
+    while pending:
+        parent, prefix = pending.pop()
+        for name, fid, kind in volume.dir_entries(parent):
+            if name in ('.', '..') or '/' in name or '\n' in name or '\t' in name:
+                raise SystemExit('Unsafe path in source image')
+            relative = prefix + name
+            inode = volume.inode(fid)
+            data = b'' if kind == 4 else inode.contents()
+            records[relative] = (inode.mode, inode.owner, inode.group, data)
+            if kind == 4:
+                pending.append((fid, relative + '/'))
+            elif kind not in (8, 10):
+                raise SystemExit('Unsupported inode in source image')
+    container.close()
+    return records
+
+
+def main():
+    os.umask(0o077)
+    output = ROOT / 'out/lemonade-wifi'
+    output.mkdir(parents=True, exist_ok=True)
+    output.chmod(0o700)
+    images = json.loads((ROOT / 'local/lemonade/images.json').read_text())
+    original = ROOT / 'userland/root.apfs'
+    original_hash = digest(original)
+    if original_hash != images['userland/root.apfs']['sha256']:
+        raise SystemExit('Normal root image does not match its private manifest')
+    firmware_dir = ROOT / 'local/lemonade/wifi/firmware'
+    manifest = json.loads((firmware_dir / 'manifest.json').read_text())
+    fw = firmware_dir / 'amss.bin'
+    expected = manifest['files']['amss.bin']
+    if (manifest.get('device') != 'lemonade' or not manifest.get('usb_identity_verified') or
+            not expected.get('matches_device') or fw.stat().st_size != 5178848 or
+            expected['sha256'] != '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521' or
+            digest(fw) != expected['sha256']):
+        raise SystemExit('Firmware identity/hash differs from the verified QCA6490 v1 image')
+    with tempfile.TemporaryDirectory(prefix='build-', dir=output) as work:
+        work = Path(work)
+        tree = work / 'root'
+        tree.mkdir()
+        # The verified image is authoritative; an old staging tree may differ.
+        before = contents(original)
+        metadata = []
+        for relative, (mode, uid, gid, data) in sorted(before.items()):
+            target = tree / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if stat.S_ISDIR(mode):
+                target.mkdir(exist_ok=True)
+            elif stat.S_ISLNK(mode):
+                target.symlink_to(os.fsdecode(data))
+            else:
+                target.write_bytes(data)
+            if not stat.S_ISLNK(mode):
+                target.chmod(stat.S_IMODE(mode))
+            metadata.append(f'{mode:o}\t{uid}\t{gid}\t{relative}\n')
+        metadata_path = work / 'metadata.tsv'
+        metadata_path.write_text(''.join(metadata))
+        def pack(destination):
+            subprocess.run(['python3', str(ROOT / 'tools/apfs/mkapfs.py'), '-z', '--plain', 'fw',
+                            '-o', str(destination), f'redwood={tree},manifest={metadata_path}'], check=True,
+                           stdout=subprocess.DEVNULL)
+        base = work / 'root.apfs'
+        pack(base)
+        if contents(base) != before:
+            raise SystemExit('Reconstructed root differs in file contents or permissions')
+        if 'fw' in before and not stat.S_ISDIR(before['fw'][0]):
+            raise SystemExit('Firmware directory in the normal image is not a directory')
+        (tree / 'fw').mkdir(exist_ok=True)
+        if 'fw' not in before:
+            (tree / 'fw').chmod(0o755)
+        destination_fw = tree / 'fw/amss.bin'
+        if destination_fw.exists() or destination_fw.is_symlink():
+            destination_fw.unlink()
+        shutil.copy2(fw, tree / 'fw/amss.bin')
+        (tree / 'fw/amss.bin').chmod(0o644)
+        candidate = work / 'wifi.apfs'
+        pack(candidate)
+        after = contents(candidate)
+        allowed = dict(before)
+        allowed.setdefault('fw', (0o40755, 0, 0, b''))
+        allowed['fw/amss.bin'] = (0o100644, 0, 0, fw.read_bytes())
+        if after != allowed:
+            raise SystemExit('Firmware overlay changes files outside fw/amss.bin')
+        if digest(original) != original_hash:
+            raise SystemExit('Normal root image changed during packaging')
+        shutil.copy2(candidate, output / 'root.apfs')
+    report = {'device': 'lemonade', 'scope': 'private RAM firmware test only',
+              'base_root_sha256': original_hash, 'sha256': digest(output / 'root.apfs'),
+              'bytes': (output / 'root.apfs').stat().st_size,
+              'firmware': {'amss.bin': {'sha256': expected['sha256'], 'bytes': fw.stat().st_size}},
+              'normal_root_unchanged': True, 'other_file_contents_and_modes_verified': True,
+              'deployed': False}
+    (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == '__main__':
+    main()

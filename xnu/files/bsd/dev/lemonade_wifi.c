@@ -4,16 +4,21 @@
  * Register locations: the device FDT and OnePlusOSS SM8350 sources at
  * 13ca08fdf0979fdd61d5e8991661874bb2d19150: gcc-lahaina.c, lahaina-pcie.dtsi,
  * pci-msm.c. No network identity, calibration or credentials belong here.
- * Stages 2..13 are bounded power/controller/register probes, no endpoint DMA.
+ * Stages 2..15 keep endpoint DMA off; 16 verifies an unmapped DMA guard;
+ * 17 transfers only the original firmware's verified BHI prefix into RAM.
  * lemonade_wifi=1 only reads; it never starts the redwood AHB/WPSS path.
  */
 #include <kern/clock.h>
+#include <kern/locks.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
+#include <mach/vm_param.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
 #include <sys/redwood_input.h>
 #include <sys/systm.h>
+#include <vm/memory_types.h>
+#include <vm/vm_kern.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern void redwood_tl(const char *format, ...) __printflike(1, 2);
@@ -23,18 +28,36 @@ static unsigned iatu_count;
 static uint32_t perst_cfg, perst_io;
 static uint32_t radio_cfg, radio_io, clkreq_cfg, clkreq_io, iatu_values[2][7];
 static uint32_t bar0_old, bar1_old, endpoint_command_old;
+static bool sid_saved, bus_master_was_enabled;
+static uint32_t sid_table_old[256], sid_cfg_old;
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+extern uint64_t kvtophys(vm_offset_t va);
+extern lck_mtx_t redwood_smmu_lock;
+static void dma_restore(void);
 
-static uint32_t rd(vm_offset_t base, unsigned offset) {
-    return *(volatile uint32_t *)(base + offset);
+/* Qualcomm's hypervisor emulates some SMMU registers. Use simple register
+ * operands, as the existing Adreno driver does; never STR WZR or indexed STR. */
+static uint32_t __attribute__((noinline)) rd(vm_offset_t base, unsigned offset) {
+    uint32_t value;
+    __asm__ volatile("ldr %w0, [%1]" : "=r"(value) : "r"(base + offset) : "memory");
+    return value;
 }
-static void wr(vm_offset_t address, uint32_t value) {
-    *(volatile uint32_t *)address = value;
+static void __attribute__((noinline)) wr(vm_offset_t address, uint32_t value) {
+    __asm__ volatile("str %w0, [%1]" : : "r"(value), "r"(address) : "memory");
     __asm__ volatile("dsb sy" ::: "memory");
 }
-static void wr16(vm_offset_t address, uint16_t value) {
-    *(volatile uint16_t *)address = value;
+static void __attribute__((noinline)) wr16(vm_offset_t address, uint16_t value) {
+    __asm__ volatile("strh %w0, [%1]" : : "r"(value), "r"(address) : "memory");
     __asm__ volatile("dsb sy" ::: "memory");
+}
+static void __attribute__((noinline)) wr64(vm_offset_t address, uint64_t value) {
+    __asm__ volatile("str %0, [%1]" : : "r"(value), "r"(address) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+static uint64_t __attribute__((noinline)) rd64(vm_offset_t address) {
+    uint64_t value;
+    __asm__ volatile("ldr %0, [%1]" : "=r"(value) : "r"(address) : "memory");
+    return value;
 }
 static void pause_us(unsigned us) { delay_for_interval(us, NSEC_PER_USEC); }
 static bool wait_mask(vm_offset_t base, unsigned offset, uint32_t mask, uint32_t value) {
@@ -87,6 +110,9 @@ void lemonade_wifi_quiesce(void) {
     if (bar_saved) {
         if (rd(dbi, 0x80) & (1u << 29)) {
             wr16(config + 4, endpoint_command_old & ~6u);
+            if (bus_master_was_enabled) {
+                redwood_tl("wifi-lemonade: endpoint bus master clear %s\n", (rd(config, 4) & 4) ? "failed" : "verified");
+            }
             wr(config + 0x14, bar1_old); wr(config + 0x10, bar0_old);
             wr16(config + 4, endpoint_command_old);
             redwood_tl("wifi-lemonade: endpoint BAR and memory decode restored\n");
@@ -105,6 +131,13 @@ void lemonade_wifi_quiesce(void) {
         wr(pins + 94 * 0x1000 + 4, rd(pins, 94 * 0x1000 + 4) & ~2u);
         pause_us(1000);
         link_started = false;
+    }
+    dma_restore(); /* endpoint is in reset before any translation is removed */
+    if (sid_saved) {
+        for (unsigned i = 0; i < 256; i++) { wr(parf + 0x2000 + 4 * i, sid_table_old[i]); }
+        wr(parf + 0x2c00, sid_cfg_old);
+        sid_saved = false;
+        redwood_tl("wifi-lemonade: BDF/SID table restored after endpoint reset\n");
     }
     while (dbi_count) {
         unsigned i = --dbi_count;
@@ -149,7 +182,8 @@ void lemonade_wifi_quiesce(void) {
         radio_started = false;
         redwood_tl("wifi-lemonade: WLAN_EN/CLKREQ restored; endpoint held off\n");
     }
-    redwood_tl("wifi-lemonade: GCC votes restored; RPMh supply votes retained until reboot; DMA never enabled\n");
+    redwood_tl("wifi-lemonade: GCC votes restored; RPMh supply votes retained until reboot; %s\n",
+        bus_master_was_enabled ? "endpoint DMA stopped before unmap" : "DMA never enabled");
 }
 static bool platform_is_lemonade(void) {
     DTEntry entry;
@@ -350,6 +384,305 @@ static const struct { unsigned offset; uint32_t value; } lemonade_pcie_phy[] = {
     {0x0200, 0x00},
     {0x0244, 0x03},
 };
+/* CRC-8, polynomial 0x07, over the requester ID in network byte order. */
+static uint8_t requester_hash(uint16_t requester) {
+    uint8_t crc = 0;
+    for (unsigned byte = 0; byte < 2; byte++) {
+        crc ^= (requester >> (byte == 0 ? 8 : 0)) & 255;
+        for (unsigned bit = 0; bit < 8; bit++) {
+            crc = (crc << 1) ^ ((crc & 0x80) ? 0x07 : 0);
+        }
+    }
+    return crc;
+}
+static bool route_endpoint(void) {
+    if ((rd(config, 4) | rd(dbi, 4)) & 4) { return false; }
+    unsigned hash = requester_hash(0x0100);
+    if (!hash) { return false; } /* root BDF zero occupies hash zero */
+    sid_cfg_old = rd(parf, 0x2c00);
+    for (unsigned i = 0; i < 256; i++) { sid_table_old[i] = rd(parf, 0x2000 + 4 * i); }
+    sid_saved = true;
+    /* This root was reset and has just one endpoint, still unable to master. */
+    for (unsigned i = 0; i < 256; i++) { wr(parf + 0x2000 + 4 * i, 0); }
+    wr(parf + 0x2000 + 4 * hash, 0x01000100); /* BDF 01:00.0 -> relative SID 1 */
+    wr(parf + 0x2c00, sid_cfg_old & ~1u);
+    for (unsigned i = 0; i < 256; i++) {
+        if (rd(parf, 0x2000 + 4 * i) != (i == hash ? 0x01000100u : 0)) { return false; }
+    }
+    if (rd(parf, 0x2c00) & 1) { return false; }
+    redwood_tl("wifi-lemonade: stage 14 BDF 0x100 -> SID 0x1c01 hash %#x table verified; bus master disabled\n", hash);
+    return true;
+}
+
+/* A small, privately owned stage-1 address space: no identity mapping, no MSI
+ * page and no firmware-owned context. The first probe leaves PCI bus mastering
+ * off. IDR0.ATOSNS means standard translation requests are NOT supported;
+ * software table validation is kept distinct from a real endpoint DMA test. */
+#define WIFI_DMA_IOVA 0xa0004000ull
+#define WIFI_DMA_SIZE 0x80000u
+#define WIFI_PHYS_MASK 0x0000fffffffff000ull
+#define WIFI_FSR_FAULT 0xc00001feu /* excludes read-only translation-format bits [10:9] */
+static const unsigned dma_cb_offsets[] = {0, 0x10, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x38, 0x3c};
+static struct {
+    vm_offset_t mmio, cb, tables, data;
+    unsigned match, context;
+    uint32_t smr, s2cr, cbar, cba2r, cb_old[9];
+    bool owned, retain_pages;
+} dma_space;
+
+static void dma_flush(vm_offset_t start, unsigned size) {
+    for (vm_offset_t line = start; line < start + size; line += 64) {
+        __asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+static bool dma_tlb_sync(void) {
+    wr(dma_space.cb + 0x610, dma_space.context);
+    wr(dma_space.cb + 0x7f0, 0);
+    return wait_mask(dma_space.cb, 0x7f4, 1, 0);
+}
+static void dma_restore(void) {
+    if (dma_space.retain_pages) { return; }
+    if (dma_space.owned) {
+        lck_mtx_lock(&redwood_smmu_lock);
+        /* Keep the stream faulting while its context is dismantled. */
+        wr(dma_space.mmio + 0xc00 + 4 * dma_space.match, 2u << 16);
+        wr(dma_space.cb, 0);
+        if (!dma_tlb_sync()) {
+            dma_space.retain_pages = true;
+            lck_mtx_unlock(&redwood_smmu_lock);
+            redwood_tl("wifi-lemonade: DMA cleanup failed; tables retained with endpoint reset\n");
+            return;
+        }
+        if (rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) { wr(dma_space.cb + 0x58, rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT); }
+        for (unsigned i = 1; i < 9; i++) { wr(dma_space.cb + dma_cb_offsets[i], dma_space.cb_old[i]); }
+        wr(dma_space.mmio + 0x1000 + 4 * dma_space.context, dma_space.cbar);
+        wr(dma_space.mmio + 0x1800 + 4 * dma_space.context, dma_space.cba2r);
+        wr(dma_space.cb, dma_space.cb_old[0]);
+        wr(dma_space.mmio + 0x800 + 4 * dma_space.match, dma_space.smr);
+        wr(dma_space.mmio + 0xc00 + 4 * dma_space.match, dma_space.s2cr);
+        uint32_t cbar_after = rd(dma_space.mmio, 0x1000 + 4 * dma_space.context);
+        bool cbar_ok = cbar_after == dma_space.cbar;
+        /* The hypervisor refuses a return to the unused stage-2 reset type.
+         * Linux teardown also leaves CBAR: with no stream, SCTLR.M=0 and the
+         * old TTBRs restored, this inactive stage-1 type owns no memory. */
+        if (!cbar_ok && dma_space.cbar == 0 && cbar_after == 0x1f300 &&
+            !(rd(dma_space.cb, 0) & 1) && !(dma_space.smr & (1u << 31))) {
+            cbar_ok = true;
+            redwood_tl("wifi-lemonade: inactive CBAR stage-1 type retained until reboot; stream invalid and context disabled\n");
+        }
+        bool restored = cbar_ok && rd(dma_space.mmio, 0x800 + 4 * dma_space.match) == dma_space.smr &&
+            rd(dma_space.mmio, 0xc00 + 4 * dma_space.match) == dma_space.s2cr &&
+            rd(dma_space.mmio, 0x1800 + 4 * dma_space.context) == dma_space.cba2r;
+        for (unsigned i = 0; i < 9; i++) {
+            uint32_t actual = rd(dma_space.cb, dma_cb_offsets[i]);
+            if (actual != dma_space.cb_old[i]) {
+                redwood_tl("wifi-lemonade: restore CB offset %#x expected %#x actual %#x\n", dma_cb_offsets[i], dma_space.cb_old[i], actual);
+                restored = false;
+            }
+        }
+        if (!restored) {
+            redwood_tl("wifi-lemonade: restore globals SMR %#x/%#x S2CR %#x/%#x CBAR %#x/%#x CBA2R %#x/%#x (actual/old)\n",
+                rd(dma_space.mmio, 0x800 + 4 * dma_space.match), dma_space.smr,
+                rd(dma_space.mmio, 0xc00 + 4 * dma_space.match), dma_space.s2cr,
+                rd(dma_space.mmio, 0x1000 + 4 * dma_space.context), dma_space.cbar,
+                rd(dma_space.mmio, 0x1800 + 4 * dma_space.context), dma_space.cba2r);
+        }
+        dma_space.owned = false;
+        lck_mtx_unlock(&redwood_smmu_lock);
+        redwood_tl("wifi-lemonade: DMA context/stream release %s; translation registers restored after endpoint reset\n", restored ? "verified" : "failed");
+        if (!restored) { dma_space.retain_pages = true; return; }
+    }
+    if (dma_space.tables) { kmem_free(kernel_map, dma_space.tables, round_page(3 * 4096)); dma_space.tables = 0; }
+    if (dma_space.data) { kmem_free(kernel_map, dma_space.data, round_page(WIFI_DMA_SIZE)); dma_space.data = 0; }
+}
+static bool dma_translate(uint64_t address, uint64_t *result) {
+    wr64(dma_space.cb + 0x800, address);
+    if (!wait_mask(dma_space.cb, 0x8f0, 1, 0)) { return false; }
+    *result = rd64(dma_space.cb + 0x50);
+    return true;
+}
+static bool dma_walk(uint64_t address, uint64_t *physical) {
+    if (address >> 39) { return false; }
+    uint64_t *l1 = (void *)dma_space.tables, *l2 = (void *)(dma_space.tables + 4096), *l3 = (void *)(dma_space.tables + 8192);
+    if ((l1[(address >> 30) & 511] & (WIFI_PHYS_MASK | 3)) != (kvtophys((vm_offset_t)l2) | 3) ||
+        (l2[(address >> 21) & 511] & (WIFI_PHYS_MASK | 3)) != (kvtophys((vm_offset_t)l3) | 3)) { return false; }
+    uint64_t pte = l3[(address >> 12) & 511];
+    if ((pte & 3) != 3) { return false; }
+    *physical = (pte & WIFI_PHYS_MASK) | (address & 4095);
+    return true;
+}
+static bool dma_prepare(void) {
+    if ((rd(config, 4) | rd(dbi, 4)) & 4) { return false; }
+    dma_space.mmio = ml_io_map(0x15000000, 0x100000);
+    if (!dma_space.mmio) { return false; }
+    uint32_t scr = rd(dma_space.mmio, 0), id0 = rd(dma_space.mmio, 0x20), id1 = rd(dma_space.mmio, 0x24);
+    unsigned matches = id0 & 255, contexts = id1 & 255, s2contexts = (id1 >> 16) & 255;
+    /* This probe supports only the exact MMU-500 register geometry observed. */
+    if ((scr & 9) || !(scr & (1u << 10)) || !(id0 & (1u << 30)) ||
+        (id1 & 0xf0000000u) != 0x60000000u || matches > 255 || !matches || contexts > 128 || !contexts ||
+        rd(dma_space.mmio, 0x48)) { return false; }
+    if (kmem_alloc(kernel_map, &dma_space.tables, round_page(3 * 4096), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+        VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS ||
+        kmem_alloc(kernel_map, &dma_space.data, round_page(WIFI_DMA_SIZE), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+        VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) { return false; }
+    uint64_t *l1 = (void *)dma_space.tables, *l2 = (void *)(dma_space.tables + 4096), *l3 = (void *)(dma_space.tables + 8192);
+    l1[(WIFI_DMA_IOVA >> 30) & 511] = kvtophys((vm_offset_t)l2) | 3;
+    l2[(WIFI_DMA_IOVA >> 21) & 511] = kvtophys((vm_offset_t)l3) | 3;
+    for (unsigned offset = 0; offset < WIFI_DMA_SIZE; offset += 4096) {
+        uint64_t physical = kvtophys(dma_space.data + offset);
+        if (!physical || physical >> 36 || physical & 4095) { return false; }
+        l3[((WIFI_DMA_IOVA + offset) >> 12) & 511] = physical |
+            3ull | (1ull << 6) | (2ull << 8) | (1ull << 10) | (1ull << 11) | (1ull << 53) | (1ull << 54);
+    }
+    dma_flush(dma_space.tables, 3 * 4096);
+    dma_flush(dma_space.data, WIFI_DMA_SIZE);
+    lck_mtx_lock(&redwood_smmu_lock);
+    bool used[128] = {false}, collision = false;
+    dma_space.match = matches; dma_space.context = contexts;
+    for (unsigned i = 0; i < matches; i++) {
+        uint32_t smr = rd(dma_space.mmio, 0x800 + 4 * i), s2cr = rd(dma_space.mmio, 0xc00 + 4 * i);
+        if (!(smr & (1u << 31))) { if (dma_space.match == matches) { dma_space.match = i; } continue; }
+        if (((smr ^ 0x1c01) & ~((smr >> 16) & 0x7fff) & 0x7fff) == 0) { collision = true; }
+        if (((s2cr >> 16) & 3) == 0 && (s2cr & 255) < 128) { used[s2cr & 255] = true; }
+    }
+    for (unsigned i = s2contexts; i < contexts; i++) {
+        vm_offset_t cb = dma_space.mmio + 0x80000 + 4096 * i;
+        if (!used[i] && !(rd(cb, 0) & 1) && !(rd(cb, 0x58) & WIFI_FSR_FAULT)) { dma_space.context = i; dma_space.cb = cb; break; }
+    }
+    if (collision || dma_space.match == matches || dma_space.context == contexts) {
+        lck_mtx_unlock(&redwood_smmu_lock); return false;
+    }
+    unsigned match = dma_space.match, context = dma_space.context;
+    dma_space.smr = rd(dma_space.mmio, 0x800 + 4 * match); dma_space.s2cr = rd(dma_space.mmio, 0xc00 + 4 * match);
+    dma_space.cbar = rd(dma_space.mmio, 0x1000 + 4 * context); dma_space.cba2r = rd(dma_space.mmio, 0x1800 + 4 * context);
+    for (unsigned i = 0; i < 9; i++) { dma_space.cb_old[i] = rd(dma_space.cb, dma_cb_offsets[i]); }
+    dma_space.owned = true; /* journal is complete before the first write */
+    redwood_tl("wifi-lemonade: claiming SMMU match %u context %u for SID 0x1c01 only\n", match, context);
+    wr(dma_space.cb, 0);
+    wr(dma_space.mmio + 0x1800 + 4 * context, 1);
+    wr(dma_space.mmio + 0x1000 + 4 * context, (1u << 16) | (3u << 8) | (15u << 12));
+    wr(dma_space.cb + 0x10, 1u | (1u << 4) | (7u << 15));
+    wr(dma_space.cb + 0x30, 25u | (1u << 8) | (1u << 10) | (3u << 12) | (1u << 23));
+    uint64_t root = kvtophys(dma_space.tables) | ((uint64_t)context << 48);
+    wr(dma_space.cb + 0x20, root); wr(dma_space.cb + 0x24, root >> 32);
+    wr(dma_space.cb + 0x28, 0); wr(dma_space.cb + 0x2c, 0);
+    wr(dma_space.cb + 0x38, 0xf404ff44); wr(dma_space.cb + 0x3c, 0);
+    bool ok = dma_tlb_sync();
+    if (ok) {
+        wr(dma_space.cb, 0x1127);
+        wr(dma_space.mmio + 0xc00 + 4 * match, context);
+        wr(dma_space.mmio + 0x800 + 4 * match, 0x80001c01);
+        ok = rd(dma_space.mmio, 0x800 + 4 * match) == 0x80001c01 &&
+            (rd(dma_space.mmio, 0xc00 + 4 * match) & 0x300ff) == context &&
+            (rd(dma_space.cb, 0) & 1) && rd(dma_space.cb, 0x20) == (uint32_t)root &&
+            rd(dma_space.cb, 0x24) == (uint32_t)(root >> 32);
+    }
+    lck_mtx_unlock(&redwood_smmu_lock);
+    redwood_tl("wifi-lemonade: SMMU readback SMR %#x S2CR %#x CBAR %#x CBA2R %#x SCTLR %#x TCR %#x TCR2 %#x TTBR %#x:%#x expected %#llx\n",
+        rd(dma_space.mmio, 0x800 + 4 * match), rd(dma_space.mmio, 0xc00 + 4 * match),
+        rd(dma_space.mmio, 0x1000 + 4 * context), rd(dma_space.mmio, 0x1800 + 4 * context),
+        rd(dma_space.cb, 0), rd(dma_space.cb, 0x30), rd(dma_space.cb, 0x10),
+        rd(dma_space.cb, 0x24), rd(dma_space.cb, 0x20), root);
+    if (!ok) { return false; }
+    unsigned verified = 0;
+    for (unsigned offset = 0; offset < WIFI_DMA_SIZE; offset += 4096) {
+        uint64_t translated = 0;
+        if (!dma_walk(WIFI_DMA_IOVA + offset, &translated) || translated != kvtophys(dma_space.data + offset)) {
+            redwood_tl("wifi-lemonade: table page %u failed\n", offset / 4096);
+            return false;
+        }
+        verified++;
+    }
+    uint64_t before = 0, after = 0;
+    if (dma_walk(WIFI_DMA_IOVA - 4096, &before) || dma_walk(WIFI_DMA_IOVA + WIFI_DMA_SIZE, &after)) { return false; }
+    if (!(id0 & (1u << 26))) {
+        for (unsigned offset = 0; offset < WIFI_DMA_SIZE; offset += 4096) {
+            uint64_t translated = 0;
+            if (!dma_translate(WIFI_DMA_IOVA + offset, &translated) || (translated & 1) ||
+                (translated & WIFI_PHYS_MASK) != kvtophys(dma_space.data + offset)) { return false; }
+        }
+        if (!dma_translate(WIFI_DMA_IOVA - 4096, &before) || !dma_translate(WIFI_DMA_IOVA + WIFI_DMA_SIZE, &after) ||
+            !(before & 1) || !(after & 1)) { return false; }
+        redwood_tl("wifi-lemonade: optional ATOS hardware translation checks passed\n");
+    } else {
+        redwood_tl("wifi-lemonade: ATOS unsupported (IDR0.ATOSNS=1); table walk is software validation only\n");
+    }
+    redwood_tl("wifi-lemonade: SMMU pre-DMA raw FSR %#x global %#x\n", rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    if ((rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) || rd(dma_space.mmio, 0x48)) { return false; }
+    redwood_tl("wifi-lemonade: stage 15 SMMU configured; table walk verified %u pages and unmapped guards; bus master disabled\n", verified);
+    return true;
+}
+static bool bhi_request(uint64_t address, unsigned size) {
+    if (!dma_space.owned || rd(bar, 0x224) != 0x400c0110 || rd(bar, 0x28) != 0x100 ||
+        rd(bar, 0x128) != 0 || (rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) || rd(dma_space.mmio, 0x48)) { return false; }
+    bus_master_was_enabled = true;
+    change_dbi(4, rd(dbi, 4) | 6, true);
+    wr16(config + 4, (rd(config, 4) & 0xffff) | 6);
+    if (!(rd(config, 4) & 4) || !(rd(dbi, 4) & 4)) { return false; }
+    wr(bar + 0x12c, 0);
+    wr(bar + 0x10c, address >> 32); wr(bar + 0x108, address); wr(bar + 0x110, size);
+    wr(bar + 0x118, 1);
+    return true;
+}
+static bool dma_fault_probe(void) {
+    /* No firmware is supplied: ask PBL to read an unmapped guard page, then
+     * require a translation fault from this exact SID before any real image. */
+    uint64_t guard = WIFI_DMA_IOVA + WIFI_DMA_SIZE;
+    redwood_tl("wifi-lemonade: stage 16 requesting PBL read of unmapped guard %#llx, 4096 bytes; no firmware supplied\n", guard);
+    if (!bhi_request(guard, 4096)) { return false; }
+    for (unsigned i = 0; i < 2000; i++) {
+        if ((rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) || rd(dma_space.mmio, 0x48)) { break; }
+        pause_us(1000);
+    }
+    uint32_t fsr = rd(dma_space.cb, 0x58), global = rd(dma_space.mmio, 0x48);
+    uint64_t far = rd64(dma_space.cb + 0x60);
+    uint32_t sid = rd(dma_space.mmio, 0x1400 + 4 * dma_space.context) & 0xffff;
+    redwood_tl("wifi-lemonade: DMA guard result FSR %#x FAR %#llx SID %#x global %#x BHI %#x EE %u\n",
+        fsr, far, sid, global, rd(bar, 0x12c), rd(bar, 0x128));
+    if (!(fsr & 2) || (far & ~4095ull) != guard || sid != 0x1c01 || global) { return false; }
+    redwood_tl("wifi-lemonade: stage 16 endpoint DMA guard blocked by owned SMMU context; SID 0x1c01 confirmed\n");
+    return true;
+}
+static uint32_t wifi_crc32(const uint8_t *data, unsigned count) {
+    uint32_t crc = ~0u;
+    for (unsigned i = 0; i < count; i++) {
+        crc ^= data[i];
+        for (unsigned bit = 0; bit < 8; bit++) { crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1))); }
+    }
+    return ~crc;
+}
+extern const uint8_t *redwood_image_file(const char *, const char *, uint64_t *, int *);
+static bool firmware_probe(void) {
+    uint64_t size = 0;
+    const uint8_t *firmware = redwood_image_file("fw", "amss.bin", &size, NULL);
+    /* The host verifies the full SHA-256 and requires a passed guard test on
+     * this exact kernel. Here also verify the bytes extracted from APFS. */
+    if (!firmware || size != 5178848 || memcmp(firmware, "\177ELF", 4) ||
+        wifi_crc32(firmware, WIFI_DMA_SIZE) != 0xaf54a935u) {
+        redwood_tl("wifi-lemonade: original-device firmware missing or BHI prefix checksum mismatch\n");
+        return false;
+    }
+    memcpy((void *)dma_space.data, firmware, WIFI_DMA_SIZE);
+    if (wifi_crc32((const uint8_t *)dma_space.data, WIFI_DMA_SIZE) != 0xaf54a935u) { return false; }
+    dma_flush(dma_space.data, WIFI_DMA_SIZE);
+    redwood_tl("wifi-lemonade: stage 17 transferring verified original-device BHI prefix, 524288 bytes\n");
+    if (!bhi_request(WIFI_DMA_IOVA, WIFI_DMA_SIZE)) { return false; }
+    uint32_t status = 0, ee = 0, fsr = 0, global = 0;
+    bool ready = false;
+    for (unsigned i = 0; i < 1000; i++) {
+        status = rd(bar, 0x12c); ee = rd(bar, 0x128);
+        fsr = rd(dma_space.cb, 0x58); global = rd(dma_space.mmio, 0x48);
+        if ((fsr & WIFI_FSR_FAULT) || global || (status >> 30) == 3) { break; }
+        if ((status >> 30) == 2 && ee == 1) { ready = true; break; }
+        pause_us(10000);
+    }
+    redwood_tl("wifi-lemonade: BHI result status %#x EE %u MHI %#x FSR %#x global %#x error %#x\n",
+        status, ee, rd(bar, 0x48), fsr, global, rd(bar, 0x130));
+    if (!ready) { return false; }
+    redwood_tl("wifi-lemonade: stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n");
+    return true;
+}
 static bool power_root(unsigned step) {
     /* Do not reset a root complex inherited in use. */
     if (!(rd(gcc, 0x6b024) & (1u << 31))) {
@@ -524,7 +857,12 @@ static bool power_root(unsigned step) {
         }
     }
     redwood_tl("wifi-lemonade: stage 13 SMMU survey complete; %u/%u matches used, %u cover endpoint; SMMU writes=0\n", valid, matches, covering);
-    return true;
+    if (step == 13) { return true; }
+    if (covering || !route_endpoint()) { return false; }
+    if (step == 14) { return true; }
+    if (!dma_prepare()) { return false; }
+    if (step == 15) { return true; }
+    return step == 16 ? dma_fault_probe() : firmware_probe();
 }
 void lemonade_wifi_init(void) {
     unsigned mode = 0;
@@ -533,9 +871,17 @@ void lemonade_wifi_init(void) {
         redwood_tl("wifi-lemonade: refused on another platform\n");
         return;
     }
-    if (mode < 1 || mode > 13) {
+    if (mode < 1 || mode > 17) {
         redwood_tl("wifi-lemonade: mode %u unsupported; no hardware access\n", mode);
         return;
+    }
+    if (mode == 17) {
+        unsigned guard_verified = 0;
+        PE_parse_boot_argn("lemonade_dma_verified", &guard_verified, sizeof(guard_verified));
+        if (guard_verified != 1) {
+            redwood_tl("wifi-lemonade: firmware probe requires verified endpoint guard evidence\n");
+            return;
+        }
     }
     if (mode >= 2) {
         unsigned touch = 0, gpu = 0, cpu = 0;
@@ -552,7 +898,7 @@ void lemonade_wifi_init(void) {
     redwood_tl("wifi-lemonade: inspection %s; hardware writes=0; network unavailable\n", ok ? "complete" : "failed");
     if (ok && mode >= 2) {
         ok = power_root(mode);
-        redwood_tl("wifi-lemonade: stage %u %s; DMA/firmware not enabled\n", mode, ok ? "passed" : "failed");
+        redwood_tl("wifi-lemonade: stage %u %s; network unavailable\n", mode, ok ? "passed" : "failed");
         lemonade_wifi_quiesce();
     }
 }

@@ -6,6 +6,7 @@ never by the first Android device in a list. Acquire its Device Hub lease first.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -19,6 +20,37 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def command(argv, timeout=15, check=True):
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=check)
+
+
+def verified_firmware_overlay(kernel_hash):
+    """Require a real guard fault from this kernel before a firmware download."""
+    guard_path = ROOT / 'local/lemonade/wifi/dma-guard-verified.json'
+    if not guard_path.exists():
+        raise SystemExit('Refusing: no verified endpoint DMA guard test')
+    guard = json.loads(guard_path.read_text())
+    if guard.get('kernel_sha256') != kernel_hash:
+        raise SystemExit('Refusing: DMA guard test used a different kernel')
+    log = (ROOT / guard['log']).resolve()
+    if not log.is_relative_to((ROOT / 'local/lemonade').resolve()):
+        raise SystemExit('Refusing: DMA evidence is outside the private device directory')
+    record = json.loads(log.with_suffix('.manifest.json').read_text())
+    spec = importlib.util.spec_from_file_location('lemonade_wifi_check', Path(__file__).with_name('lemonade-check-wifi.py'))
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
+    evidence = checker.check(record, log.read_bytes())
+    if (record.get('kernel_sha256') != kernel_hash or record.get('log_sha256') != guard.get('log_sha256') or
+            not evidence['passed'] or evidence['mode'] != 'dma-fault'):
+        raise SystemExit('Refusing: endpoint DMA guard evidence failed revalidation')
+    image = ROOT / 'out/lemonade-wifi/root.apfs'
+    manifest = json.loads(image.with_name('manifest.json').read_text())
+    normal = json.loads((ROOT / 'local/lemonade/images.json').read_text())['userland/root.apfs']['sha256']
+    if (manifest.get('device') != 'lemonade' or manifest.get('base_root_sha256') != normal or
+            not manifest.get('other_file_contents_and_modes_verified') or
+            manifest.get('sha256') != hashlib.sha256(image.read_bytes()).hexdigest() or
+            manifest.get('firmware', {}).get('amss.bin', {}).get('sha256') !=
+            '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'):
+        raise SystemExit('Refusing: private firmware overlay differs from its verified manifest')
+    return image, manifest, guard
 
 
 def main():
@@ -35,7 +67,7 @@ def main():
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
-    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu"), help="bounded PCIe bring-up stages; none enables networking")
+    parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi"), help="bounded PCIe bring-up stages; none enables networking")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
                         help="SM8350 EPSS policy: inspect only, or capped stock OPPs with restore on return")
     parser.add_argument("--profile", choices=("performance",),
@@ -63,6 +95,8 @@ def main():
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
     if args.wifi and args.wifi != "inspect" and (args.touch or args.gpu or args.cpu_policy != "firmware"):
         parser.error("Wi-Fi root-power probe must run without touch, GPU or CPU-policy changes")
+    if args.wifi == 'bhi' and not args.userland:
+        parser.error('BHI firmware test requires --userland and the verified private firmware overlay')
     if args.cpu_policy != "firmware" and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU policy requires run --kernel built")
     session_limit = 900 if args.profile == "performance" and args.touch == "on" else 300
@@ -240,7 +274,12 @@ def main():
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
         if args.wifi:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
-            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13}[args.wifi])
+            cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17}[args.wifi])
+        firmware_record = guard_record = None
+        firmware_overlay = None
+        if args.wifi == 'bhi':
+            firmware_overlay, firmware_record, guard_record = verified_firmware_overlay(expected_kernel)
+            cmdline += ' lemonade_dma_verified=1'
         if args.cpu_policy != "firmware":
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("cpufreq="))
             cmdline += " cpufreq=" + ("2" if args.cpu_policy == "inspect" else "1") + " ddr=0"
@@ -253,6 +292,8 @@ def main():
         cmdline = f"loader_return_after={args.seconds} epoch={int(time.time())} sb_delay=8 " + cmdline
         payload = ROOT / "out/lemonade-xnu.bin"
         extra_images = [f"ramdisk={verified_image('userland/root.apfs')}"] if args.userland or args.gpu or args.gpu_step else []
+        if firmware_overlay:
+            extra_images = [f'ramdisk={firmware_overlay}']
         command(["python3", str(ROOT / "xnuloader/mkpayload.py"), "-o", str(payload),
                  f"kernel={kernel}", *extra_images, "--cmdline", cmdline], timeout=30)
         # The optional root disk and resident system disk both live in RAM.
@@ -268,11 +309,17 @@ def main():
         record["profile"] = args.profile
         record["touch"] = args.touch
         record["wifi"] = args.wifi
+        if firmware_record:
+            record['wifi_firmware'] = firmware_record
+            record['dma_guard'] = guard_record
         record["live_logs"] = []
         if args.userland or args.gpu or args.gpu_step:
             image_manifest = json.loads((ROOT / "local/lemonade/images.json").read_text())
             record["images"] = {name: image_manifest[name] for name in
                                 ("userland/root.apfs", "userland/system.apfs")}
+            if firmware_record:
+                record['images'].pop('userland/root.apfs')
+                record['images']['out/lemonade-wifi/root.apfs'] = firmware_record
         (ROOT / "out/lemonade-xnu.manifest.json").write_text(json.dumps(record, indent=2) + "\n")
         fb(serial, "stage", str(payload), timeout=60)
     if args.action == "selftest":

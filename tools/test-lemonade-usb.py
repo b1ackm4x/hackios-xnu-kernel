@@ -95,6 +95,23 @@ class DeviceSafety(unittest.TestCase):
             self.run_action("boot")
         self.assertFalse(any("-s" in c for c in self.calls))
 
+    def test_firmware_requires_real_dma_guard(self):
+        with patch.object(usb, 'ROOT', self.root), self.assertRaisesRegex(SystemExit, 'no verified endpoint'):
+            usb.verified_firmware_overlay('current-kernel')
+        folder = self.root / 'local/lemonade/wifi'
+        folder.mkdir()
+        (folder / 'dma-guard-verified.json').write_text(json.dumps({'kernel_sha256': 'old-kernel'}))
+        with patch.object(usb, 'ROOT', self.root), self.assertRaisesRegex(SystemExit, 'different kernel'):
+            usb.verified_firmware_overlay('current-kernel')
+
+    def test_firmware_rejects_foreign_evidence_path(self):
+        folder = self.root / 'local/lemonade/wifi'
+        folder.mkdir()
+        (folder / 'dma-guard-verified.json').write_text(json.dumps({
+            'kernel_sha256': 'current-kernel', 'log': 'outside-device.log'}))
+        with patch.object(usb, 'ROOT', self.root), self.assertRaisesRegex(SystemExit, 'outside the private'):
+            usb.verified_firmware_overlay('current-kernel')
+
     def test_corrupt_image_is_rejected_before_reboot(self):
         self.adb += self.serial + " device usb:2 product:lemonade\n"
         with (self.root / "out/lemonade-boot.img").open("ab") as f:

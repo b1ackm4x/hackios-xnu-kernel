@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 MODES = {'inspect': 1, 'rails': 2, 'domain': 3, 'clocks': 4,
-         'resets': 5, 'controller': 6, 'phy': 7, 'root': 8, 'radio': 9, 'link': 10, 'endpoint': 11, 'mmio': 12, 'smmu': 13}
+         'resets': 5, 'controller': 6, 'phy': 7, 'root': 8, 'radio': 9, 'link': 10, 'endpoint': 11, 'mmio': 12, 'smmu': 13, 'sid': 14, 'dma': 15, 'dma-fault': 16, 'bhi': 17}
 
 
 def check(manifest, raw):
@@ -19,10 +19,7 @@ def check(manifest, raw):
         'log_integrity': hashlib.sha256(raw).hexdigest() == manifest.get('log_sha256'),
         'returned_to_loader': bool(re.search(r'result: returned \d+ 0(?:\s|$)', manifest.get('result', ''))),
         'read_only_survey_completed': 'wifi-lemonade: inspection complete; hardware writes=0;' in log,
-        'no_driver_failure': not any(x in log for x in (
-            'wifi-lemonade: wait failed', 'request timed out', 'stage 2 failed',
-            'stage 3 failed', 'stage 4 failed', 'stage 5 failed', 'stage 6 failed',
-            'stage 7 failed', 'stage 8 failed', 'stage 9 failed', 'stage 10 failed', 'stage 11 failed', 'stage 12 failed', 'stage 13 failed', 'root-power failed')),
+        'no_driver_failure': not re.search(r'wifi-lemonade: (?:wait failed|stage \d+ failed|root-power failed)|request timed out|DMA cleanup failed|restoration failed|release failed', log),
         'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|uncaught exception', log, re.I),
         'redwood_radio_disabled': 'wifi=0' in manifest.get('cmdline', '').split(),
         'matching_stage_argument': ('lemonade_wifi=' + str(MODES.get(mode))) in manifest.get('cmdline', '').split(),
@@ -47,8 +44,29 @@ def check(manifest, raw):
         if MODES[mode] >= 12:
             checks['mhi_registers_readable'] = 'stage 12 BAR/MHI registers readable; endpoint bus master disabled' in log
             checks['bar_and_decode_restored'] = 'endpoint BAR and memory decode restored' in log
-        if mode == 'smmu':
+        if MODES[mode] >= 13:
             checks['smmu_survey_without_writes'] = 'stage 13 SMMU survey complete;' in log and 'SMMU writes=0' in log
+        if MODES[mode] >= 14:
+            checks['sid_table_verified'] = 'stage 14 BDF 0x100 -> SID 0x1c01 hash 0x15 table verified; bus master disabled' in log
+            checks['sid_table_restored'] = 'BDF/SID table restored after endpoint reset' in log
+        if MODES[mode] >= 15:
+            checks['dma_tables_validated'] = 'stage 15 SMMU configured; table walk verified 128 pages and unmapped guards; bus master disabled' in log
+            checks['dma_context_restored'] = 'DMA context/stream release verified; translation registers restored after endpoint reset' in log
+        if mode == 'dma-fault':
+            checks['endpoint_guard_fault_confirmed'] = 'stage 16 endpoint DMA guard blocked by owned SMMU context; SID 0x1c01 confirmed' in log
+            fault = re.search(r'DMA guard result FSR (0x[0-9a-f]+|0) FAR (0x[0-9a-f]+|0) SID (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
+            checks['guard_fault_registers_match'] = bool(fault and int(fault[1], 0) & 2 and
+                int(fault[2], 0) == 0xa0084000 and int(fault[3], 0) == 0x1c01 and int(fault[4], 0) == 0)
+        if MODES[mode] >= 16:
+            checks['dma_stopped_before_unmap'] = 'endpoint DMA stopped before unmap' in log
+            checks['endpoint_bus_master_cleared'] = 'endpoint bus master clear verified' in log
+        if mode == 'bhi':
+            checks['firmware_reached_sbl'] = 'stage 17 BHI transfer complete; execution environment SBL; no SMMU fault' in log
+            status = re.search(r'BHI result status (0x[0-9a-f]+|0) EE (\d+) MHI (0x[0-9a-f]+|0) FSR (0x[0-9a-f]+|0) global (0x[0-9a-f]+|0)', log)
+            checks['bhi_status_and_fault_registers'] = bool(status and int(status[1], 0) >> 30 == 2 and
+                int(status[2]) == 1 and not (int(status[4], 0) & 0xc00001fe) and int(status[5], 0) == 0)
+            checks['guard_evidence_matches_kernel'] = manifest.get('dma_guard', {}).get('kernel_sha256') == manifest.get('kernel_sha256') and bool(manifest.get('kernel_sha256'))
+            checks['original_firmware_verified'] = manifest.get('wifi_firmware', {}).get('firmware', {}).get('amss.bin', {}).get('sha256') == '71e701a8cd8b5d37da939e5eccc4f7786c1f031eb92084b6a616bc0f6c1ed521'
     return {'passed': all(checks.values()), 'mode': mode, 'checks': checks,
             'scope': 'bounded PCIe bring-up stage only', 'networking_verified': False}
 
@@ -56,10 +74,19 @@ def check(manifest, raw):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('log', type=Path)
+    parser.add_argument('--record-guard', action='store_true', help='record a passed real-DMA guard test for this exact kernel')
     args = parser.parse_args()
     manifest = json.loads(args.log.with_suffix('.manifest.json').read_text())
     report = check(manifest, args.log.read_bytes())
     print(json.dumps(report, indent=2))
+    if args.record_guard:
+        root = Path(__file__).resolve().parents[1]
+        log = args.log.resolve()
+        if not report['passed'] or report['mode'] != 'dma-fault' or not log.is_relative_to(root / 'local/lemonade'):
+            raise SystemExit('Only a passed private endpoint-DMA guard test can authorize the firmware stage')
+        evidence = {'kernel_sha256': manifest['kernel_sha256'], 'log': str(log.relative_to(root)),
+                    'log_sha256': manifest['log_sha256'], 'scope': 'endpoint DMA guard only'}
+        (root / 'local/lemonade/wifi/dma-guard-verified.json').write_text(json.dumps(evidence, indent=2) + '\n')
     raise SystemExit(0 if report['passed'] else 1)
 
 
