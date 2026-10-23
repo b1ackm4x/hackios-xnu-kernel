@@ -19,6 +19,11 @@ GitHub 的公开仓库 Fork 必须公开，不能单独改为私有。因此当�
 - 以后新增机型，从适当的共同基线创建 `device/<codename>`，把机型参数和驱动保持隔离。
 - 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入目标机型分支。
 
+当前图形增量在两边的 `codex/lemonade-graphics` 配套开发分支上，未更改默认分支。
+取出这个内核分支后，使用 `USERLAND_REF=codex/lemonade-graphics common/setup.sh`
+初次准备用户空间，再核对 `common/devices/lemonade.sources.json` 的精确提交。
+显示验收记录在 [LEMONADE-DISPLAY.md](LEMONADE-DISPLAY.md)。
+
 ## 重新取出项目
 
 先通过 `gh auth login` 配置自己的 GitHub 访问权限；不要把令牌放进远端 URL。

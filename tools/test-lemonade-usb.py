@@ -95,6 +95,95 @@ class DeviceSafety(unittest.TestCase):
             self.run_action("boot")
         self.assertFalse(any("-s" in c for c in self.calls))
 
+    def test_metal_requires_verified_gpu_userland_before_device_access(self):
+        for option in (('--metal-test',), ('--metal-system', 'apps'), ('--metal-system', 'desktop')):
+            for extra in ((), ('--kernel', 'built'), ('--kernel', 'built', '--gpu'),
+                      ('--kernel', 'built', '--gpu', '--userland', '--wifi', 'station')):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    self.run_action('run', *option, *extra)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_action('run', '--profile', 'performance', '--metal-test', '--metal-system', 'apps')
+        self.assertEqual(self.calls, [])
+
+    def test_display_requires_scoped_built_kernel_before_device_access(self):
+        for action, extra in (('boot', ('--kernel', 'built')), ('run', ()),
+                              ('run', ('--kernel', 'built', '--checkpoint', '4')),
+                              ('run', ('--kernel', 'built', '--gpu-step', '1')),
+                              ('run', ('--kernel', 'built', '--wifi', 'inspect'))):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action(action, '--display', 'clocks', *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_display_requires_manifest_and_encodes_only_requested_mode(self):
+        self.fastboot = self.loader + '\tfastboot\n'
+        self.product = 'xnuloader'
+        self.result = 'returned 19 0'
+        data = b'display survey kernel'
+        (self.root / 'out/lemonade-kernel').write_bytes(data)
+        manifest = {'device': 'lemonade', 'stage': 'xnu-kernel',
+                    'sha256': hashlib.sha256(data).hexdigest()}
+        path = self.root / 'out/lemonade-kernel.manifest.json'
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(SystemExit, 'display mode'):
+            self.run_action('run', '--kernel', 'built', '--display', 'clocks')
+        self.assertFalse(any('stage' in c for c in self.calls))
+        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync']
+        path.write_text(json.dumps(manifest))
+        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4)):
+            self.calls.clear()
+            self.run_action('run', '--kernel', 'built', '--display', mode, '--seconds', '1')
+            payload = next(c for c in self.calls if c[0] == 'python3')
+            cmdline = payload[payload.index('--cmdline') + 1].split()
+            self.assertIn('lemonade_display=' + str(number), cmdline)
+            if mode == 'sync': self.assertIn('ca_vbl=1', cmdline)
+            self.assertIn('ufs_write=0', cmdline)
+            self.assertFalse(any(p.startswith('display_probe=') for p in cmdline))
+
+    def test_metal_overlay_rejects_changed_image_jobs_and_sources(self):
+        folder = self.root / 'out/lemonade-metal'
+        folder.mkdir()
+        jobs = self.root / 'common/devices/lemonade-metal.rc.jobs'
+        jobs.parent.mkdir(parents=True)
+        jobs.write_bytes(b'graphics diagnostic')
+        source = self.root / 'frontend.m'
+        source.write_bytes(b'frontend fixture')
+        digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        image = folder / 'root.apfs'
+        image.write_bytes(b'verified graphics overlay')
+        build = folder / 'build.json'
+        build.write_text(json.dumps({'sources': {'frontend.m': digest(source)}}))
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': {'sha256': 'normal-root'}}))
+        (folder / 'manifest.json').write_text(json.dumps({
+            'device': 'lemonade', 'profile': 'metal-baseline-v1', 'base_root_sha256': 'normal-root',
+            'network_private': False, 'sha256': digest(image), 'normal_root_unchanged': True,
+            'other_file_contents_and_modes_verified': True, 'build_receipt_sha256': digest(build),
+            'jobs_sha256': digest(jobs)}))
+        with patch.object(usb, 'ROOT', self.root):
+            self.assertEqual(usb.verified_graphics_overlay()[0], image)
+            for path in (image, jobs, source, build):
+                saved = path.read_bytes()
+                path.write_bytes(saved + b'changed')
+                with self.assertRaisesRegex(SystemExit, 'Refusing:'):
+                    usb.verified_graphics_overlay()
+                path.write_bytes(saved)
+            system_folder = self.root / 'out/lemonade-metal-system'
+            system_folder.mkdir()
+            system_jobs = jobs.with_name('lemonade-metal-system.rc.jobs')
+            system_jobs.write_bytes(b'normal Metal discovery test')
+            for name in ('root.apfs', 'build.json', 'manifest.json'):
+                (system_folder / name).write_bytes((folder / name).read_bytes())
+            with self.assertRaisesRegex(SystemExit, 'Refusing:'):
+                usb.verified_graphics_overlay(True)
+            manifest = json.loads((system_folder / 'manifest.json').read_text())
+            manifest['profile'] = 'metal-system-v1'
+            manifest['jobs_sha256'] = digest(system_jobs)
+            (system_folder / 'manifest.json').write_text(json.dumps(manifest))
+            self.assertEqual(usb.verified_graphics_overlay(True)[0], system_folder / 'root.apfs')
+            system_jobs.write_bytes(b'changed startup work')
+            with self.assertRaisesRegex(SystemExit, 'Refusing:'):
+                usb.verified_graphics_overlay(True)
+
     def test_firmware_requires_real_dma_guard(self):
         with patch.object(usb, 'ROOT', self.root), self.assertRaisesRegex(SystemExit, 'no verified endpoint'):
             usb.verified_firmware_overlay('current-kernel')
@@ -322,12 +411,46 @@ class DeviceSafety(unittest.TestCase):
             self.run_action("run", "--kernel", "built", "--cpu-policy", "balanced")
         self.assertFalse(any("stage" in c or "run" in c for c in self.calls))
 
+    def test_gpu_trace_requires_gpu_before_device_access(self):
+        with self.assertRaises(SystemExit):
+            self.run_action("run", "--gpu-trace")
+        self.assertEqual(self.calls, [])
+
+    def test_gpu_clock_rejects_unscoped_and_unsupported_requests(self):
+        cases = [('boot', '--gpu-clock', '443'),
+                 ('run', '--gpu-clock', '443'),
+                 ('run', '--gpu-clock', '443', '--kernel', 'built', '--gpu-step', '16'),
+                 ('run', '--gpu-clock', '840', '--profile', 'performance')]
+        for args in cases:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action(*args)
+        self.assertEqual(self.calls, [])
+
+    def test_gpu_clock_requires_manifest_and_preserves_default(self):
+        self.prepare_performance_run()
+        with self.assertRaisesRegex(SystemExit, 'stock GPU clock'):
+            self.run_action('run', '--profile', 'performance', '--gpu-clock', '443', '--seconds', '1')
+        self.assertFalse(any('stage' in call for call in self.calls))
+        path = self.root / 'out/lemonade-kernel.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['gpu_clock_mhz_supported'] = [315, 379, 443, 540]
+        path.write_text(json.dumps(manifest))
+        for mhz, index in ((315, 1), (379, 2), (443, 3), (540, 4)):
+            self.calls.clear()
+            self.run_action('run', '--profile', 'performance', '--gpu-clock', str(mhz), '--seconds', '1')
+            payload = next(call for call in self.calls if call[0] == 'python3')
+            args = payload[payload.index('--cmdline') + 1].split()
+            self.assertEqual([a for a in args if a.startswith('adreno_speed=')], [f'adreno_speed={index}'])
+            self.assertIn('ufs_write=0', args)
+            receipt = json.loads((self.root / 'out/lemonade-xnu.manifest.json').read_text())
+            self.assertEqual(receipt['gpu_clock_mhz_requested'], mhz)
+
     def test_performance_profile_rejects_conflicts_before_device_access(self):
         with self.assertRaises(SystemExit):
             self.run_action("run", "--profile", "performance", "--kernel", "prebuilt")
         self.assertFalse(self.calls)
 
-    def test_performance_profile_keeps_scoped_ram_only_run(self):
+    def prepare_performance_run(self):
         self.fastboot = self.loader + "\tfastboot\n"
         self.product = "xnuloader"
         self.result = "returned 19 0"
@@ -344,9 +467,14 @@ class DeviceSafety(unittest.TestCase):
             (self.root / relative).write_bytes(b"test disk")
             images[relative] = {"sha256": hashlib.sha256(b"test disk").hexdigest(), "bytes": 9}
         (self.root / "local/lemonade/images.json").write_text(json.dumps(images))
+
+    def test_performance_profile_keeps_scoped_ram_only_run(self):
+        self.prepare_performance_run()
         self.run_action("run", "--profile", "performance", "--seconds", "1")
         payload_call = next(c for c in self.calls if c[0] == "python3")
         args = payload_call[payload_call.index("--cmdline") + 1].split()
+        self.assertIn("gpu_log=0", args)
+        self.assertFalse(any(arg.startswith('adreno_speed=') for arg in args))
         for arg in ("bootcpu=7", "cpus=4", "cpufreq=1", "gpu=1", "ufs=0", "ufs_write=0"):
             self.assertIn(arg, args)
         self.assertEqual(sum(arg.startswith("cpus=") for arg in args), 1)

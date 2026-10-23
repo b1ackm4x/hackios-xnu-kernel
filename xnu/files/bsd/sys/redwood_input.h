@@ -42,6 +42,8 @@ void redwood_input_init(void);
 void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
 void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
 void lemonade_touch_init(void);         /* lemonade Samsung S6SY792, separately platform-gated */
+void lemonade_display_init(void);       /* guarded SM8350 DPU survey, no panel programming */
+void lemonade_display_quiesce(void);    /* restore temporary register-bus clock votes */
 void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
 void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */

@@ -1,6 +1,6 @@
 {
   "device": "lemonade",
-  "branch": "device/lemonade",
+  "branch": "codex/lemonade-graphics",
   "kernel": {
     "repository": "https://github.com/b1ackm4x/hackios-xnu-kernel",
     "upstream": "https://github.com/oosexgang/hackios-xnu-kernel",
@@ -10,8 +10,8 @@
     "repository": "https://github.com/b1ackm4x/hackios-xnu-userland",
     "upstream": "https://github.com/oosexgang/hackios-xnu-userland",
     "upstream_base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
-    "commit": "def5fa6aafcc29a6de9edf0b0ac5053b2715c428"
+    "commit": "75bd72a870793accdcf7978c375db24dc96372b7"
   },
-  "validation_document": "docs/LEMONADE.md",
+  "validation_document": "docs/LEMONADE-DISPLAY.md",
   "private_evidence_directory": "local/lemonade/"
 }

@@ -1,0 +1,13 @@
+# Each test registers Metal only inside its own process. Desktop keeps using GLES.
+/redwood/bin/rwtouch wait 25
+/redwood/bin/gl_test --require-renderer FD660 3 384 384
+/redwood/bin/drawable_test 1125 2436
+/redwood/bin/metal_drv_test --draw /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/redwood/bin/metal_drv_test --draw-index /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/redwood/bin/metal_drv_test --draw-depth /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/redwood/bin/metal_drv_test --raster-state /System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib
+/redwood/bin/metal_drv_test --features /redwood/share/lemonade_test.metallib
+# Repeatable display workload; each line stays below init's 63-word limit.
+/redwood/bin/rwtouch wait 2 button home wait 2 tap 0.615 0.715 wait 3
+/redwood/bin/rwtouch swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 0.6 swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 0.6
+/redwood/bin/rwtouch swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 0.6 swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 2 button home

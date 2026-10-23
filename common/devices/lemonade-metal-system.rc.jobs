@@ -1,0 +1,10 @@
+# Normal Metal discovery; no manual device registration in this suite.
+/redwood/bin/rwtouch wait 25
+/redwood/bin/metal_props show
+/redwood/bin/lemonade_metal_features /redwood/share/lemonade_test.metallib
+/redwood/bin/lemonade_metal_mps
+/redwood/bin/lemonade_metal_ca
+/redwood/bin/metal_drv_test --sweep
+/redwood/bin/rwtouch wait 2 button home wait 2 tap 0.615 0.715 wait 3
+/redwood/bin/rwtouch swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 0.6 swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 0.6
+/redwood/bin/rwtouch swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 0.6 swipe 0.5 0.8 0.5 0.3 320 wait 0.6 swipe 0.5 0.3 0.5 0.8 320 wait 2 button home

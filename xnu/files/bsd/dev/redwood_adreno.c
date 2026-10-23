@@ -2325,7 +2325,10 @@ step_core_power(void)
 	static const struct gpu_speed {
 		uint32_t khz, level;
 	} redwood_speeds[] = { { 0, 0 }, { 315000, 64 }, { 450000, 128 }, { 550000, 192 } },
-	  lemonade_speeds[] = { { 0, 0 }, { 315000, 64 } };
+	  /* Common stock OPPs in every SM8350 bin of this device's firmware.
+	   * Keep 315 MHz as the default; higher rates require explicit selection. */
+	  lemonade_speeds[] = { { 0, 0 }, { 315000, 64 }, { 379000, 80 },
+	      { 443000, 128 }, { 540000, 192 } };
 	const struct gpu_speed *speeds = lemonade ? lemonade_speeds : redwood_speeds;
 	static struct hfi_perf_table perf;
 	static struct hfi_bw_table bw;
@@ -2341,8 +2344,8 @@ step_core_power(void)
 		printf("adreno: %u: RPMh's list lacks one of the rails\n", step);
 		return false;
 	}
-	/* Start SM8350 at its stock minimum OPP; do not apply SC7280's 450/550 MHz
-	 * voltage table or overclock the device during bring-up. */
+	/* SM8350 keeps its own stock frequency/rail pairs. SC7280's 450/550 MHz
+	 * table is never used for this platform. */
 	perf.gpu_levels = lemonade ? sizeof(lemonade_speeds) / sizeof(lemonade_speeds[0]) :
 	    sizeof(redwood_speeds) / sizeof(redwood_speeds[0]);
 	if (lemonade) {
@@ -2384,6 +2387,10 @@ step_core_power(void)
 	}
 
 	if (PE_parse_boot_argn("adreno_speed", &speed, sizeof(speed)) && speed >= 1 && speed < perf.gpu_levels) {
+		if (lemonade && speed > 1 && speed_bin > 5) {
+			printf("adreno: refusing a higher stock OPP for unknown SM8350 speed bin %u\n", speed_bin);
+			return false;
+		}
 		vote[2] = speed;
 	}
 	core_khz = speeds[vote[2]].khz;

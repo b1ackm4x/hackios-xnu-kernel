@@ -30,6 +30,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
+#include "../../bsd/sys/lemonade_display.h"
 
 extern "C" {
 #include <console/video_console.h>
@@ -674,6 +675,11 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			}
 		}
 	}
+#if defined(__arm64__)
+	/* Every scaling worker completes its framebuffer stores before publishing
+	 * completion to the presenter or the external display engine. */
+	__asm__ volatile("dsb sy" ::: "memory");
+#endif
 }
 
 /* A helper of the scaling (fb_threads): waits for rows to do, does them, says so. */
@@ -936,6 +942,8 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	uint32_t layers = 0;
 	MiniIOSurface * recorded = NULL;
 	bool report;
+	struct lemonade_present_window hardwareWindow = {};
+	int hardwarePresent = 0;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
@@ -945,7 +953,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	}
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
-	if (gOnTheBeat) {
+	hardwarePresent = lemonade_display_present_begin(&hardwareWindow);
+	if (hardwarePresent) began = mach_absolute_time();
+	if (!hardwarePresent && gOnTheBeat) {
 		uint64_t period, aim, next;
 
 		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -976,6 +986,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	fSwapsWaiting--;
 	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
 	IOLockUnlock(fSwapLock);
+	if (hardwarePresent < 0) { fStatLost++; return; }
 	IOLockLock(fLock);
 	if (fLastFrame != 0) {
 		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
@@ -1043,6 +1054,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	drawn = mach_absolute_time();
+	if (hardwarePresent > 0) lemonade_display_present_end(&hardwareWindow, swapWord(swap, SWAP_ID));
 	if (recorded != NULL) {
 		record(recorded);
 	}
@@ -1126,6 +1138,7 @@ class IOMobileFramebufferUserClient : public IOUserClient
 	uint64_t                fVSyncCount;
 	uint64_t                fVSyncTime;             /* when the refresh being waited for is due */
 	bool                    fVSyncRunning;
+	bool                    fHardwareVSync;
 	bool                    fClosed;
 
 	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
@@ -1162,7 +1175,8 @@ IOMobileFramebufferUserClient::start(IOService * provider)
 		return false;
 	}
 	fLock = IOLockAlloc();
-	fVSyncCall = thread_call_allocate(&IOMobileFramebufferUserClient::vsyncFired, this);
+	fVSyncCall = thread_call_allocate_with_options(&IOMobileFramebufferUserClient::vsyncFired, this,
+	    THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
 	return fLock != NULL && fVSyncCall != NULL;
 }
 
@@ -1175,6 +1189,7 @@ IOMobileFramebufferUserClient::clientClose(void)
 		IOLockUnlock(fLock);
 	}
 	if (fVSyncCall != NULL) {
+		lemonade_display_vsync_unregister(fVSyncCall);
 		thread_call_cancel_wait(fVSyncCall);
 	}
 	if (!isInactive()) {
@@ -1187,6 +1202,7 @@ void
 IOMobileFramebufferUserClient::free(void)
 {
 	if (fVSyncCall != NULL) {
+		lemonade_display_vsync_unregister(fVSyncCall);
 		thread_call_cancel_wait(fVSyncCall);
 		thread_call_free(fVSyncCall);
 		fVSyncCall = NULL;
@@ -1234,6 +1250,17 @@ void
 IOMobileFramebufferUserClient::armVSync(void)
 {
 	uint64_t period, now = mach_absolute_time();
+	if (!fHardwareVSync && lemonade_display_vsync_register(fVSyncCall)) {
+		fHardwareVSync = true;
+		IOLog("MiniIOMobileFramebuffer: using SM8350 hardware TE vsync\n");
+	}
+	if (fHardwareVSync) {
+		/* IRQ schedules the actual callback. This guard only recovers a stopped
+		 * source; it never invents a refresh while hardware ticks are arriving. */
+		nanoseconds_to_absolutetime(100 * NSEC_PER_MSEC, &period);
+		thread_call_enter_delayed(fVSyncCall, now + period);
+		return;
+	}
 
 	/* one refresh after the last, not after whenever we got round to this: the rate does not drift */
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -1260,8 +1287,24 @@ IOMobileFramebufferUserClient::vsync(void)
 	now = fVSyncTime;
 	if (fClosed || fCallbacks[kFBNotifyVSync] == 0 || fPorts[kFBNotifyVSync] == NULL) {
 		fVSyncRunning = false;
+		lemonade_display_vsync_unregister(fVSyncCall);
+		fHardwareVSync = false;
 	} else {
-		fVSyncCount++;
+		if (fHardwareVSync) {
+			uint64_t hardwareTime, hardwarePeriod, hardwareCount;
+			if (lemonade_display_vsync_snapshot(&hardwareTime, &hardwarePeriod, &hardwareCount)) {
+				if (hardwareCount == fVSyncCount) {
+					armVSync(); IOLockUnlock(fLock); return;
+				}
+				now = hardwareTime; fVSyncCount = hardwareCount;
+			} else {
+				lemonade_display_vsync_unregister(fVSyncCall);
+				fHardwareVSync = false;
+				now = fVSyncTime = mach_absolute_time();
+				IOLog("MiniIOMobileFramebuffer: hardware TE stopped; restoring timer callbacks\n");
+				fVSyncCount++;
+			}
+		} else fVSyncCount++;
 		setAsyncReference64(ref, fPorts[kFBNotifyVSync], fCallbacks[kFBNotifyVSync], fRefcons[kFBNotifyVSync], fTask);
 		args[0] = (uint32_t) now;
 		args[1] = now >> 32;

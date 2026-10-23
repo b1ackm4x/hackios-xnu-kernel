@@ -56,6 +56,30 @@ def verified_firmware_overlay(kernel_hash):
     return image, manifest, guard
 
 
+def verified_graphics_overlay(system=False):
+    folder = ROOT / ('out/lemonade-metal-system' if system else 'out/lemonade-metal')
+    profile = 'metal-system-v1' if system else 'metal-baseline-v1'
+    jobs = 'common/devices/lemonade-metal-system.rc.jobs' if system else 'common/devices/lemonade-metal.rc.jobs'
+    image = folder / 'root.apfs'
+    record = json.loads((folder / 'manifest.json').read_text())
+    normal = json.loads((ROOT / 'local/lemonade/images.json').read_text())['userland/root.apfs']['sha256']
+    def digest(path):
+        with path.open('rb') as stream:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+    if (record.get('device') != 'lemonade' or record.get('profile') != profile or
+            record.get('base_root_sha256') != normal or record.get('network_private') is not False or
+            record.get('sha256') != digest(image) or not record.get('normal_root_unchanged') or
+            not record.get('other_file_contents_and_modes_verified') or
+            record.get('build_receipt_sha256') != digest(folder / 'build.json') or
+            record.get('jobs_sha256') != digest(ROOT / jobs)):
+        raise SystemExit('Refusing: graphics overlay differs from its verified build')
+    build = json.loads((folder / 'build.json').read_text())
+    for relative, expected in build['sources'].items():
+        if digest(ROOT / relative) != expected:
+            raise SystemExit('Refusing: Metal sources changed after image build: ' + relative)
+    return image, record
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,10 +91,16 @@ def main():
                         help="use the upstream kernel or the locally built, manifest-verified lemonade kernel")
     parser.add_argument("--gpu", action="store_true", help="enable the adapted Adreno 660 for rendering (requires --kernel built)")
     parser.add_argument("--gpu-step", type=int, default=0, help="run Adreno bring-up through step 1..22, then return")
+    parser.add_argument('--gpu-clock', type=int, choices=(315, 379, 443, 540), help='explicit SM8350 stock GPU OPP in MHz; default remains 315')
     parser.add_argument("--boot-cpu", type=int, choices=range(8), help="physical boot core, 0..7; 7 is the SM8350 prime core")
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
+    parser.add_argument("--gpu-trace", action="store_true", help="log every GPU submission; diagnostic only, can exhaust the device log")
     parser.add_argument('--network-test', action='store_true', help='explicit RAM-only association/DHCP/traffic acceptance with a private current-network overlay')
+    parser.add_argument('--metal-test', action='store_true', help='verified RAM-only Metal pixel and IOSurface diagnostic overlay')
+    parser.add_argument('--metal-system', choices=('apps', 'desktop'), help='verified RAM-only system Metal discovery; desktop also selects Metal compositing')
+    parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2; does not imply complete family compliance')
+    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync'), help='SM8350 display survey; clocks temporarily votes for register-bus access; irq also measures and restores a bounded TE interrupt')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
     parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
@@ -94,12 +124,26 @@ def main():
         args.seconds = 300 if args.profile else 8
     if (args.boot_cpu is not None or args.cpus is not None) and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU topology tests require run --kernel built")
+    if args.gpu_trace and (args.action != "run" or not args.gpu):
+        parser.error("GPU submission tracing requires a GPU run")
+    if args.gpu_clock is not None and (args.action != 'run' or args.kernel != 'built' or
+            args.checkpoint or not (args.gpu or args.gpu_step >= 17)):
+        parser.error('GPU clock selection requires a built GPU run or GPU step 17..22')
     if args.metrics and (args.action != "run" or args.kernel != "built"):
         parser.error("Performance metrics require run --kernel built")
     if args.touch and (args.action != "run" or args.kernel != "built" or args.checkpoint or args.gpu_step):
         parser.error("Touch requires run --kernel built without a checkpoint or GPU step")
     if args.wifi and (args.action != "run" or args.kernel != "built" or args.checkpoint or args.gpu_step):
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
+    if args.display and (args.action != 'run' or args.kernel != 'built' or args.checkpoint or args.gpu_step or args.wifi):
+        parser.error('Display survey requires run --kernel built without checkpoints, GPU steps or Wi-Fi tests')
+    if args.metal_test and args.metal_system:
+        parser.error('Choose process-local or system Metal testing')
+    if args.metal_profile is not None and not args.metal_system:
+        parser.error('--metal-profile requires --metal-system')
+    if (args.metal_test or args.metal_system) and (args.action != 'run' or args.kernel != 'built' or not args.gpu or
+            not args.userland or args.checkpoint or args.gpu_step or args.wifi):
+        parser.error('Metal test requires run --kernel built --gpu --userland without a Wi-Fi test')
     if args.wifi and args.wifi != "inspect" and (args.touch or args.gpu or args.cpu_policy != "firmware"):
         parser.error("Wi-Fi root-power probe must run without touch, GPU or CPU-policy changes")
     if args.wifi in ('bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station') and not args.userland:
@@ -259,6 +303,10 @@ def main():
                 raise SystemExit("Refusing: kernel has no lemonade S6SY792 touch support")
             if args.wifi and args.wifi not in kernel_manifest.get("wifi_modes_supported", []):
                 raise SystemExit("Refusing: kernel has no requested lemonade Wi-Fi mode")
+            if args.display and args.display not in kernel_manifest.get('display_modes_supported', []):
+                raise SystemExit('Refusing: kernel has no requested lemonade display mode')
+            if args.gpu_clock is not None and args.gpu_clock not in kernel_manifest.get('gpu_clock_mhz_supported', []):
+                raise SystemExit('Refusing: kernel has no requested stock GPU clock')
             expected_kernel = kernel_manifest["sha256"]
         else:
             kernel = ROOT / "prebuilt/mach.development.bcm2837"
@@ -276,6 +324,16 @@ def main():
                 cmdline += f" {key}={value}"
         if args.metrics:
             cmdline += " touch_lat=2 cpuload=500"
+        if args.metal_system:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith(('metal=', 'camtl=', 'metal_profile=')))
+            cmdline += ' metal=1 metal_profile=' + str(args.metal_profile or 0)
+            cmdline += ' camtl=' + ('1' if args.metal_system == 'desktop' else '0')
+        if args.display:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_display='))
+            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4}[args.display])
+            if args.display == 'sync':
+                cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('ca_vbl='))
+                cmdline += ' ca_vbl=1'
         if args.touch:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("touchscreen="))
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
@@ -324,14 +382,21 @@ def main():
         if args.gpu or args.gpu_step:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("gpu="))
             if args.gpu:
-                cmdline += " gpu=1 gpu_log=1"
+                cmdline += " gpu=1 gpu_log=" + ("1" if args.gpu_trace else "0")
             else:
                 cmdline += f" gpu=0 adreno={args.gpu_step} adreno_pause=0 adreno_watch=1 adreno_return=1"
+        if args.gpu_clock is not None:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('adreno_speed='))
+            cmdline += ' adreno_speed=' + str({315: 1, 379: 2, 443: 3, 540: 4}[args.gpu_clock])
         cmdline = f"loader_return_after={args.seconds} epoch={int(time.time())} sb_delay=8 " + cmdline
         payload = ROOT / "out/lemonade-xnu.bin"
         extra_images = [f"ramdisk={verified_image('userland/root.apfs')}"] if args.userland or args.gpu or args.gpu_step else []
         if firmware_overlay:
             extra_images = [f'ramdisk={firmware_overlay}']
+        graphics_record = None
+        if args.metal_test or args.metal_system:
+            graphics_overlay, graphics_record = verified_graphics_overlay(bool(args.metal_system))
+            extra_images = [f'ramdisk={graphics_overlay}']
         command(["python3", str(ROOT / "xnuloader/mkpayload.py"), "-o", str(payload),
                  f"kernel={kernel}", *extra_images, "--cmdline", cmdline], timeout=30)
         # The optional root disk and resident system disk both live in RAM.
@@ -342,12 +407,20 @@ def main():
         record.update({"kernel_source": args.kernel, "gpu_enabled": args.gpu, "gpu_step": args.gpu_step})
         record.update({"boot_cpu": args.boot_cpu, "cpus_requested": args.cpus})
         record["performance_metrics"] = args.metrics
+        record["gpu_submission_trace"] = args.gpu_trace
+        record['gpu_clock_mhz_requested'] = args.gpu_clock
         record["metrics_mode"] = "frame-input-present-v2" if args.metrics else None
         record["cpu_policy"] = args.cpu_policy
         record["profile"] = args.profile
         record["touch"] = args.touch
         record["wifi"] = args.wifi
         record['network_test'] = args.network_test
+        record['metal_test'] = args.metal_test
+        record['metal_system'] = args.metal_system
+        record['metal_profile'] = args.metal_profile
+        record['display'] = args.display
+        if graphics_record:
+            record['graphics_image'] = graphics_record
         if firmware_record:
             record['wifi_firmware'] = firmware_record
             record['dma_guard'] = guard_record
@@ -359,6 +432,9 @@ def main():
             if firmware_record:
                 record['images'].pop('userland/root.apfs')
                 record['images']['out/lemonade-wifi/root.apfs'] = firmware_record
+            if graphics_record:
+                record['images'].pop('userland/root.apfs')
+                record['images'][str(graphics_overlay.relative_to(ROOT))] = graphics_record
         (ROOT / "out/lemonade-xnu.manifest.json").write_text(json.dumps(record, indent=2) + "\n")
         try:
             fb(serial, "stage", str(payload), timeout=60)

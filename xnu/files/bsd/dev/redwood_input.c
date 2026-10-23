@@ -222,6 +222,7 @@ redwood_input_init(void)
 	redwood_battery_init();
 	redwood_ufs_init();
 	redwood_net_init();
+	lemonade_display_init();
 	redwood_adreno_init();
 	lemonade_wifi_init();
 	redwood_wifi_init();

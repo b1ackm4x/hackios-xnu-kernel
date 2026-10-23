@@ -16,6 +16,7 @@ python3 - <<'COPY'
 import hashlib, json, os
 from pathlib import Path
 paths = ['bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
+	 'bsd/dev/lemonade_display.c', 'bsd/sys/lemonade_display.h', 'iokit/Kernel/MiniIOMobileFramebuffer.cpp',
          'bsd/dev/lemonade_touch.c', 'bsd/dev/lemonade_touch_protocol.h',
          'bsd/dev/lemonade_wifi.c', 'bsd/dev/lemonade_mhi_protocol.h', 'bsd/dev/redwood_wifi.c', 'bsd/dev/redwood_goodix.c',
          'bsd/dev/redwood_lx.c', 'bsd/sys/redwood_lx.h', 'bsd/sys/redwood_qrtr.h', 'bsd/sys/lemonade_wifi.h',
@@ -39,7 +40,7 @@ python3 - "$XNU_SRC/bsd/conf/files" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]); original = p.read_text(); s = original
-for name in ('lemonade_touch.c', 'lemonade_wifi.c'):
+for name in ('lemonade_touch.c', 'lemonade_wifi.c', 'lemonade_display.c'):
     if 'bsd/dev/' + name not in s:
         s += '\nbsd/dev/' + name + '\tstandard\n'
 if s != original:
@@ -76,8 +77,11 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'built_at': datetime.now(timezone.utc).isoformat(), 'bytes': len(data),
           'sha256': hashlib.sha256(data).hexdigest(), 'arch': 'arm64', 'base': 'xnu-8796.121.2',
           'gpu_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/redwood_adreno.c').read_bytes()).hexdigest(),
+          'gpu_clock_mhz_supported': [315, 379, 443, 540],
           'cpu_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/redwood_cpufreq.c').read_bytes()).hexdigest(),
           'cpu_policy_supported': 'sm8350-capped-epss-v1',
+          'display_modes_supported': ['inspect', 'clocks', 'irq', 'sync'],
+          'display_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_display.c').read_bytes()).hexdigest(),
           'touch_driver_supported': 'lemonade-s6sy792-v1',
           'touch_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch.c').read_bytes()).hexdigest(),
           'touch_protocol_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_touch_protocol.h').read_bytes()).hexdigest(),
