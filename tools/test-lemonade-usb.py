@@ -105,6 +105,50 @@ class DeviceSafety(unittest.TestCase):
             self.run_action('run', '--profile', 'performance', '--metal-test', '--metal-system', 'apps')
         self.assertEqual(self.calls, [])
 
+    def test_widgets_require_system_desktop_before_device_access(self):
+        for extra in ((), ('--metal-system', 'apps'), ('--metal-test',)):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--profile', 'performance', '--metal-widgets', *extra)
+        self.assertEqual(self.calls, [])
+        with patch.object(usb, 'ROOT', self.root), self.assertRaisesRegex(SystemExit, 'requires system Metal'):
+            usb.verified_graphics_overlay(False, True)
+
+    def test_widgets_overlay_is_separate_and_requires_system_provenance(self):
+        folder = self.root / 'out/lemonade-metal-widgets'
+        folder.mkdir()
+        jobs = self.root / 'common/devices/lemonade-metal-system.rc.jobs'
+        jobs.parent.mkdir(parents=True)
+        jobs.write_bytes(b'jobs')
+        image = folder / 'root.apfs'
+        image.write_bytes(b'widget image')
+        build = folder / 'build.json'
+        build.write_text(json.dumps({'sources': {}}))
+        digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': {'sha256': 'normal-root'},
+            'userland/system.apfs': {'sha256': 'system-image'}}))
+        manifest = {'device': 'lemonade', 'profile': 'metal-widgets-v1', 'base_root_sha256': 'normal-root',
+                    'sha256': digest(image), 'network_private': False, 'normal_root_unchanged': True,
+                    'other_file_contents_and_modes_verified': True, 'build_receipt_sha256': digest(build),
+                    'jobs_sha256': digest(jobs)}
+        path = folder / 'manifest.json'
+        path.write_text(json.dumps(manifest))
+        with patch.object(usb, 'ROOT', self.root):
+            with self.assertRaisesRegex(SystemExit, 'provenance'):
+                usb.verified_graphics_overlay(True, True)
+            manifest['widget_service'] = {'label': 'com.apple.chronod', 'system_sha256': 'system-image',
+                                         'stock_plist_sha256': 'a' * 64, 'program_sha256': 'b' * 64,
+                                         'job_sha256': 'c' * 64}
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(usb.verified_graphics_overlay(True, True)[0], image)
+            for key, value in (('label', 'other'), ('system_sha256', 'changed'), ('job_sha256', '')):
+                original = manifest['widget_service'][key]
+                manifest['widget_service'][key] = value
+                path.write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(SystemExit, 'provenance'):
+                    usb.verified_graphics_overlay(True, True)
+                manifest['widget_service'][key] = original
+
     def test_display_requires_scoped_built_kernel_before_device_access(self):
         for action, extra in (('boot', ('--kernel', 'built')), ('run', ()),
                               ('run', ('--kernel', 'built', '--checkpoint', '4')),

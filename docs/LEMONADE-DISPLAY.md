@@ -338,6 +338,47 @@ python3 tools/test-lemonade-display-fences.py
 python3 tools/test-lemonade-check-fences.py
 ```
 
+## 设备缓冲区的小偏移与小组件渲染
+
+系统镜像里有 `chronod`，原测试 root 却未注册其 launchd job。新增显式 `--metal-widgets`
+选用独立 RAM 镜像，核对 stock plist 的身份和程序哈希，再按需启动该服务。首次实际运行
+`1792800790-run-cp0.log` 及同轮实时日志显示：天气能画出渐变背景，随后 RenderBox 的
+`mask__vertex` 使用 device buffer 1、偏移 7,408 字节，被当前 64 字节 SSBO 对齐检查拒绝。
+这只证明了一个可复现故障，不能把服务启动等同于完整小组件可用。
+
+`air_metal.c` 现在把原缓冲区绑定在前一个硬件对齐地址，并通过每阶段私有常量表为
+NIR 的 SSBO load/store/atomic/atomic-swap 加上剩余偏移。表在该阶段未占用的 UBO 槽位中，
+用 Gallium uploader 分配，保留到实际 GPU 使用结束；连续 draw 改变偏移不会覆盖上一条命令。
+原 device buffer 不复制，两个绑定仍指向同一存储，GPU 写回与原子操作不会丢失。
+若没有可用常量槽位，创建管线会明确失败；这不是完整 Metal 资源槽位兼容声明。
+
+新增 8 项公开 Metal API 测试：4/16/60/7,408 字节偏移读写、参数缓冲区成员偏移、
+不同基址别名上的原子加、顶点/片段阶段及连续 draw 重绑、片段写回。检查精确像素/数值，
+同时验证前后保护字节及只读输入。Apple M4 原生 Metal 及一加 9 FD660 均通过全部 101 项。
+真机进程内回归 `1792801226-run-cp0.log` 运行 100 秒，另外通过 15 项栅格、26 项 IOSurface
+及 GLES 三角形像素读回。1,342 次入队/呈现/释放、258 次 Busy、2,455 次对应到已释放
+swap 的成功等待，未发现顺序错误；5,955 次 TE，越窗/丢弃/异常中断均为零，正常返回加载器。
+本轮仍使用已验证的 CPU 复制呈现内核，不能据此宣称 DPU 直接扫描或刷新率提升。
+
+系统 Metal 小组件复测 `1792801342-run-cp0.log`（90 秒）通过相同 101 项特性、2 项 MPS
+和 4 项 CA。逐份核验同轮 live log 的 SHA-256 后，确认 `mask__vertex`、渐变、遮罩累加、
+图像管线均实际运行，未出现 chronod 的 draw 错误。截图 `1792801352-screen.png` 显示
+天气的 “No weather data” 和日历的星期、日期、“No events today”，文字/背景/圆角可见。
+这验证空数据状态的真实绘制；没有登录账户，也没有声称获取了天气或同步了个人日程。
+
+该轮 5,351 次 TE、1,193 次呈现，越窗/丢弃/异常中断均为零，退出恢复正常。小组件的
+大量诊断日志覆盖了最终环形日志里的早期 fence 事件，所以最终日志单独做完整 fence
+验收会失败；不能忽略该结果，也不以它宣称这轮全部等待顺序已验证。完整顺序证据仍是
+上述 100 秒进程内回归。固定 11 个动作的手指按下期间为 55.45 FPS，活动区间 54.75 FPS，
+P95 32.429 ms、最大 263.889 ms，CPU 复制平均 3.165 ms；这些结果不证明刷新率提升。
+08:23 返回 Android 后，USB 身份、原 B 槽、锁状态及五个活动分区哈希均与基线一致
+（`android-roundtrip-20261024T082333.json`）。
+
+```sh
+python3 tools/lemonade-build-graphics-image.py --system-metal --widgets
+python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets --display sync --display-fences --metrics --seconds 90
+```
+
 ## 复现
 
 先准备项目的 Linux 构建环境、iOS 16.5 SDK、核验过的系统镜像和有权使用的 Metal 编译器。

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -22,13 +23,60 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def widget_services():
+    """Use the stock job definition and verify its executable against System."""
+    system = ROOT / 'userland/system.apfs'
+    expected = json.loads((ROOT / 'local/lemonade/images.json').read_text())['userland/system.apfs']['sha256']
+    if digest(system) != expected:
+        raise SystemExit('Normal System image differs from its verified manifest')
+    name = 'com.apple.chronod'
+    program = '/System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod'
+    container = base.apfs.Container(str(system))
+    try:
+        volume = base.apfs.pick_volume(container, None)
+        executable = volume.lookup(program)
+        if not executable:
+            raise SystemExit('Stock widget renderer is missing from System')
+        # The thinned System omits job plists; mkjobs.py and the network image
+        # builder also use the corresponding unpacked stock definitions.
+        source_path = ROOT / 'ios165/rootfs/System/Library/LaunchDaemons' / (name + '.plist')
+        source = source_path.read_bytes()
+        program_data = volume.inode(executable[0]).contents()
+        program_hash = hashlib.sha256(program_data).hexdigest()
+        if digest(ROOT / 'ios165/rootfs' / program.lstrip('/')) != program_hash:
+            raise SystemExit('Unpacked widget renderer differs from verified System')
+        job = plistlib.loads(source)
+        if (job.get('Label') != name or job.get('ProgramArguments') != [program] or job.get('Program', program) != program or
+                job.get('UserName') != 'mobile' or job.get('MachServices') !=
+                {'com.apple.chrono.widgetcenterconnection': True, 'com.apple.chronoservices': True}):
+            raise SystemExit('Unexpected stock widget service identity')
+        # On demand, like mkjobs.py --rest; no unattended crash-restart loop.
+        for key in ('KeepAlive', 'RunAtLoad', 'LaunchEvents'):
+            job.pop(key, None)
+        job['ThrottleInterval'] = 30
+        job['StandardOutPath'] = job['StandardErrorPath'] = '/dev/console'
+        job.setdefault('EnvironmentVariables', {}).update({'REDWOOD_METAL_TRACE': '1', 'OS_ACTIVITY_DT_MODE': 'YES'})
+        data = plistlib.dumps(job, fmt=plistlib.FMT_BINARY)
+        evidence = {'label': name, 'program': program, 'system_sha256': expected,
+                    'stock_plist_source': str(source_path.relative_to(ROOT)),
+                    'stock_plist_sha256': hashlib.sha256(source).hexdigest(),
+                    'program_sha256': program_hash,
+                    'job_sha256': hashlib.sha256(data).hexdigest()}
+        return {'LaunchDaemons/' + name + '.plist': (0o100644, 0, 0, data)}, evidence
+    finally:
+        container.close()
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--system-metal', action='store_true')
+    parser.add_argument('--widgets', action='store_true', help='separate RAM-only system Metal image with the stock widget renderer')
     args = parser.parse_args()
+    if args.widgets and not args.system_metal:
+        parser.error('--widgets requires --system-metal')
     built = ROOT / 'out/lemonade-metal'
-    output = ROOT / ('out/lemonade-metal-system' if args.system_metal else 'out/lemonade-metal')
+    output = ROOT / ('out/lemonade-metal-widgets' if args.widgets else 'out/lemonade-metal-system' if args.system_metal else 'out/lemonade-metal')
     output.mkdir(exist_ok=True)
     record = json.loads((built / 'build.json').read_text())
     if record.get('arch') != 'arm64' or record.get('profile') != 'metal-baseline-v1':
@@ -54,6 +102,10 @@ def main():
     changes['lib/RedwoodMetal.bundle'] = (0o40755, 0, 0, b'')
     jobs = ROOT / ('common/devices/lemonade-metal-system.rc.jobs' if args.system_metal else 'common/devices/lemonade-metal.rc.jobs')
     changes['etc/rc.jobs'] = (0o100644, 0, 0, jobs.read_bytes())
+    widget_record = None
+    if args.widgets:
+        additions, widget_record = widget_services()
+        changes.update(additions)
     if args.system_metal:
         mode, uid, gid, rc = before['etc/rc']
         marker = b'exec /sbin/launchd.ios'
@@ -89,12 +141,14 @@ def main():
         shutil.copy2(candidate, output / 'root.apfs')
     if args.system_metal:
         shutil.copy2(built / 'build.json', output / 'build.json')
-    report = {'device': 'lemonade', 'profile': 'metal-system-v1' if args.system_metal else record['profile'],
+    report = {'device': 'lemonade', 'profile': 'metal-widgets-v1' if args.widgets else 'metal-system-v1' if args.system_metal else record['profile'],
               'base_root_sha256': original_hash, 'sha256': digest(output / 'root.apfs'),
               'bytes': (output / 'root.apfs').stat().st_size,
               'build_receipt_sha256': digest(output / 'build.json'),
               'jobs_sha256': digest(jobs), 'network_private': False,
               'normal_root_unchanged': True, 'other_file_contents_and_modes_verified': True}
+    if widget_record:
+        report['widget_service'] = widget_record
     (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
 

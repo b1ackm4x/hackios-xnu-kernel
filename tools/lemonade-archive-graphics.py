@@ -17,11 +17,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('label')
     parser.add_argument('--system-metal', action='store_true')
+    parser.add_argument('--widgets', action='store_true')
     args = parser.parse_args()
+    if args.widgets and not args.system_metal:
+        parser.error('--widgets requires --system-metal')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', args.label):
         parser.error('Use a short lowercase archive label')
-    image_dir = ROOT / ('out/lemonade-metal-system' if args.system_metal else 'out/lemonade-metal')
-    profile = 'metal-system-v1' if args.system_metal else 'metal-baseline-v1'
+    image_dir = ROOT / ('out/lemonade-metal-widgets' if args.widgets else 'out/lemonade-metal-system' if args.system_metal else 'out/lemonade-metal')
+    profile = 'metal-widgets-v1' if args.widgets else 'metal-system-v1' if args.system_metal else 'metal-baseline-v1'
     jobs = ROOT / ('common/devices/lemonade-metal-system.rc.jobs' if args.system_metal else 'common/devices/lemonade-metal.rc.jobs')
     manifest = json.loads((image_dir / 'manifest.json').read_text())
     build = json.loads((image_dir / 'build.json').read_text())

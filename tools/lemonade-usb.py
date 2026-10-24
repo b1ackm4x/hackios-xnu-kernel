@@ -56,9 +56,11 @@ def verified_firmware_overlay(kernel_hash):
     return image, manifest, guard
 
 
-def verified_graphics_overlay(system=False):
-    folder = ROOT / ('out/lemonade-metal-system' if system else 'out/lemonade-metal')
-    profile = 'metal-system-v1' if system else 'metal-baseline-v1'
+def verified_graphics_overlay(system=False, widgets=False):
+    if widgets and not system:
+        raise SystemExit('Refusing: widget renderer requires system Metal')
+    folder = ROOT / ('out/lemonade-metal-widgets' if widgets else 'out/lemonade-metal-system' if system else 'out/lemonade-metal')
+    profile = 'metal-widgets-v1' if widgets else 'metal-system-v1' if system else 'metal-baseline-v1'
     jobs = 'common/devices/lemonade-metal-system.rc.jobs' if system else 'common/devices/lemonade-metal.rc.jobs'
     image = folder / 'root.apfs'
     record = json.loads((folder / 'manifest.json').read_text())
@@ -73,6 +75,13 @@ def verified_graphics_overlay(system=False):
             record.get('build_receipt_sha256') != digest(folder / 'build.json') or
             record.get('jobs_sha256') != digest(ROOT / jobs)):
         raise SystemExit('Refusing: graphics overlay differs from its verified build')
+    if widgets:
+        service = record.get('widget_service', {})
+        system_hash = json.loads((ROOT / 'local/lemonade/images.json').read_text())['userland/system.apfs']['sha256']
+        if (service.get('label') != 'com.apple.chronod' or service.get('system_sha256') != system_hash or
+                any(not re.fullmatch(r'[0-9a-f]{64}', service.get(k, '')) for k in
+                    ('stock_plist_sha256', 'program_sha256', 'job_sha256'))):
+            raise SystemExit('Refusing: widget service provenance is missing or mismatched')
     build = json.loads((folder / 'build.json').read_text())
     for relative, expected in build['sources'].items():
         if digest(ROOT / relative) != expected:
@@ -99,6 +108,7 @@ def main():
     parser.add_argument('--network-test', action='store_true', help='explicit RAM-only association/DHCP/traffic acceptance with a private current-network overlay')
     parser.add_argument('--metal-test', action='store_true', help='verified RAM-only Metal pixel and IOSurface diagnostic overlay')
     parser.add_argument('--metal-system', choices=('apps', 'desktop'), help='verified RAM-only system Metal discovery; desktop also selects Metal compositing')
+    parser.add_argument('--metal-widgets', action='store_true', help='separate verified widget renderer image; requires --metal-system desktop')
     parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2 (tested system default); does not imply complete family compliance')
     parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual additionally disables automatic refresh and triggers each transfer; all restore firmware state')
     parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual; default 64')
@@ -152,6 +162,8 @@ def main():
         parser.error('Choose process-local or system Metal testing')
     if args.metal_profile is not None and not args.metal_system:
         parser.error('--metal-profile requires --metal-system')
+    if args.metal_widgets and args.metal_system != 'desktop':
+        parser.error('--metal-widgets requires --metal-system desktop')
     if args.metal_system and args.metal_profile is None:
         args.metal_profile = 1  # SpringBoard/MPS require the tested Apple2 table.
     if (args.metal_test or args.metal_system) and (args.action != 'run' or args.kernel != 'built' or not args.gpu or
@@ -415,7 +427,7 @@ def main():
             extra_images = [f'ramdisk={firmware_overlay}']
         graphics_record = None
         if args.metal_test or args.metal_system:
-            graphics_overlay, graphics_record = verified_graphics_overlay(bool(args.metal_system))
+            graphics_overlay, graphics_record = verified_graphics_overlay(bool(args.metal_system), args.metal_widgets)
             extra_images = [f'ramdisk={graphics_overlay}']
         command(["python3", str(ROOT / "xnuloader/mkpayload.py"), "-o", str(payload),
                  f"kernel={kernel}", *extra_images, "--cmdline", cmdline], timeout=30)
@@ -437,6 +449,7 @@ def main():
         record['network_test'] = args.network_test
         record['metal_test'] = args.metal_test
         record['metal_system'] = args.metal_system
+        record['metal_widgets'] = args.metal_widgets
         record['metal_profile'] = args.metal_profile
         record['display'] = args.display
         record['display_fences'] = args.display_fences
