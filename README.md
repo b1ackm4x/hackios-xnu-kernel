@@ -6,6 +6,7 @@
 > [b1ackm4x/hackios-xnu-kernel](https://github.com/b1ackm4x/hackios-xnu-kernel) and
 > [b1ackm4x/hackios-xnu-userland](https://github.com/b1ackm4x/hackios-xnu-userland).
 > Start with [repository workflow](docs/REPOSITORY.md), [OnePlus 9 bring-up and measured limits](docs/LEMONADE.md),
+> the [clean runtime base and release status](docs/LEMONADE-BASE.md),
 > the [community research and daily-use roadmap](docs/DAILY-USE-ROADMAP.md),
 > and the [OnePlus 9 Wi-Fi port status](docs/WIFI-LEMONADE.md).
 > The upstream feature matrix below describes redwood/QEMU, not the capabilities of this port.

@@ -1,5 +1,7 @@
 # OnePlus 9 / HackiOS bring-up
 
+现阶段运行包的组成、去除测试负载的启动流程及验收状态见 [日常运行 base](LEMONADE-BASE.md)。
+
 2026-10-24 图形增量见 [Metal 与硬件刷新实机验收](LEMONADE-DISPLAY.md)：包含光栅/复制兼容修复、TE 硬件通知、DPU 独立双缓冲与命令模式各 1,000 次实机切换、中途退出恢复、CPU 复制的生产者 release fence 及当前性能边界。
 
 当前阶段状态（2026-10-24）：DPU 独立双缓冲与命令模式各 1,000 次切换、定时中断恢复

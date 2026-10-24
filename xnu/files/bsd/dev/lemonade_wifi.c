@@ -1704,14 +1704,20 @@ void lemonade_wifi_init(void) {
         }
     }
     if (mode >= 2) {
-        unsigned touch = 0, gpu = 0, cpu = 0;
+        unsigned touch = 0, gpu = 0, cpu = 0, runtime = 0;
         PE_parse_boot_argn("touchscreen", &touch, sizeof(touch));
         PE_parse_boot_argn("gpu", &gpu, sizeof(gpu));
         PE_parse_boot_argn("cpufreq", &cpu, sizeof(cpu));
-        if (touch || gpu || cpu) {
+        PE_parse_boot_argn("lemonade_runtime", &runtime, sizeof(runtime));
+        /* Component probes retain their isolation requirement. Only the full
+         * station lifecycle in the explicit integrated runtime may coexist
+         * with graphics and input; it still requires the DMA guard above. */
+        if ((touch || gpu || cpu) && !(mode == 24 && runtime == 1)) {
             redwood_tl("wifi-lemonade: power probe refused alongside touch/GPU/CPU-policy work\n");
             return;
         }
+        if (mode == 24 && runtime == 1)
+            redwood_tl("wifi-lemonade: integrated station runtime enabled\n");
     }
     redwood_tl("wifi-lemonade: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
