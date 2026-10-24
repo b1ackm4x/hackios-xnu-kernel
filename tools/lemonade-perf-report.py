@@ -81,10 +81,14 @@ def inspect(log, gesture_limit=None):
                            intervals=stats(gaps), fps=round(len(gaps)*1e6/sum(gaps), 2) if gaps else None))
     stages = {name: stats([f[name] for f in active_frames.values() if f[name] is not None])
               for name in ('draw', 'queue_and_gpu', 'copy')}
+    direct = manifest.get('display') == 'direct'
+    if direct:
+        stages['present_and_wait'] = stages.pop('copy')
     text = '\n'.join(path.read_text(errors='replace') for path in paths)
     temperatures = sorted(set(tuple(map(float, m)) for m in re.findall(r"sensors read ([\d.]+) and ([\d.]+) degrees", text)))
     return dict(log=str(log), log_sha256=hashlib.sha256(log.read_bytes()).hexdigest(),
-                measurement='framebuffer completion within touch-down to touch-up + 600 ms; no gaps discarded',
+                measurement=('display-driver completion including command wait and scoped CPU fallbacks' if direct else 'framebuffer completion') +
+                            ' within touch-down to touch-up + 600 ms; no gaps discarded',
                 gestures=report, total_gestures=len(starts), analyzed_gestures=len(report), total_frames=len(frames),
                 active_intervals=stats(all_gaps),
                 finger_down_intervals=stats(drag_gaps),

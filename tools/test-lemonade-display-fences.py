@@ -72,6 +72,9 @@ static void IOLockLock(IOLock *l) { assert(!l->held); l->held = true; }
 static void IOLockUnlock(IOLock *l) { assert(l->held); l->held = false; }
 static void IOLockWakeup(IOLock *l, void *, bool one) { assert(l->held); wakes++; allWoken = !one; }
 struct EndPresenter {};
+static bool showSafe = true;
+static void IOLog(const char *, ...) {}
+static void IOSleep(unsigned) { throw EndPresenter{}; }
 static void IOLockSleep(IOLock *l, void *, int) { IOLockUnlock(l); throw EndPresenter{}; }
 static int IOLockSleepDeadline(IOLock *l, void *, uint64_t deadline, int) {
     assert(l->held); sleeps++; lastDeadline = deadline; IOLockUnlock(l);
@@ -80,7 +83,12 @@ static int IOLockSleepDeadline(IOLock *l, void *, uint64_t deadline, int) {
     else { now = deadline; result = THREAD_TIMED_OUT; }
     IOLockLock(l); return result;
 }
-struct MiniIOSurface { unsigned id, refs; };
+struct MiniIOSurface { unsigned id, refs, drawn; };
+static IOLock *gGPULock;
+static bool hostGPUReady, hostGPUComplete;
+static unsigned hostGPUWaits;
+static bool redwood_gpu_ready() { return hostGPUReady; }
+static bool gpuWait(uint32_t, uint64_t) { assert(gGPULock && gGPULock->held); hostGPUWaits++; return hostGPUComplete; }
 static MiniIOSurface surface[8];
 static MiniIOSurface *MiniIOSurfaceCopy(unsigned id) { assert(id < 8); copies++; surface[id].refs++; return &surface[id]; }
 static void MiniIOSurfaceDrop(MiniIOSurface *s) { assert(s->refs); if(onDrop)onDrop(); s->refs--; drops++; }
@@ -102,7 +110,7 @@ public:
     void finishSwap();
     void present(const uint8_t *);
     void presenter();
-    void show(const uint8_t *, MiniIOSurface **);
+    bool show(const uint8_t *, MiniIOSurface **);
 };
 class IOMobileFramebufferUserClient {
 public:
@@ -122,7 +130,7 @@ static void expectBusy(IOMobileFramebuffer &f, unsigned id) {
     for (unsigned flags : {0x80000000u, 0x80000001u, 0x80000002u})
         assert(f.waitSwap(id, flags, 0, &open) == kIOReturnBusy);
 }
-void IOMobileFramebuffer::show(const uint8_t *swap, MiniIOSurface **surfaces) {
+bool IOMobileFramebuffer::show(const uint8_t *swap, MiniIOSurface **surfaces) {
     unsigned id = swapWord(swap, SWAP_ID);
     expectBusy(*this, id);
     assert(surfaces[0] && surfaces[0]->refs);
@@ -133,6 +141,7 @@ void IOMobileFramebuffer::show(const uint8_t *swap, MiniIOSurface **surfaces) {
     IOLockUnlock(fSwapLock);
     expectBusy(*this, id); // the queue no longer contains this frame
     shown++;
+    return showSafe;
 }
 static void queue(IOMobileFramebuffer &f, unsigned id, unsigned sid = 1) {
     uint8_t swap[SWAP_SIZE] = {};
@@ -144,6 +153,18 @@ static void runPresenter(IOMobileFramebuffer &f) {
     try { f.presenter(); assert(false); } catch (const EndPresenter &) {}
 }
 int main() {
+    IOLock gpuLock;
+    MiniIOSurface produced{};
+    assert(MiniIOSurfaceDrawn(&produced,500));
+    produced.drawn=17;
+    assert(!MiniIOSurfaceDrawn(&produced,500));
+    gGPULock=&gpuLock;
+    assert(!MiniIOSurfaceDrawn(&produced,500) && hostGPUWaits==0);
+    hostGPUReady=true;
+    assert(!MiniIOSurfaceDrawn(&produced,500) && hostGPUWaits==1 && !gpuLock.held);
+    hostGPUComplete=true;
+    assert(MiniIOSurfaceDrawn(&produced,500) && hostGPUWaits==2 && !gpuLock.held);
+    puts("PASS actual GPU readiness requires completed work and refuses an unavailable producer");
     IOLock lock, clientLock;
     IOMobileFramebuffer f{}; f.fSwapLock = &lock;
     IOMobileFramebufferUserClient client{}; client.fOwner = &f; client.fLock = &clientLock;
@@ -207,6 +228,14 @@ int main() {
     runPresenter(f);
     assert(copies==drops);
     puts("PASS interruption and actual clientClose wake waits without releasing active sources");
+    showSafe=false;
+    queue(f,25);
+    unsigned oldDrops=drops, oldKept=kept;
+    runPresenter(f);
+    assert(f.fReadingSwap && f.fReadingSwapID==25 && surface[1].refs==1);
+    assert(drops==oldDrops && kept==oldKept);
+    expectBusy(f,25);
+    puts("PASS failed hardware completion retains the actual source and withholds producer release");
     return 0;
 }
 '''
@@ -217,7 +246,8 @@ def main():
     names = ['swapWord', *(f'IOMobileFramebuffer::{n}' for n in
              ('swapPending', 'waitSwap', 'finishSwap', 'present', 'presenter')),
              'IOMobileFramebufferUserClient::clientClose']
-    generated = PRELUDE + '\n' + '\n'.join(method(source, n) for n in names) + TESTS
+    gpu = (ROOT / 'xnu/files/iokit/Kernel/RedwoodGPU.cpp').read_text()
+    generated = PRELUDE + '\n' + method(gpu, 'MiniIOSurfaceDrawn') + '\n' + '\n'.join(method(source, n) for n in names) + TESTS
     with tempfile.TemporaryDirectory(prefix='lemonade-display-fences-') as temp:
         cpp, binary = Path(temp) / 'test.cpp', Path(temp) / 'test'
         cpp.write_text(generated)

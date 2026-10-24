@@ -29,7 +29,7 @@
 #include <sys/lemonade_display.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
-extern void loader_log_putc(char);
+extern void loader_log_line(const char *);
 extern vm_offset_t pe_arm_get_soc_base_phys(void);
 extern kern_return_t gic_v3_spi_attach(uint32_t, bool, void (*)(void *, uint32_t), void *);
 extern void gic_v3_spi_mask(uint32_t);
@@ -65,6 +65,8 @@ static struct {
 static SIMPLE_LOCK_DECLARE(vsync_lock, 0);
 static thread_call_t vsync_clients[16];
 static uint32_t present_count, present_late, present_dropped;
+static bool direct_requested, direct_failed;
+static uint32_t direct_count, direct_fallbacks, direct_pages, direct_pitch;
 static void display_map_restore(void);
 /* Return can interrupt the probe's thread on the same CPU. Other CPUs have
  * already been stopped by loader_return(). Keep each register transaction and
@@ -96,7 +98,7 @@ tell(const char *format, ...)
 	va_start(list, format);
 	vsnprintf(line, sizeof(line), format, list);
 	va_end(list);
-	for (const char *c = line; *c; c++) loader_log_putc(*c);
+	loader_log_line(line);
 	if (ml_get_interrupts_enabled()) printf("%s", line);
 }
 
@@ -356,6 +358,8 @@ lemonade_display_quiesce(void)
 	}
 	os_atomic_store(&display_stopping, true, release);
 	display_restoring = true;
+	if (direct_requested) tell("lemonade-display: direct final completed=%u fallbacks=%u failed=%u mapped_pages=%u\n",
+	    direct_count, direct_fallbacks, direct_failed, direct_pages);
 	display_map_restore();
 	irq_stop(false);
 	for (int i = 1; i >= 0; i--) {
@@ -485,6 +489,7 @@ static struct {
 	uint32_t intf_misr, intf_reference[2];
 	uint32_t scale_pattern;
 	bool active, misr_active, flip_active, manual_active, scale_active, intf_misr_active;
+	bool direct_active, restore_proven;
 } display_map;
 
 static uint64_t *
@@ -602,6 +607,7 @@ display_map_restore(void)
 		tell("lemonade-display: source restore pixels=%u address=%u/%u flush=%#x\n", pixels,
 		    rd(display_map.mdp, 0x4014) == display_map.source[0],
 		    rd(display_map.mdp, 0x6014) == display_map.source[1], rd(display_map.mdp, 0x15018));
+		display_map.restore_proven = pixels;
 		wr(display_map.mdp + 0x15018, display_map.flush);
 		display_map.flip_active = false;
 	}
@@ -650,6 +656,7 @@ display_map_restore(void)
 		    rd(control, 0) & 0x200, display_map.intf_misr & 0x200);
 		display_map.intf_misr_active = false;
 	}
+	display_map.direct_active = false;
 	/* Keep the small table allocation until the timed kernel return. No live
 	 * translation can ever reference freed kernel pages during this probe. */
 restored:
@@ -769,11 +776,11 @@ display_manual_sample(uint32_t value[2], uint32_t first)
 }
 
 static bool
-display_scale_configure(void)
+display_scale_configure(uint32_t pitch)
 {
 	vm_offset_t mdp = display_map.mdp;
 	bool enabled;
-	if (!display_transaction_begin(&enabled)) return false;
+	if ((pitch != 4544 && pitch != 4608) || !display_transaction_begin(&enabled)) return false;
 	for (unsigned n = 0; n < 2; n++)
 		for (unsigned r = 0; r < DISPLAY_SCALE_REGS; r++)
 			display_map.scale_saved[n][r] = rd(mdp + 0x4000 + n * 0x2000, display_scale_offsets[r]);
@@ -783,7 +790,7 @@ display_scale_configure(void)
 	for (unsigned n = 0; n < 2; n++) {
 		vm_offset_t pipe = mdp + 0x4000 + n * 0x2000, scaler = pipe + 0xa00;
 		uint32_t phase_x = (540u * n * step_x + center_x) & 0x1fffff;
-		wr(pipe, (2436u << 16) | 563u); wr(pipe + 8, n * 562u); wr(pipe + 0x24, DISPLAY_SCALE_PITCH);
+		wr(pipe, (2436u << 16) | 563u); wr(pipe + 8, n * 562u); wr(pipe + 0x24, pitch);
 		for (unsigned c = 0; c < 3; c++) {
 			wr(pipe + 0x100 + c * 0x10, 0); wr(pipe + 0x104 + c * 0x10, 0);
 			wr(pipe + 0x108 + c * 0x10, (2436u << 16) | 563u);
@@ -807,10 +814,10 @@ display_scale_configure(void)
 		    n, rd(pipe, 0), rd(pipe, 8), rd(pipe, 0x24), rd(pipe, 0xa04),
 		    rd(pipe, 0xa10), rd(pipe, 0xa14), rd(pipe, 0xa20), rd(pipe, 0xa90));
 		valid &= rd(pipe, 0) == ((2436u << 16) | 563u) && rd(pipe, 8) == n * 562u &&
-		    rd(pipe, 0x24) == DISPLAY_SCALE_PITCH && rd(pipe, 0xa04) == 0x20034401;
+		    rd(pipe, 0x24) == pitch && rd(pipe, 0xa04) == 0x20034401;
 	}
-	tell("lemonade-display: scaler configured=%u source=1125x2436 pitch=%u output=1080x2400 overlap=1 step=%u/%u phase=%u/%u/%u pattern=%u padding=poisoned\n",
-	    valid, DISPLAY_SCALE_PITCH, step_x, step_y, center_x, (540u * step_x + center_x) & 0x1fffff, center_y, display_map.scale_pattern);
+	tell("lemonade-display: scaler configured=%u source=1125x2436 pitch=%u output=1080x2400 overlap=1 step=%u/%u phase=%u/%u/%u pattern=%u padding=%s\n",
+	    valid, pitch, step_x, step_y, center_x, (540u * step_x + center_x) & 0x1fffff, center_y, display_map.scale_pattern, direct_requested ? "surface" : "poisoned");
 	ml_set_interrupts_enabled(enabled);
 	return valid && !os_atomic_load(&display_stopping, acquire);
 }
@@ -880,7 +887,7 @@ display_scale_begin(void)
 			__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
 	}
 	__asm__ volatile("dsb sy" ::: "memory");
-	return display_scale_configure();
+	return display_scale_configure(DISPLAY_SCALE_PITCH);
 }
 
 static bool
@@ -899,22 +906,18 @@ display_misr_sample(uint32_t value[2])
 	return true;
 }
 
-static void
-display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual, bool scale)
+static bool
+display_mapping_prepare(vm_offset_t mdp)
 {
-	if (os_atomic_load(&display_stopping, acquire)) return;
-	uint32_t grid = 0;
-	PE_parse_boot_argn("lemonade_display_pattern", &grid, sizeof(grid));
-	if (grid > 3 || (grid && !scale)) return;
-	display_map.scale_pattern = grid;
 	display_map.mdp = mdp;
 	display_map.smmu = ml_io_map(0x15000000, 0x100000);
-	if (!display_map.smmu) return;
+	if (!display_map.smmu) return false;
 	vm_offset_t smmu = display_map.smmu, cb = smmu + 0x85000;
 	display_map.cb = cb;
 	/* The exact observed firmware state is required: one MDSS match covering
 	 * all four nonsecure streams, AArch64 stage-1 context, translation disabled.
-	 * The UI and GPU have not started yet. Other contexts are never modified. */
+	 * Other contexts are never modified. The desktop calls this only after
+	 * disabling console writes, with its source surface already held. */
 	if ((rd(smmu, 0) & 9) || rd(smmu, 0x20) != 0x4c017e59 || rd(smmu, 0x24) != 0x6000004b ||
 	    rd(smmu, 0x818) != 0x84020820 || rd(smmu, 0xc18) != 5 ||
 	    rd(smmu, 0x1014) != 0x1f000 || rd(smmu, 0x1814) != 1 ||
@@ -923,36 +926,228 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual,
 	    rd(mdp, 0x4024) != 4320 || rd(mdp, 0x6024) != 4320 ||
 	    rd(mdp, 0x4000) != 0x960021c || rd(mdp, 0x6000) != 0x960021c ||
 	    rd(mdp, 0x150fc) != 0x30000 || rd(mdp, 0x150e8) != 3 || rd(mdp, 0x150f4) != 2) {
-		tell("lemonade-display: mapping refused: firmware preflight differs\n"); return;
+		tell("lemonade-display: mapping refused: firmware preflight differs\n"); return false;
 	}
 	static const uint32_t expected[9] = {0xe0, 0x60, 0, 0, 0, 0, 0, 0, 0};
 	for (unsigned i = 0; i < 9; i++) {
 		display_map.saved[i] = rd(cb, display_cb_offsets[i]);
 		if (display_map.saved[i] != expected[i]) {
-			tell("lemonade-display: mapping refused: context register %#x differs\n", display_cb_offsets[i]); return;
+			tell("lemonade-display: mapping refused: context register %#x differs\n", display_cb_offsets[i]); return false;
 		}
 	}
 	for (unsigned i = 0; i < 2; i++) {
 		display_map.misr[i] = rd(mdp, 0x44310 + 0x1000 * i);
-		if (display_map.misr[i] & 0x100) { tell("lemonade-display: MISR already owned; refused\n"); return; }
+		if (display_map.misr[i] & 0x100) { tell("lemonade-display: MISR already owned; refused\n"); return false; }
 	}
-	if (kmem_alloc(kernel_map, &display_map.tables, round_page(DISPLAY_TABLE_BYTES),
-	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return;
+	if (!display_map.tables && kmem_alloc(kernel_map, &display_map.tables, round_page(DISPLAY_TABLE_BYTES),
+	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return false;
+	bzero((void *)display_map.tables, DISPLAY_TABLE_BYTES);
 	display_map.table_pages = 1;
+	display_map.restore_proven = true;
 	unsigned size = (DISPLAY_GOP_BYTES + 4095) & ~4095u;
 	for (unsigned offset = 0; offset < size; offset += 4096) {
 		uint64_t *entry = display_leaf(DISPLAY_GOP + offset, true);
-		if (!entry || *entry) { tell("lemonade-display: GOP table allocation failed\n"); return; }
+		if (!entry || *entry) { tell("lemonade-display: GOP table allocation failed\n"); return false; }
 		/* Read-only for both privilege levels, normal noncached, outer shareable. */
 		*entry = (DISPLAY_GOP + offset) | 3ull | (3ull << 6) | (2ull << 8) |
 		    (1ull << 10) | (1ull << 11) | (1ull << 53) | (1ull << 54);
 	}
 	for (unsigned offset = 0; offset < size; offset += 4096) {
 		uint64_t *entry = display_leaf(DISPLAY_GOP + offset, false);
-		if (!entry || (*entry & DISPLAY_PTE_ADDRESS) != DISPLAY_GOP + offset) return;
+		if (!entry || (*entry & DISPLAY_PTE_ADDRESS) != DISPLAY_GOP + offset) return false;
 	}
 	uint64_t *before = display_leaf(DISPLAY_GOP - 4096, false), *after = display_leaf(DISPLAY_GOP + size, false);
-	if ((before && *before) || (after && *after)) return;
+	if ((before && *before) || (after && *after)) return false;
+	return true;
+}
+
+/* A single presenter owns this backend. Its IOSurface is pinned by the caller
+ * until this synchronous call proves the command transfer finished and removes
+ * every temporary leaf. No source allocation, pixel copy, panel command, or
+ * firmware stream assignment is made here. */
+bool
+lemonade_display_direct_requested(void)
+{
+	return direct_requested && !os_atomic_load(&display_stopping, acquire);
+}
+
+static void
+display_clean_tables(void)
+{
+	for (vm_offset_t line = display_map.tables; line < display_map.tables + DISPLAY_TABLE_BYTES; line += 64)
+		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Zero means the CPU path is safe. A negative result requires the caller to
+ * retain the current IOSurface and withhold producer release until kernel exit. */
+int
+lemonade_display_direct_fallback(void)
+{
+	if (os_atomic_load(&display_stopping, acquire)) return -1;
+	if (!display_map.direct_active && !display_map.active && !display_map.flip_active &&
+	    !display_map.misr_active && !display_map.intf_misr_active) return 0;
+	display_map_restore();
+	direct_pages = 0;
+	direct_fallbacks++;
+	tell("lemonade-display: direct fallback count=%u restored=%u\n", direct_fallbacks, display_map.restore_proven);
+	return display_map.restore_proven ? 0 : -1;
+}
+
+static bool
+display_direct_begin(uint32_t pitch)
+{
+	vm_offset_t mdp = irq.mdp;
+	if (!display_mapping_prepare(mdp)) return false;
+	display_clean_tables();
+	bool enabled;
+	if (!display_transaction_begin(&enabled)) return false;
+	display_map.misr_active = true;
+	for (unsigned n = 0; n < 2; n++) {
+		wr(mdp + 0x44310 + n * 0x1000, 1u << 10);
+		wr(mdp + 0x44310 + n * 0x1000, 0x80000101);
+	}
+	ml_set_interrupts_enabled(enabled);
+	uint32_t baseline[2], sample[2];
+	if (!display_misr_sample(baseline) || !display_misr_sample(sample) ||
+	    baseline[0] != sample[0] || baseline[1] != sample[1]) return false;
+	tell("lemonade-display: direct GOP baseline=%#x/%#x\n", baseline[0], baseline[1]);
+	if (!display_map_configure(baseline)) return false;
+	struct lemonade_present_window window;
+	if (lemonade_display_present_begin(&window) != 1 || !display_transaction_begin(&enabled)) return false;
+	wr(display_map.cb, 0x1127);
+	ml_set_interrupts_enabled(enabled);
+	if (!display_misr_sample(sample) || sample[0] != baseline[0] || sample[1] != baseline[1] ||
+	    (rd(display_map.cb, 0x58) & DISPLAY_FSR_FAULT) || rd(display_map.smmu, 0x48) ||
+	    (rd(mdp, 0x14) & (1u << 26))) return false;
+	/* Require exactly the native BGRA split mode used in the scaler proof. */
+	for (unsigned n = 0; n < 2; n++) {
+		vm_offset_t pipe = mdp + 0x4000 + n * 0x2000;
+		if (rd(pipe, 0xa00) != 0x3000 || rd(pipe, 0xa04) != 0 || rd(pipe, 0x30) != 0x237ff ||
+		    rd(pipe, 0x34) != 0x3020001 || rd(pipe, 0x38) != 0x80000000 ||
+		    rd(pipe, 8) != n * 540 || rd(pipe, 0xc) != 0x960021c || rd(pipe, 0x10) != n * 540) return false;
+	}
+	if (!display_transaction_begin(&enabled)) return false;
+	display_map.source[0] = rd(mdp, 0x4014); display_map.source[1] = rd(mdp, 0x6014);
+	display_map.flush = rd(mdp, 0x15018);
+	display_map.flip_active = true;
+	display_map.restore_proven = false;
+	ml_set_interrupts_enabled(enabled);
+	if (!display_manual_begin() || !display_manual_idle() || !display_scale_configure(pitch)) return false;
+	if (!display_transaction_begin(&enabled)) return false;
+	uint32_t intf_control = rd(mdp, INTF1_OFFSET + 0x180);
+	if (intf_control & 0x100) { ml_set_interrupts_enabled(enabled); return false; }
+	display_map.intf_misr = intf_control;
+	display_map.intf_misr_active = true;
+	wr(mdp + INTF1_OFFSET + 0x180, 1u << 10);
+	wr(mdp + INTF1_OFFSET + 0x180, 0x81000101);
+	display_map.direct_active = true;
+	direct_pitch = pitch;
+	ml_set_interrupts_enabled(enabled);
+	tell("lemonade-display: direct acquired source=1125x2436 pitch=%u output=1080x2400\n", pitch);
+	return !os_atomic_load(&display_stopping, acquire);
+}
+
+static bool
+display_direct_unmap(void)
+{
+	/* The command engine is idle and automatic transfers remain disabled. */
+	if (rd(display_map.mdp, INTF1_OFFSET + 0x2b4) != 1) return false;
+	for (unsigned n = 0; n < direct_pages; n++) {
+		uint64_t *entry = display_leaf(DISPLAY_BUFFER_IOVA(0) + n * 4096, false);
+		if (!entry) return false;
+		*entry = 0;
+	}
+	display_clean_tables();
+	if (!display_tlb_sync()) return false;
+	direct_pages = 0;
+	return !os_atomic_load(&display_stopping, acquire);
+}
+
+int
+lemonade_display_direct_present(const void *pixels, uint32_t available, uint32_t pitch, uint32_t sid, uint32_t swap)
+{
+	if (!lemonade_display_direct_requested() || direct_failed) return 0;
+	vm_offset_t address = (vm_offset_t)pixels;
+	uint32_t bytes = pitch * 2436u;
+	if (!address || (address & 4095) || (pitch != 4544 && pitch != 4608) || available < bytes ||
+	    address + bytes < address) return lemonade_display_direct_fallback();
+	uint64_t began = mach_absolute_time();
+	if (!display_map.direct_active && !display_direct_begin(pitch)) goto failed;
+	vm_offset_t mdp = display_map.mdp;
+	if (direct_pages || rd(mdp, INTF1_OFFSET + 0x2b4) != 1) goto failed;
+	unsigned size = (bytes + 4095) & ~4095u;
+	/* The caller's descriptor is prepared and held; map noncontiguous physical
+	 * 4 KiB pages read-only, with unmapped guards on both sides. */
+	for (unsigned offset = 0; offset < size; offset += 4096) {
+		uint64_t physical = kvtophys(address + offset);
+		uint64_t *entry = display_leaf(DISPLAY_BUFFER_IOVA(0) + offset, true);
+		if (!physical || physical >> 36 || (physical & 4095) || !entry || *entry) goto failed;
+		*entry = physical | 3ull | (3ull << 6) | (2ull << 8) |
+		    (1ull << 10) | (1ull << 11) | (1ull << 53) | (1ull << 54);
+		direct_pages++;
+	}
+	for (unsigned offset = 0; offset < size; offset += 4096) {
+		uint64_t *entry = display_leaf(DISPLAY_BUFFER_IOVA(0) + offset, false);
+		if (!entry || (*entry & DISPLAY_PTE_ADDRESS) != kvtophys(address + offset)) goto failed;
+	}
+	uint64_t *before = display_leaf(DISPLAY_BUFFER_IOVA(0) - 4096, false);
+	uint64_t *after = display_leaf(DISPLAY_BUFFER_IOVA(0) + size, false);
+	if ((before && *before) || (after && *after)) goto failed;
+	for (vm_offset_t line = address; line < address + bytes; line += 64)
+		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+	display_clean_tables();
+	if (!display_tlb_sync()) goto failed;
+	uint64_t mapped_at = mach_absolute_time();
+	/* A command transfer is armed as soon as its source is ready; external TE
+	 * gates the actual scan. The GOP CPU-copy window would wait an extra TE
+	 * here. The prior synchronous transfer is complete and autorefresh is off. */
+	bool enabled;
+	if (!display_transaction_begin(&enabled)) return -1;
+	if (direct_pitch != pitch) {
+		wr(mdp + 0x4024, pitch); wr(mdp + 0x6024, pitch);
+		direct_pitch = pitch;
+	}
+	bool valid = rd(mdp, 0x4024) == pitch && rd(mdp, 0x6024) == pitch;
+	ml_set_interrupts_enabled(enabled);
+	if (!valid) goto failed;
+	uint32_t first = rd(mdp, INTF1_OFFSET + 0xac), sample[2];
+	if (!display_flip_buffer(0) || !display_manual_sample(sample, first) ||
+	    (rd(display_map.cb, 0x58) & DISPLAY_FSR_FAULT) || rd(display_map.smmu, 0x48) ||
+	    (rd(mdp, 0x14) & (1u << 26)) || (rd(mdp, INTF1_OFFSET + 0x180) & 0x300) != 0x300 ||
+	    rd(mdp, 0x4014) != DISPLAY_BUFFER_IOVA(0) || rd(mdp, 0x6014) != DISPLAY_BUFFER_IOVA(0)) goto failed;
+	uint32_t crc = rd(mdp, INTF1_OFFSET + 0x184), pages = direct_pages;
+	uint64_t transferred_at = mach_absolute_time();
+	if (!display_direct_unmap()) goto failed;
+	direct_count++;
+	uint64_t ns, map_ns, dma_ns, retire_ns, finished = mach_absolute_time();
+	absolutetime_to_nanoseconds(finished - began, &ns);
+	absolutetime_to_nanoseconds(mapped_at - began, &map_ns);
+	absolutetime_to_nanoseconds(transferred_at - mapped_at, &dma_ns);
+	absolutetime_to_nanoseconds(finished - transferred_at, &retire_ns);
+	if (direct_count <= 8 || !(direct_count % 120))
+		tell("lemonade-display: direct swap=%u surface=%u count=%u pitch=%u pages=%u frame_delta=1 done=0x100 intf=%#x unmapped=1 us=%llu map_us=%llu dma_us=%llu retire_us=%llu\n",
+		    swap, sid, direct_count, pitch, pages, crc, ns / 1000, map_ns / 1000, dma_ns / 1000, retire_ns / 1000);
+	return 1;
+failed:
+	if (os_atomic_load(&display_stopping, acquire)) return -1;
+	direct_failed = true;
+	tell("lemonade-display: direct failed count=%u pages=%u; restoring before release\n", direct_count, direct_pages);
+	return lemonade_display_direct_fallback();
+}
+
+static void
+display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual, bool scale)
+{
+	if (os_atomic_load(&display_stopping, acquire)) return;
+	uint32_t grid = 0;
+	PE_parse_boot_argn("lemonade_display_pattern", &grid, sizeof(grid));
+	if (grid > 3 || (grid && !scale)) return;
+	display_map.scale_pattern = grid;
+	if (!display_mapping_prepare(mdp)) return;
+	vm_offset_t smmu = display_map.smmu, cb = display_map.cb;
+	unsigned size = (DISPLAY_GOP_BYTES + 4095) & ~4095u;
+	uint64_t *before, *after;
 	unsigned identity_size = size;
 	if (scale) size = (DISPLAY_SCALE_BYTES + 4095) & ~4095u;
 	if (flip) for (unsigned n = 0; n < 2; n++) {
@@ -1083,7 +1278,7 @@ lemonade_display_init(void)
 	const void *value;
 	unsigned length;
 	if (!PE_parse_boot_argn("lemonade_display", &mode, sizeof(mode)) || !mode) return;
-	if (mode > 9 || SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	if (mode > 10 || SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
 	    SecureDTGetProperty(entry, "device_type", &value, &length) != kSuccess ||
 	    length != sizeof("lemonade") || memcmp(value, "lemonade", length)) {
 		tell("lemonade-display: refused: unsupported platform or mode\n");
@@ -1149,6 +1344,15 @@ lemonade_display_init(void)
 			for (unsigned i = 0; i < sizeof(ext_regs) / sizeof(ext_regs[0]); i++)
 				report(mdp + pipes[n], block, "state", ext_regs[i]);
 		}
+	}
+	if (mode == 10) {
+		uint32_t fences = 0;
+		PE_parse_boot_argn("fb_fences", &fences, sizeof(fences));
+		if (fences != 1) { tell("lemonade-display: direct requires producer-release fences\n"); goto out; }
+		irq_probe(mdp, mdss, true);
+		direct_requested = irq.streaming && irq.acquired;
+		tell("lemonade-display: desktop direct requested=%u lazy=1\n", direct_requested);
+		goto out;
 	}
 	if (mode == 5) { display_smmu_survey(); goto out; }
 	if (mode >= 6 && mode <= 9) { display_mapping_probe(mdp, mdss, mode != 6, mode >= 8, mode == 9); goto out; }

@@ -232,7 +232,7 @@ AddressSanitizer / UndefinedBehaviorSanitizer 均通过。这只验证 CPU 执�
 实际 C 驱动的 9 组主机检查覆盖中断恢复、真实 INTF_MUX 高位以及拒绝错误 PP，
 AddressSanitizer / UndefinedBehaviorSanitizer 通过；USB 工具的 41 项检查通过。
 这仍是明确启用的独立缓冲实验。它建立了逐帧完成依据；桌面 CPU 复制路径的生产者复用同步见下节，
-两项结果尚未组成桌面直接扫描路径。
+这两项当时仍是独立验证；后续桌面接入和限制见文末的 IOSurface 直接显示章节。
 
 时序依据：[OnePlus SM8350 命令 encoder](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/oneplus/SM8350_R_11.0/techpack/display/msm/sde/sde_encoder_phys_cmd.c)、
 [INTF 和通道选择](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/oneplus/SM8350_R_11.0/techpack/display/msm/sde/sde_hw_intf.c)。
@@ -244,8 +244,8 @@ profile 1，并在运行记录中写入实际值；仍可显式选择 profile 0 
 和 4 项 CoreAnimation 检查全部通过，90 秒桌面运行正常返回；这不代表已全面满足
 Apple2 家族的全部能力。
 
-这仍是独立显示缓冲测试，尚未把桌面 IOSurface 直接送屏，也没有完成直接扫描所需的 release fence、
-1125×2436 到 1080×2400 的硬件缩放或多图层合成。MISR 是 DPU 内部输出检查，
+该阶段是独立显示缓冲测试。桌面 IOSurface、release fence 和指定几何的硬件缩放随后分别接入，
+见后续章节；多图层直接合成仍未完成。MISR 是 DPU 内部输出检查，
 不等于实际面板的光学测量。默认桌面继续使用此前验证的同步 CPU 复制路径。
 
 ```sh
@@ -455,10 +455,10 @@ python3 tools/lemonade-usb.py run --profile performance --metal-test --display s
 ## 尚未达到的边界
 
 系统所有应用的 Metal 兼容、深度 MSAA resolve、完整 texture view、heaps/events 和全部私有 SPI
-尚未全面验收。独立双缓冲的 DPU SMMU 读取及 CPU 复制的生产者 release fence 已通过上述有界测试；
-独立缓冲区的指定缩放网格已有上节证据，但桌面直接扫描及其完成通知、任意图像缩放、
-Wi-Fi 与 GPU 联合运行、120 Hz 模式及长时间温控也不能据本页结果宣称完成。
-当前安全窗口内复制仍有约 3 ms 成本，动画绘制也有长帧；GPU 可用并不意味着所有刷新瓶颈消失。
+尚未全面验收。单层全屏 IOSurface 的 DPU 直接显示、指定缩放几何和完成后释放已取得文末的
+有界证据；任意尺寸/格式、多层硬件合成、全部滤波质量、Wi-Fi 与 GPU 联合运行、120 Hz
+及长时间温控仍未完成。默认 CPU 复制路径有约 3 ms 复制成本；显式 direct 路径取消了
+整帧 CPU 缩放复制，但仍有页表更新和轮询等待开销，动画也仍有长帧。
 
 系统 Metal 的多轮 85–90 秒运行在同步保护后未复现先前的 `fd6_vsc_update_sizes` 空 batch 崩溃。
 MPS Gaussian blur 的常量和脉冲图像均已通过；脉冲红通道能量 234，与 Apple M4 对照一致。
@@ -484,3 +484,73 @@ Metal 对照全部一致；本轮 90 秒记录 5,351 次 TE、634 次呈现，�
 精确 USB 身份、启动完成、原槽与锁状态相符；boot/vendor_boot/dtbo/vbmeta/xbl
 五个活动分区哈希均与原备份一致。root 可用，默认外网路由经 wlan0，三次受控 ping 成功。
 该记录早于后续 DPU 中断退出失败；不能用它声称失败后已经恢复 Android。
+
+## 实验性桌面 IOSurface 直接显示：有限范围已验收
+
+新增显式 `--display direct --display-fences`，对应 `lemonade_display=10 fb_fences=1`。
+仅接受单层、全屏 1125×2436 BGRA，行距为 4544 或桌面实际使用的 4608 字节。
+在关闭文字控制台后，才获取稳定 GOP 基线并接管手动命令传输；沿用前述已校验的
+QSEED 几何、固件 preload 和 context 5。每帧等待 GPU 完成，临时只读映射持有的
+IOSurface 非连续物理页，等待 PP0 完成且硬件计数恰增 1，撤销映射和同步 TLB 后
+才允许释放源。无法证明传输/恢复完成时，保留源并停止释放生产者。
+
+不支持的层布局先恢复 GOP，再使用既有 CPU 路径。普通 USB 截图仍读取 GOP，
+不能用于声称已捕获直接显示的桌面；源录制和接口校验需要单独标明。
+GPU 等待也修正了一处假成功：有未完成 fence 时，GPU 不可用或缺少 GPU 锁均返回失败，
+不能再把“GPU 不可用”当作“GPU 已完成”。实际 presenter 在显示安全性无法确认时保留
+源引用并停止生产者释放，直到该次 RAM 内核运行结束。
+
+最终内核 `66fc98e026a99d7ac63493fe1c2bb4461c1f5b656e0c28c88a2192f42d979ecd`
+（15,713,496 字节，20 个编译输入哈希）在 `1792804508-run-cp0.log` 的 60 秒运行中：
+
+- 950 次直接传输，4 次 CPU 回退呈现；954 次入队与 954 次源释放完全对应。
+- 1,884 次 Busy 与 1,210 次观察到释放之后的成功等待，未发现提前释放。
+- 每次直接成功都要求 PP0 完成、帧计数恰增 1、无地址转换故障/欠载，随后撤销映射并同步 TLB；
+  采样记录有 12 个不同接口签名，两个行距均实际使用。
+- 两次布局回退和定时结束均恢复原几何、GOP 实际像素、自动传输、上下文、测量控制、IRQ 与时钟。
+- 同次桌面通过 101 项 Metal、2 项 MPS、4 项 CoreAnimation 像素/缓冲检查。
+
+`lemonade-check-direct.py` 验证最终日志和全部实时日志哈希，检查真实启动参数、
+实际 scaler 回读、传输/释放顺序以及最终恢复。它要求已完成显示计数与释放记录完整对应；
+只允许结束时最后一个已完成源仍被持有。测试会拒绝缺失中间帧、过早释放、错误完成位、
+未撤销映射、故障、错误几何、伪造完成总数和未恢复的回退。
+主机实际 C 恢复测试 15 组、实际 GPU 等待/presenter 测试 8 组、USB 边界 47 项、
+直接显示证据反例 6 组均通过；C/C++ 执行检查启用 AddressSanitizer/UndefinedBehaviorSanitizer。
+
+最初套用 CPU 拷贝的等待窗口，会多等待一次 TE，常见间隔约 33 ms。改为源就绪后提交命令、
+由外部 TE 控制实际扫描，最终固定 11 个手势的中位间隔 16.518 ms，P95 32.979 ms，
+最大 165.046 ms，按手指按下期间计算 54.74 FPS，完整交互窗口 53.95 FPS。
+GPU 温度读数 51.6/50.9°C。`present_and_wait` 包含映射、命令等待和撤销映射，不能称为 CPU 复制时间。
+这些数值没有证明稳定满 60 FPS 或 120 Hz；实现仍使用有界轮询等待。
+
+源记录 `1792804530-surface-recording.png` 来自实际持有的 IOSurface，在显示完成后、释放前
+以三分之一分辨率采样。图标、文字、Weather/Calendar 小组件内容和圆角已检查；
+它是送显源的记录，**不是面板光学拍摄或 DPU 输出像素读回**。`--display-record` 只分配
+64 MiB 环形记录，`recording` 操作要求内核已正常返回并验证文件长度/几何。
+
+较早的 90 秒候选日志 `1792804175`、`1792804351` 分别完成 1,249 / 1,212 次直接传输，
+但实时日志在环形覆盖时缺失 21 / 13 个中间帧，因此未通过完整释放记录验收，不能取代
+上述最终 60 秒证据。多核显示日志现改为整行写入，避免与时间记录逐字符交错；
+更长时间的完整日志保留仍需进一步验证。
+
+复现：
+
+```sh
+python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets \
+  --display direct --display-fences --display-record --metrics --seconds 60
+python3 tools/lemonade-check-direct.py local/lemonade/1792804508-run-cp0.log
+python3 tools/lemonade-usb.py recording
+```
+
+本轮本地验收文件为 `graphics-20261024/direct-final-evidence.json`、
+`direct-final-performance.json` 和对应测试日志；所有设备镜像、源录制及运行日志保持私有。
+
+同一最终内核另通过 90 秒进程内回归 `1792804653-run-cp0.log`：FD660 GLES 三角形像素回读、
+26 项 IOSurface、15 项光栅和 101 项 Metal 特性；5,350 次 TE、1,244 次 CPU 呈现，
+越窗、丢弃和异常中断均为零。`1792804708-run-cp0.log` 的独立网格也完成 64 次命令/64 帧，
+最终接口签名逐帧匹配原生参考，恢复检查全部通过。
+
+本轮已回到原 Android，`android-roundtrip-20261024T091915.json` 确认同一 USB 手机启动完成、
+原 `_b` 槽及锁状态相符，boot/vendor_boot/dtbo/vbmeta/xbl 五个活动分区哈希均与原备份一致。
+精确内核、20 个编译输入、两种测试镜像、源录制、主机检查和上述真机证据保存在私有归档
+`kernel-desktop-direct-verified-20261024`，不上传系统镜像或设备日志。

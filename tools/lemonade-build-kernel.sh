@@ -16,7 +16,7 @@ python3 - <<'COPY'
 import hashlib, json, os
 from pathlib import Path
 paths = ['bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
-	 'bsd/dev/lemonade_display.c', 'bsd/sys/lemonade_display.h', 'iokit/Kernel/MiniIOMobileFramebuffer.cpp',
+	 'bsd/dev/lemonade_display.c', 'bsd/sys/lemonade_display.h', 'iokit/Kernel/MiniIOMobileFramebuffer.cpp', 'iokit/Kernel/RedwoodGPU.cpp',
          'bsd/dev/lemonade_touch.c', 'bsd/dev/lemonade_touch_protocol.h',
          'bsd/dev/lemonade_wifi.c', 'bsd/dev/lemonade_mhi_protocol.h', 'bsd/dev/redwood_wifi.c', 'bsd/dev/redwood_goodix.c',
          'bsd/dev/redwood_lx.c', 'bsd/sys/redwood_lx.h', 'bsd/sys/redwood_qrtr.h', 'bsd/sys/lemonade_wifi.h',
@@ -80,7 +80,7 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'gpu_clock_mhz_supported': [315, 379, 443, 540],
           'cpu_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/redwood_cpufreq.c').read_bytes()).hexdigest(),
           'cpu_policy_supported': 'sm8350-capped-epss-v1',
-          'display_modes_supported': ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale'],
+          'display_modes_supported': ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale', 'direct'],
           'display_fences_supported': 'copy-release-v1',
           'display_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_display.c').read_bytes()).hexdigest(),
           'touch_driver_supported': 'lemonade-s6sy792-v1',

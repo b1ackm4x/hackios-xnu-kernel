@@ -92,7 +92,7 @@ def verified_graphics_overlay(system=False, widgets=False):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "boot", "log", "memmap", "selftest", "run", "ramdisk", "screenshot", "reboot"))
+    parser.add_argument("action", choices=("status", "boot", "log", "memmap", "selftest", "run", "ramdisk", "screenshot", "recording", "reboot"))
     parser.add_argument("--checkpoint", type=int, default=0, help="XNU bring-up checkpoint; 0 runs normally")
     parser.add_argument("--seconds", type=int, help="XNU timed return, 1..300 seconds; up to 900 for performance + physical touch; default 8 or 300 with --profile")
     parser.add_argument("--userland", action="store_true", help="include root.apfs; upload system.apfs with ramdisk first")
@@ -110,10 +110,11 @@ def main():
     parser.add_argument('--metal-system', choices=('apps', 'desktop'), help='verified RAM-only system Metal discovery; desktop also selects Metal compositing')
     parser.add_argument('--metal-widgets', action='store_true', help='separate verified widget renderer image; requires --metal-system desktop')
     parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2 (tested system default); does not imply complete family compliance')
-    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual triggers each transfer; scale also compares 1125x2436 hardware scaling; all restore firmware state')
+    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale', 'direct'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual triggers each transfer; scale also compares 1125x2436 hardware scaling; all restore firmware state')
     parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual/scale; default 64')
     parser.add_argument('--display-pattern', choices=('uniform', 'grid', 'columns', 'rows'), help='uniform or spatial scaling reference; requires --display scale')
-    parser.add_argument('--display-fences', action='store_true', help='experimental producer-release waits; requires --display sync --userland')
+    parser.add_argument('--display-record', action='store_true', help='record a bounded 64 MiB ring of held source images; requires --display direct; not an optical panel capture')
+    parser.add_argument('--display-fences', action='store_true', help='producer-release waits; requires --display sync/direct --userland')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
     parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
@@ -159,8 +160,13 @@ def main():
         parser.error('--display-pattern requires --display scale')
     if args.display_flips == 1000 and args.seconds < 50:
         parser.error('1000 display flips require at least 50 seconds')
-    if args.display_fences and (args.action != 'run' or args.kernel != 'built' or args.display != 'sync' or not args.userland):
-        parser.error('--display-fences requires run --kernel built --display sync --userland')
+    if args.display_fences and (args.action != 'run' or args.kernel != 'built' or args.display not in ('sync', 'direct') or not args.userland):
+        parser.error('--display-fences requires run --kernel built --display sync/direct --userland')
+    if args.display_record and (args.action != 'run' or args.display != 'direct'):
+        parser.error('--display-record requires run --display direct')
+    if args.display == 'direct':
+        if not args.userland or not args.display_fences:
+            parser.error('--display direct requires --userland --display-fences')
     if args.metal_test and args.metal_system:
         parser.error('Choose process-local or system Metal testing')
     if args.metal_profile is not None and not args.metal_system:
@@ -299,6 +305,41 @@ def main():
         raw_path.unlink()
         print(f"Saved {width}x{height} framebuffer: {png_path}")
         return
+    if args.action == "recording":
+        r = fb(serial, "getvar", "result")
+        result_text = r.stdout + r.stderr
+        if not re.search(r'result: returned \d+ 0(?:\s|$)', result_text):
+            raise SystemExit('Refusing: collect the source recording only after a successful timed return')
+        base = ROOT / 'local/lemonade' / f'{int(time.time())}-surface-recording'
+        raw_path = base.with_suffix('.raw')
+        fb(serial, 'oem', 'recording')
+        fb(serial, 'get_staged', str(raw_path), timeout=60)
+        raw = raw_path.read_bytes()
+        if len(raw) < 32 or len(raw) > 64 * 1024 * 1024:
+            raise SystemExit('Unexpected bounded source recording length')
+        magic, width, height, frames, oldest, began = struct.unpack_from('<8sIIIIQ', raw)
+        size = width * height * 3
+        if magic != b'RWREC003' or (width, height) != (375, 812) or not frames or oldest >= frames or len(raw) != 32 + frames * (8 + size):
+            raise SystemExit('Unexpected or truncated source recording geometry')
+        newest = (oldest - 1) % frames
+        offset = 32 + newest * (8 + size)
+        at = struct.unpack_from('<Q', raw, offset)[0]
+        pixels = raw[offset + 8:offset + 8 + size]
+        rows = b''.join(b'\0' + pixels[y * width * 3:(y + 1) * width * 3] for y in range(height))
+        def chunk(kind, body):
+            return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+        png = base.with_suffix('.png')
+        png.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
+                        chunk(b'IDAT', zlib.compress(rows, 6)) + chunk(b'IEND', b''))
+        latest = json.loads((ROOT / 'out/lemonade-xnu.manifest.json').read_text())
+        report = {'source': 'held IOSurface after display transfer, before producer release', 'optical_panel_capture': False,
+                  'frames': frames, 'oldest': oldest, 'width': width, 'height': height, 'newest_time_ns': began + at,
+                  'raw_sha256': hashlib.sha256(raw).hexdigest(), 'png_sha256': hashlib.sha256(png.read_bytes()).hexdigest(),
+                  'kernel_sha256': latest.get('kernel_sha256'), 'result': result_text}
+        base.with_suffix('.manifest.json').write_text(json.dumps(report, indent=2) + '\n')
+        print(f'Saved {frames} source frames and latest {width}x{height} image: {png}')
+        return
+
     def verified_image(relative):
         info = json.loads((ROOT / "local/lemonade/images.json").read_text())[relative]
         path = ROOT / relative
@@ -360,12 +401,12 @@ def main():
             cmdline += ' camtl=' + ('1' if args.metal_system == 'desktop' else '0')
         if args.display:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_display='))
-            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7, 'manual': 8, 'scale': 9}[args.display])
+            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7, 'manual': 8, 'scale': 9, 'direct': 10}[args.display])
             if args.display in ('flip', 'manual', 'scale'):
                 cmdline += ' lemonade_display_flips=' + str(args.display_flips or 64)
             if args.display == 'scale':
                 cmdline += ' lemonade_display_pattern=' + str({None: 0, 'uniform': 0, 'grid': 1, 'columns': 2, 'rows': 3}[args.display_pattern])
-            if args.display == 'sync':
+            if args.display in ('sync', 'direct'):
                 cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('ca_vbl='))
                 cmdline += ' ca_vbl=1'
         if args.touch:
@@ -374,6 +415,8 @@ def main():
         if args.display_fences:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('fb_fences='))
             cmdline += ' fb_fences=1'
+        if args.display_record:
+            cmdline += f' rec_secs={args.seconds} rec_mb=64 rec_ring=1 rec_step=3'
         if args.wifi:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
             cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17, "mhi": 18, "bhie": 19, "ipcr": 20, "qmi": 21, "driver": 22, "scan": 23, "station": 24}[args.wifi])
@@ -458,6 +501,7 @@ def main():
         record['metal_profile'] = args.metal_profile
         record['display'] = args.display
         record['display_fences'] = args.display_fences
+        record['display_record'] = args.display_record
         if graphics_record:
             record['graphics_image'] = graphics_record
         if firmware_record:
@@ -502,7 +546,7 @@ def main():
             remaining = args.seconds + 8
             print(f"Waiting {remaining}s for XNU to return before reopening the USB result query.", flush=True)
             while remaining:
-                delay = min(10, remaining)
+                delay = min(2 if args.display == 'direct' and args.metrics and args.boot_cpu == 7 else 10, remaining)
                 time.sleep(delay)
                 remaining -= delay
                 if args.network_test and args.boot_cpu == 7 and not record['live_logs']:

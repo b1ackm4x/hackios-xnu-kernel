@@ -171,7 +171,8 @@ class DeviceSafety(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'display mode'):
             self.run_action('run', '--kernel', 'built', '--display', 'clocks')
         self.assertFalse(any('stage' in c for c in self.calls))
-        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale']
+        manifest['display_fences_supported'] = 'copy-release-v1'
+        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale', 'direct']
         path.write_text(json.dumps(manifest))
         (self.root / 'userland').mkdir()
         root_image = self.root / 'userland/root.apfs'
@@ -179,14 +180,17 @@ class DeviceSafety(unittest.TestCase):
         image_record = {'bytes': root_image.stat().st_size, 'sha256': hashlib.sha256(root_image.read_bytes()).hexdigest()}
         (self.root / 'local/lemonade/images.json').write_text(json.dumps({
             'userland/root.apfs': image_record, 'userland/system.apfs': image_record}))
-        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4), ('smmu', 5), ('map', 6), ('flip', 7), ('manual', 8), ('scale', 9)):
+        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4), ('smmu', 5), ('map', 6), ('flip', 7), ('manual', 8), ('scale', 9), ('direct', 10)):
             self.calls.clear()
             self.run_action('run', '--kernel', 'built', '--display', mode, '--seconds', '1',
-                            *(('--userland',) if mode in ('map', 'flip', 'manual', 'scale') else ()))
+                            *(('--userland', '--display-fences', '--display-record') if mode == 'direct' else ('--userland',) if mode in ('map', 'flip', 'manual', 'scale') else ()))
             payload = next(c for c in self.calls if c[0] == 'python3')
             cmdline = payload[payload.index('--cmdline') + 1].split()
             self.assertIn('lemonade_display=' + str(number), cmdline)
-            if mode == 'sync': self.assertIn('ca_vbl=1', cmdline)
+            if mode in ('sync', 'direct'): self.assertIn('ca_vbl=1', cmdline)
+            if mode == 'direct':
+                for expected in ('fb_fences=1', 'rec_secs=1', 'rec_mb=64', 'rec_ring=1', 'rec_step=3'):
+                    self.assertIn(expected, cmdline)
             if mode in ('flip', 'manual', 'scale'): self.assertIn('lemonade_display_flips=64', cmdline)
             if mode == 'scale': self.assertIn('lemonade_display_pattern=0', cmdline)
             self.assertIn('ufs_write=0', cmdline)
@@ -204,12 +208,40 @@ class DeviceSafety(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     self.run_action('run', '--kernel', 'built', '--display', mode, *extra)
         for extra in (('--display', 'map', '--display-flips', '64'),
+                      ('--display', 'sync', '--display-record'),
                       ('--display', 'flip', '--display-pattern', 'grid'),
                       ('--display-pattern', 'grid'),
                       ('--display', 'flip', '--display-flips', '1000', '--seconds', '30')):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.run_action('run', '--kernel', 'built', '--userland', *extra)
         self.assertEqual(self.calls, [])
+
+    def test_direct_requires_held_userland_surfaces_before_device_access(self):
+        for extra in ((), ('--userland',), ('--display-fences',)):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self.run_action('run', '--kernel', 'built', '--display', 'direct', *extra)
+            self.assertFalse(self.calls)
+
+    def test_source_recording_is_bounded_and_tagged_separately_from_panel_capture(self):
+        self.fastboot = self.loader + '\tfastboot\n'
+        self.product = 'xnuloader'
+        self.result = 'returned 19 0'
+        self.log = struct.pack('<8sIIIIQ', b'RWREC003', 375, 812, 1, 0, 1000) + struct.pack('<Q', 50) + bytes(375*812*3)
+        (self.root / 'out/lemonade-xnu.manifest.json').write_text(json.dumps({'kernel_sha256': 'a'*64}))
+        self.run_action('recording')
+        report = json.loads(next((self.root / 'local/lemonade').glob('*-surface-recording.manifest.json')).read_text())
+        self.assertFalse(report['optical_panel_capture'])
+        self.assertEqual(report['frames'], 1)
+        self.assertEqual(report['newest_time_ns'], 1050)
+        self.assertEqual(report['kernel_sha256'], 'a'*64)
+        self.log = self.log[:-1]
+        with self.assertRaisesRegex(SystemExit, 'truncated'):
+            self.run_action('recording')
+        self.calls.clear()
+        self.result = 'running'
+        with self.assertRaisesRegex(SystemExit, 'successful timed return'):
+            self.run_action('recording')
+        self.assertFalse(any(c[-2:] == ['oem', 'recording'] for c in self.calls))
 
     def test_display_fences_require_explicit_scope(self):
         for action, extra in (('boot', ()), ('run', ()),

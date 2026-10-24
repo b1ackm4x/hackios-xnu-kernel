@@ -309,7 +309,7 @@ public:
 	bool swapPending(uint32_t id, uint32_t mode); /* fSwapLock held */
 	IOReturn waitSwap(uint32_t id, uint32_t flags, uint32_t timeoutMS, const bool * closed);
 	void finishSwap(void);
-	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
+	bool show(const uint8_t * swap, MiniIOSurface ** surfaces);
 	void presenter(void);
 	static void presenterMain(void * self, wait_result_t result);
 	void reportFrameTimes(void);
@@ -998,7 +998,12 @@ IOMobileFramebuffer::presenter(void)
 		fReadingSwapID = swapWord(swap, SWAP_ID);
 		fReadingSwap = true;
 		IOLockUnlock(fSwapLock);
-		show(swap, surfaces);
+		if (!show(swap, surfaces)) {
+			/* A failed display transfer may still read these pages. Keep their
+			 * existing holds and the producer fence until the RAM kernel exits. */
+			IOLog("MiniIOMobileFramebuffer: display completion unproven; source retained and producer release withheld\n");
+			for (;;) IOSleep(1000);
+		}
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 			if (surfaces[layer] != NULL) {
 				MiniIOSurfaceDrop(surfaces[layer]);
@@ -1010,7 +1015,7 @@ IOMobileFramebuffer::presenter(void)
 }
 
 /* A swap's surfaces onto the panel, once the GPU is done with them. */
-void
+bool
 IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 {
 	uint32_t set = swapWord(swap, SWAP_LAYERS_SET);
@@ -1020,18 +1025,22 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	bool report;
 	struct lemonade_present_window hardwareWindow = {};
 	int hardwarePresent = 0;
+	bool direct = lemonade_display_direct_requested(), gpuReady = true;
+	int directPresent = 0;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
-			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
-			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
+			gpuReady = false;
+			IOLog("MiniIOMobileFramebuffer: swap %u: GPU completion missing for surface %u after %u ms; %s\n",
+			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS,
+			    direct ? "frame skipped" : "shown as it is");
 		}
 	}
 	fStatWaiting += mach_absolute_time() - began;
 	began = ready = mach_absolute_time();
-	hardwarePresent = lemonade_display_present_begin(&hardwareWindow);
+	hardwarePresent = direct ? 0 : lemonade_display_present_begin(&hardwareWindow);
 	if (hardwarePresent) began = mach_absolute_time();
-	if (!hardwarePresent && gOnTheBeat) {
+	if (!direct && !hardwarePresent && gOnTheBeat) {
 		uint64_t period, aim, next;
 
 		nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz(), &period);
@@ -1062,7 +1071,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	fSwapsWaiting--;
 	IOLockWakeup(fSwapLock, &fSwapsWaiting, true);
 	IOLockUnlock(fSwapLock);
-	if (hardwarePresent < 0) { fStatLost++; return; }
+	if (hardwarePresent < 0 || (direct && !gpuReady)) { fStatLost++; return true; }
 	IOLockLock(fLock);
 	if (fLastFrame != 0) {
 		absolutetime_to_nanoseconds(began - fLastFrame, &nanos);
@@ -1075,6 +1084,33 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 	}
 	fLastFrame = began;
+	if (direct) {
+		MiniIOSurface *s = surfaces[0];
+		int32_t src[4], dst[4];
+		memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+		memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+		bool eligible = s && (set & 1) && fWidth == 1125 && fHeight == 2436 &&
+		    s->info.width == 1125 && s->info.height == 2436 && s->info.planeCount == 0 &&
+		    s->info.bytesPerElement == 4 && s->info.pixelFormat == FOURCC('B','G','R','A') &&
+		    s->info.offset <= s->info.allocSize &&
+		    src[0] == 0 && src[1] == 0 && src[2] == 1125 && src[3] == 2436 &&
+		    dst[0] == 0 && dst[1] == 0 && dst[2] == 1125 && dst[3] == 2436;
+		for (unsigned n = 1; n < SWAP_LAYERS; n++)
+			eligible &= swapWord(swap, SWAP_SURFACE(n)) == 0;
+		if (eligible) {
+			if (!fGraphics) {
+				fGraphics = true;
+				PE_initialize_console(NULL, kPEGraphicsMode);
+			}
+			directPresent = lemonade_display_direct_present(s->pixels(), s->info.allocSize - s->info.offset,
+			    s->info.bytesPerRow, s->sid, swapWord(swap, SWAP_ID));
+		} else directPresent = lemonade_display_direct_fallback();
+		if (directPresent < 0) { IOLockUnlock(fLock); return false; }
+		if (!directPresent) {
+			hardwarePresent = lemonade_display_present_begin(&hardwareWindow);
+			if (hardwarePresent < 0) { fStatLost++; IOLockUnlock(fLock); return true; }
+		}
+	}
 	report = fSwapsShown < 8;
 	if (report) {
 		IOLog("MiniIOMobileFramebuffer: swap %u (#%u): surfaces %u %u %u %u, layers set 0x%x cleared 0x%x\n",
@@ -1123,7 +1159,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				fGraphics = true;
 				PE_initialize_console(NULL, kPEGraphicsMode);
 			}
-			drawLayer(s, src, dst);
+			if (directPresent != 1) drawLayer(s, src, dst);
 			if (layer == 0) {
 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 			}
@@ -1196,6 +1232,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		fStatSince = 0;
 	}
 	IOLockUnlock(fLock);
+	return true;
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

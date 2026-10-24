@@ -15,6 +15,12 @@ struct lemonade_present_window {
 /* 0: inactive; 1: safe measured idle window; -1: active but window unavailable. */
 int lemonade_display_present_begin(struct lemonade_present_window *);
 void lemonade_display_present_end(const struct lemonade_present_window *, uint32_t);
+/* Synchronous, one presenter. Caller holds prepared source memory throughout.
+ * 1: transferred and unmapped; 0: CPU fallback safe; -1: retain source and do
+ * not release producer (transfer/restoration safety could not be established). */
+bool lemonade_display_direct_requested(void);
+int lemonade_display_direct_present(const void *, uint32_t, uint32_t, uint32_t, uint32_t);
+int lemonade_display_direct_fallback(void);
 #ifdef __cplusplus
 }
 #endif

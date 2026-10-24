@@ -259,11 +259,11 @@ bool
 MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
 {
 	uint32_t fence = surface->drawn;
-	bool done = true;
+	bool done = fence == 0;
 
 	if (fence != 0 && gGPULock != NULL) {
 		IOLockLock(gGPULock);
-		done = !redwood_gpu_ready() || gpuWait(fence, milliseconds);
+		done = redwood_gpu_ready() && gpuWait(fence, milliseconds);
 		IOLockUnlock(gGPULock);
 	}
 	return done;

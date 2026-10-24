@@ -49,6 +49,8 @@ static bool host_interrupts = true;
 static void (*host_pending)(void);
 static unsigned host_callbacks;
 static uint64_t host_now;
+static bool host_wrong_pixels;
+static vm_offset_t host_tables;
 static uint32_t host_mdp[0x90000/4], host_smmu[0x100000/4], host_clocks[2];
 static char host_log[32768];
 static unsigned host_log_used;
@@ -76,7 +78,7 @@ static void delay(unsigned us) {
     host_mdp[0x350ac/4]++;
     host_mdp[0x350b0/4]=1;
     host_mdp[0x352b0/4]=2400;
-    if (host_mdp[0x4014/4]==0xe4d00000 && host_mdp[0x6014/4]==0xe4d00000) {
+    if (!host_wrong_pixels && host_mdp[0x4014/4]==0xe4d00000 && host_mdp[0x6014/4]==0xe4d00000) {
         host_mdp[0x44314/4]=0x12345678;
         host_mdp[0x45314/4]=0x87654321;
     }
@@ -87,8 +89,11 @@ static bool PE_parse_boot_argn(const char *n, void *p, int s) { return false; }
 static int kmem_alloc(int m, vm_offset_t *p, unsigned n, int flags, int tag) { return 1; }
 vm_offset_t ml_io_map(vm_offset_t p, vm_size_t n) { return 0; }
 vm_offset_t pe_arm_get_soc_base_phys(void) { return 0; }
-uint64_t kvtophys(vm_offset_t p) { return 0x92345000; }
-void loader_log_putc(char c) { assert(host_log_used+1<sizeof(host_log)); host_log[host_log_used++]=c; }
+uint64_t kvtophys(vm_offset_t p) {
+    if (host_tables && p>=host_tables && p<host_tables+131072) return 0x93000000+p-host_tables;
+    return 0x92345000;
+}
+void loader_log_line(const char *s) { while (*s) { assert(host_log_used+1<sizeof(host_log)); host_log[host_log_used++]=*s++; } }
 kern_return_t gic_v3_spi_attach(uint32_t n, bool edge, void (*cb)(void*,uint32_t), void *p) { return 0; }
 void gic_v3_spi_mask(uint32_t n) {}
 void gic_v3_spi_detach(uint32_t n) {}
@@ -105,6 +110,8 @@ static void reset_fixture(void) {
     host_clocks[0]=host_clocks[1]=0;
     display_stopping=display_restoring=false;
     host_interrupts=true; host_pending=NULL; host_callbacks=0; host_now=0;
+    host_wrong_pixels=false;host_tables=0;
+    direct_requested=direct_failed=false; direct_count=direct_fallbacks=direct_pages=direct_pitch=0;
     display_map.mdp=(uintptr_t)host_mdp;
     display_map.smmu=(uintptr_t)host_smmu;
     display_map.cb=(uintptr_t)host_smmu+0x85000;
@@ -286,7 +293,7 @@ int main(void) {
     host_pending=return_after_complete_scaler_setup;
     display_map.intf_misr_active=true; display_map.intf_misr=0;
     host_mdp[0x35180/4]=0x81000101;
-    assert(!display_scale_configure());
+    assert(!display_scale_configure(DISPLAY_SCALE_PITCH));
     assert(host_callbacks==1 && host_interrupts && display_stopping);
     assert_context_restored();
     for (unsigned n=0;n<2;n++) for (unsigned r=0;r<DISPLAY_SCALE_REGS;r++)
@@ -298,6 +305,49 @@ int main(void) {
     assert(host_mdp[0x35180/4]==0);
     assert(strstr(host_log,"interface MISR restored=1 status=0 prior_status=0"));
     puts("PASS: interrupted scaler setup restores all 50 saved registers before GOP output and unmapping");
+    reset_fixture();
+    assert(display_scale_configure(4608));
+    assert(host_mdp[0x4024/4]==4608 && host_mdp[0x6024/4]==4608);
+    reset_fixture();
+    assert(!display_scale_configure(4500) && !display_map.scale_active);
+    puts("PASS: desktop pitch 4608 is configured; unproved pitches cannot alter geometry");
+
+    reset_fixture();
+    display_map.active=display_map.flip_active=display_map.direct_active=true;
+    display_map.restore_proven=false;host_wrong_pixels=true;
+    assert(lemonade_display_direct_fallback()==-1);
+    assert(!display_map.restore_proven && !display_map.active);
+    puts("PASS: unproven output restoration refuses producer release");
+
+    reset_fixture();
+    display_map.misr_active=true;display_map.restore_proven=true;
+    host_mdp[0x44310/4]=host_mdp[0x45310/4]=0x80000301;
+    assert(lemonade_display_direct_fallback()==0);
+    assert(host_mdp[0x44310/4]==0 && host_mdp[0x45310/4]==0 && !display_map.misr_active);
+    puts("PASS: initialization failure before translation restores its measurement controls");
+
+    reset_fixture();
+    static uint64_t tables[DISPLAY_TABLE_BYTES/8] __attribute__((aligned(16384)));
+    memset(tables,0,sizeof(tables)); host_tables=(uintptr_t)tables;
+    display_map.tables=host_tables; display_map.table_pages=1;
+    uint64_t *leaf=display_leaf(DISPLAY_BUFFER_IOVA(0),true);assert(leaf);
+    *leaf=0x923454c3; direct_pages=1;
+    host_mdp[0x352b4/4]=0x80000001;
+    assert(!display_direct_unmap() && *leaf && direct_pages==1);
+    host_mdp[0x352b4/4]=1;
+    assert(display_direct_unmap() && !*leaf && direct_pages==0);
+    *leaf=0x923454c3;direct_pages=1;
+    *(uint32_t *)(display_map.cb+0x7f4)=1;
+    assert(!display_direct_unmap() && direct_pages==1);
+    puts("PASS: page retirement requires automatic transfers disabled and completed TLB invalidation");
+
+    reset_fixture();
+    direct_requested=true;
+    assert(lemonade_display_direct_present((void *)4096,32,4608,1,1)==0);
+    assert(!display_map.active && !display_map.flip_active && !direct_count);
+    lemonade_display_quiesce();
+    assert(lemonade_display_direct_fallback()==-1);
+    puts("PASS: undersized surfaces never reach DMA and stopped presenters cannot release an unproven read");
     return 0;
 }
 '''
