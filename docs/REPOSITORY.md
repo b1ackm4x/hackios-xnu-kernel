@@ -3,19 +3,18 @@
 当前适配目标是 OnePlus 9（LE2110，`lemonade`）。上游将内核和用户空间拆成两个 Git 仓库，
 构建时将它们叠放到同一个工作目录。我们沿用这个结构，避免漏掉 GLES 桥接和镜像构建改动。
 
-| 内容 | 我们的私有仓库 | 上游 |
+| 内容 | 我们的仓库 | 上游 |
 | --- | --- | --- |
 | 内核、loader、机型配置和测试工具 | `b1ackm4x/hackios-xnu-kernel` | `oosexgang/hackios-xnu-kernel` |
 | 用户空间、GLES 桥接、Mesa 和镜像构建 | `b1ackm4x/hackios-xnu-userland` | `oosexgang/hackios-xnu-userland` |
 
-GitHub 的公开仓库 Fork 必须公开，不能单独改为私有。因此当前使用保留完整上游 Git 历史的
-**独立私有派生仓库**，不属于 GitHub 的公开 Fork 网络；原许可证、作者和提交历史全部保留。
-参见 [GitHub 的 Fork 可见性规则](https://docs.github.com/en/pull-requests/reference/forks#visibility-of-forks)。
+两个仓库均为公开的独立派生仓库，不属于 GitHub 的 Fork 网络；
+原许可证、作者和完整上游提交历史全部保留。
 
 ## 分支与远端
 
 - `main` 保留引入时的上游基线，`device/lemonade` 是默认机型分支；当前完整 base 在两边的 `codex/lemonade-graphics` 上。
-- `origin` 指向自己的私有仓库；`upstream` 指向对应的公开上游。推送默认使用 `origin`。
+- `origin` 指向自己的仓库；`upstream` 指向对应的上游。推送默认使用 `origin`。
 - 以后新增机型，从适当的共同基线创建 `device/<codename>`，把机型参数和驱动保持隔离。
 - 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入目标机型分支。
 
@@ -24,7 +23,7 @@ GitHub 的公开仓库 Fork 必须公开，不能单独改为私有。因此当�
 
 ## 重新取出项目
 
-先通过 `gh auth login` 配置自己的 GitHub 访问权限；不要把令牌放进远端 URL。
+克隆公开源码无需登录；推送前通过 `gh auth login` 配置访问权限，不要把令牌放进远端 URL。
 
 ```sh
 git clone --branch codex/lemonade-graphics https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
@@ -88,4 +87,4 @@ common/ugit log --oneline HEAD..upstream/main
 
 `local/`、`out/`、`logs/`、`fw-*/`、系统镜像、设备身份、配对信息、密钥与凭据均不提交。
 上游已公开的源码和随历史附带的预构建文件仍保留；新增的本机专用镜像与固件不上传。
-仓库保持私有，今后公开时另行检查内容与分发条件。
+源码仓库公开；本地 base 压缩包及以上私有资料不随仓库发布。
