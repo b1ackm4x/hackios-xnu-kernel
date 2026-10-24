@@ -14,34 +14,32 @@ GitHub 的公开仓库 Fork 必须公开，不能单独改为私有。因此当�
 
 ## 分支与远端
 
-- `main` 保留引入时的上游基线。当前适配在两个仓库各自的 `device/lemonade` 上，作为默认分支。
+- `main` 保留引入时的上游基线，`device/lemonade` 是默认机型分支；当前完整 base 在两边的 `codex/lemonade-graphics` 上。
 - `origin` 指向自己的私有仓库；`upstream` 指向对应的公开上游。推送默认使用 `origin`。
 - 以后新增机型，从适当的共同基线创建 `device/<codename>`，把机型参数和驱动保持隔离。
 - 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入目标机型分支。
 
-当前图形增量在两边的 `codex/lemonade-graphics` 配套开发分支上，未更改默认分支。
-取出这个内核分支后，使用 `USERLAND_REF=codex/lemonade-graphics common/setup.sh`
-初次准备用户空间，再核对 `common/devices/lemonade.sources.json` 的精确提交。
-显示验收记录在 [LEMONADE-DISPLAY.md](LEMONADE-DISPLAY.md)。
+阶段基线 `2026.10.24-base.1` 在两个仓库均有标签 `base-2026.10.24-1`。
+配套提交见 `common/devices/lemonade.sources.json`，验收记录见 [LEMONADE-BASE.md](LEMONADE-BASE.md)。
 
 ## 重新取出项目
 
 先通过 `gh auth login` 配置自己的 GitHub 访问权限；不要把令牌放进远端 URL。
 
 ```sh
-git clone --branch device/lemonade https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
+git clone --branch codex/lemonade-graphics https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
 cd hackios
-common/setup.sh
+USERLAND_REF=codex/lemonade-graphics common/setup.sh
 git remote add upstream https://github.com/oosexgang/hackios-xnu-kernel.git
 common/ugit remote add upstream https://github.com/oosexgang/hackios-xnu-userland.git
 git config remote.pushDefault origin
 common/ugit config remote.pushDefault origin
 ```
 
-本分支的 `common/setup.sh` 默认取自己的用户空间 `device/lemonade` 分支。
-`common/devices/lemonade.sources.json` 记录本次验证对应的用户空间提交及两边的上游基线。
+`common/setup.sh` 未指定 `USERLAND_REF` 时仍默认取 `device/lemonade`，因此初次取出当前版本须使用上面的显式分支。
+`common/devices/lemonade.sources.json` 记录配套用户空间提交、base 标签及两边的上游基线。
 需要复现该组合时，可用 `common/ugit switch --detach <userland.commit>` 切到记录的提交；
-继续开发前用 `common/ugit switch device/lemonade` 回到分支。
+继续开发前用 `common/ugit switch codex/lemonade-graphics` 回到当前开发分支。
 
 这只取回可维护的源代码。设备原始备份、原机固件、Apple 系统文件、SDK、构建产物和私有验证日志
 不随仓库分发；准备和构建步骤见 [LEMONADE.md](LEMONADE.md)。
@@ -65,8 +63,8 @@ git add <kernel-paths>
 git commit -m 'Describe the kernel or device change'
 common/ugit add -u -- <tracked-userland-paths>
 common/ugit commit -m 'Describe the userland change'
-git push origin device/lemonade
-common/ugit push origin device/lemonade
+git push origin HEAD
+common/ugit push origin HEAD
 ```
 
 两边同时修改时，先提交用户空间，再更新内核仓库内的 `lemonade.sources.json`，记录配套的用户空间提交。
