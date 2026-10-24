@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <libkern/OSCacheControl.h>
 #include <notify.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -96,6 +97,51 @@ replace_virtual(const char *what, uintptr_t slot, uintptr_t expected, void *repl
 	*entry = (uintptr_t)replacement;
 	vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ);
 	return original;
+}
+
+/* The 20F66 internal-display enumerator skips its timing parser when the
+ * driver exposes just one timing and one colour mode. That leaves its native
+ * 60 Hz default in the mode sent to every CADisplay client. A measured 120 Hz
+ * single-mode driver still needs that parser: keep all the ordinary parsing,
+ * current-mode selection and range checks, and remove only this shortcut.
+ * This is private to backboardd's COW code page, for this exact cache sequence
+ * and the driver's verified desktop mode. No app FPS getter is overridden. */
+static void
+window_server_single_refresh_mode(const char *arguments)
+{
+	io_service_t service;
+	CFTypeRef property;
+	int measured = 0;
+	uintptr_t address = 0x188529ea0UL + slide;
+	uint32_t *instruction = (uint32_t *)address;
+	vm_address_t page = address & ~(vm_address_t)(vm_page_size - 1);
+	kern_return_t kr;
+
+	if (!strstr(arguments, "lemonade_display_hz=120")) return;
+	service = IOServiceGetMatchingService(0, IOServiceMatching("IOMobileFramebuffer"));
+	if (!service) return;
+	property = IORegistryEntryCreateCFProperty(service, CFSTR("RedwoodMeasuredRefreshHz"), NULL, 0);
+	if (property && CFGetTypeID(property) == CFNumberGetTypeID())
+		CFNumberGetValue(property, kCFNumberIntType, &measured);
+	if (property) CFRelease(property);
+	IOObjectRelease(service);
+	if (measured != 120) {
+		say("redwood: single-mode timing parser: no measured 120 Hz desktop; left alone\n");
+		return;
+	}
+	if (instruction[-1] != 0xf100081fU || instruction[0] != 0x540008ebU || instruction[1] != 0xf9407be3U) {
+		say("redwood: single-mode timing parser: unsupported cache sequence; left alone\n");
+		return;
+	}
+	kr = vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+	if (kr != KERN_SUCCESS) {
+		say("redwood: single-mode timing parser: cannot copy code page (%d)\n", kr);
+		return;
+	}
+	*instruction = 0xd503201fU; /* nop: enumerate the one real timing too */
+	sys_icache_invalidate(instruction, sizeof(*instruction));
+	kr = vm_protect(mach_task_self(), page, vm_page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+	say("redwood: single-mode timing parser enabled for measured %d Hz (protect=%d)\n", measured, kr);
 }
 
 /* ---- backboardd: CA::WindowServer ------------------------------------------------------------ */
@@ -1237,6 +1283,7 @@ redwood_init(void)
 			setenv("CA_FORCE_TIMER", "1", 1);
 			say("redwood: ca_vbl=1: CoreAnimation is to take the display driver's refresh notifications\n");
 		}
+		window_server_single_refresh_mode(arguments);
 		/*
 		 * Boot-arg caenv=NAME=VALUE (as many as wanted): into the window server's environment, for
 		 * CoreAnimation's own switches (CA_LOG_TRIPLE_BUFFERING=1, CA_FORCE_DOUBLE_BUFFERING=1 ...).
