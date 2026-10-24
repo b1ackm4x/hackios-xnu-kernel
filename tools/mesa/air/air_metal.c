@@ -59,6 +59,7 @@
 #include "util/half_float.h"
 #include "util/u_inlines.h"
 #include "util/u_sampler.h"
+#include "util/u_upload_mgr.h"
 #include "util/u_debug.h"
 #include "util/os_time.h"
 #include <float.h>
@@ -135,13 +136,8 @@ struct rwa_device {
     */
    bool software;
 
-   /* What this screen requires of a buffer offset, per binding, read once. Only an
-    * argument buffer's member has an offset at all here (rwa_argbuf_encode_buffer), and
-    * these are what it is checked against: a6xx wants 64 bytes for a UBO and 64 for an
-    * SSBO, softpipe 16 and 4. Metal's own rule is looser than either, so an offset it
-    * allows has to be refused by name rather than rounded -- Gallium's drivers program
-    * the register with what they are given.
-    */
+   /* Hardware binding alignment. UBOs can be uploaded; SSBOs retain the original
+    * allocation and add the binding's remainder in the shader (lower_ssbo_bias). */
    unsigned ubo_offset_align, ssbo_offset_align;
 
    /* Every buffer that holds an argument-buffer encoding, so that destroying a texture,
@@ -291,6 +287,7 @@ struct rwa_compute {
    nir_shader *nir;               /* untouched; a dispatch compiles a clone */
    struct air_shader_info info;
    struct rwa_compute_info caps;
+   int ssbo_bias_ubo;
 
    bool dynamic_threadgroup;      /* a threadgroup buffer sized by the dispatch */
 
@@ -345,6 +342,68 @@ say(char *why, size_t why_size, const char *fmt, ...)
    va_start(ap, fmt);
    vsnprintf(why, why_size, fmt, ap);
    va_end(ap);
+}
+
+/* Gallium requires a 64-byte SSBO binding on Adreno, while Metal's typed
+ * pointers can start inside that block. Bind the original BO at the preceding
+ * hardware boundary and add its remainder to every SSBO memory instruction.
+ * This preserves writes, atomics and aliases; uploading the payload would not.
+ * The private UBO is selected per stage, outside its declared constant bindings. */
+static bool
+ssbo_bias_intrinsic(nir_builder *b, nir_intrinsic_instr *in, void *data)
+{
+   unsigned index_src;
+   switch (in->intrinsic) {
+   case nir_intrinsic_store_ssbo: index_src = 1; break;
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap: index_src = 0; break;
+   default: return false;
+   }
+   b->cursor = nir_before_instr(&in->instr);
+   nir_src *offset = nir_get_io_offset_src(in);
+   nir_def *bias = nir_load_ubo(b, 1, 32, nir_imm_int(b, *(int *)data),
+                               nir_imul_imm(b, in->src[index_src].ssa, 4),
+                               .align_mul = 4, .range_base = 0,
+                               .range = PIPE_MAX_SHADER_BUFFERS * 4);
+   nir_src_rewrite(offset, nir_iadd(b, offset->ssa, bias));
+   if (nir_intrinsic_has_align_mul(in)) {
+      /* The declaration's alignment describes the relative pointer, not an
+       * arbitrary API offset. Let the backend lower unaligned byte accesses. */
+      nir_intrinsic_set_align_mul(in, 1);
+      nir_intrinsic_set_align_offset(in, 0);
+   }
+   return true;
+}
+
+static int
+lower_ssbo_bias(struct rwa_device *device, nir_shader *nir,
+                const struct air_shader_info *info, int *binding,
+                char *why, size_t why_size)
+{
+   *binding = -1;
+   if (!nir->info.num_ssbos)
+      return 0;
+   unsigned limit = MIN2(PIPE_MAX_CONSTANT_BUFFERS,
+      device->screen->get_shader_param(device->screen, nir->info.stage,
+                                       PIPE_SHADER_CAP_MAX_CONST_BUFFERS));
+   bool used[PIPE_MAX_CONSTANT_BUFFERS] = {0};
+   for (unsigned i = 0; i < info->num_resources; i++) {
+      const struct air_resource *r = &info->resources[i];
+      if (r->kind == AIR_RESOURCE_CONSTANT_BUFFER && r->index < ARRAY_SIZE(used))
+         used[r->index] = true;
+   }
+   for (int i = (int)limit - 1; i >= 0; i--)
+      if (!used[i]) { *binding = i; break; }
+   if (*binding < 0) {
+      say(why, why_size, "%s has no free constant slot for device-buffer offsets",
+          info->entry_point ? info->entry_point : "the shader");
+      return -1;
+   }
+   nir_shader_intrinsics_pass(nir, ssbo_bias_intrinsic, nir_metadata_control_flow, binding);
+   nir->info.num_ubos = MAX2(nir->info.num_ubos, *binding + 1);
+   nir_validate_shader(nir, "Metal device-buffer offsets");
+   return 0;
 }
 
 /* What the screen answers about compute, as one number. Returns false when it declines,
@@ -2503,19 +2562,8 @@ argbuf_forget_all(struct rwa_buffer *dest)
    }
 }
 
-/*
- * WHAT A BUFFER'S OFFSET HAS TO SATISFY, for a member of an argument buffer and for a
- * plain buffer argument alike -- one rule and one sentence, because they are the same
- * arithmetic: Metal's own `offset:` from -setFragmentBuffer:offset:atIndex: or from
- * -[MTLArgumentEncoder setBuffer:offset:atIndex:], and Gallium's binding underneath.
- *
- * `constant` (a UBO) is NOT refused for its alignment here, because bind_stage serves any
- * offset: an aligned one as the binding's own offset, and one this GPU cannot fetch from
- * as a `user_buffer`, which both back ends upload themselves. `device` (an SSBO) is
- * refused, and the asymmetry is the point rather than an omission -- the shader may WRITE
- * an SSBO, so the copy that serves a UBO would take the writes with it when it was thrown
- * away, and Gallium has no user_buffer on a shader buffer for that very reason.
- */
+/* Both direct and argument-buffer bindings use Metal's byte offset. Hardware
+ * alignment is handled by bind_stage and the shader's private bias table. */
 static int
 buffer_offset_ok(const struct rwa_device *device, const struct air_resource *r,
                  const struct rwa_buffer *b, size_t offset, const char *name,
@@ -2524,16 +2572,6 @@ buffer_offset_ok(const struct rwa_device *device, const struct air_resource *r,
    if (offset > b->size) {
       say(why, why_size, "%s is bound at offset %zu of a buffer that holds %zu bytes",
           what, offset, b->size);
-      return -1;
-   }
-   if (r->kind == AIR_RESOURCE_DEVICE_BUFFER &&
-       offset % device->ssbo_offset_align != 0) {
-      say(why, why_size, "%s is bound at offset %zu, and %s declares it in the `device` "
-                         "address space, whose offsets this GPU fetches in multiples of "
-                         "%u bytes. A `constant` buffer at such an offset is uploaded "
-                         "instead; a `device` one cannot be, because the shader may write "
-                         "it and the copy would throw the writes away", what, offset,
-          name, device->ssbo_offset_align);
       return -1;
    }
    return 0;
@@ -2906,6 +2944,10 @@ rwa_compute_create(struct rwa_device *device, const void *bitcode, size_t size,
                 ? _mesa_shader_stage_to_string(compute->info.stage) : "non-compute");
       goto fail;
    }
+
+   if (lower_ssbo_bias(device, compute->nir, &compute->info,
+                        &compute->ssbo_bias_ubo, why, why_size) != 0)
+      goto fail;
 
    /* What the shader expects to be bound, counted the way Metal counts it: by the
     * highest index plus one, because the indices are the binding numbers and a kernel
@@ -3645,7 +3687,7 @@ struct rwa_bound {
 static int
 bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
            const struct air_shader_info *info, void **own_sampler,
-           const bool *compare_sampler, const unsigned *ubo_extent,
+           const bool *compare_sampler, const unsigned *ubo_extent, int ssbo_bias_ubo,
            const struct rwa_bindings *bindings, const struct rwa_buffer_bind *table,
            unsigned table_count, const char *name, struct rwa_bound *bound, char *why,
            size_t why_size)
@@ -3659,6 +3701,7 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
     */
    struct pipe_shader_buffer sb[PIPE_MAX_SHADER_BUFFERS] = { 0 };
    unsigned num_ssbo = 0, writable = 0;
+   uint32_t ssbo_bias[PIPE_MAX_SHADER_BUFFERS] = {0};
 
    /* and each texture as the kind of view its own instructions ask for. A read-only
     * texture stays a texture: Metal's read() on one becomes a txf, a texture fetch, so
@@ -3720,15 +3763,10 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
             return -1;
          }
          sb[r->index].buffer = b->res;
-         /* Metal's own `offset:`, for a member of a set and for a buffer argument
-          * alike, and an offset this GPU cannot fetch from has already been refused by
-          * name (buffer_offset_ok: a `device` buffer may be written, so the upload that
-          * serves a `constant` one would lose the writes). The SIZE is what is left of
-          * the buffer after the offset, so a shader reading past its own block reads
-          * past its binding rather than into the next one.
-          */
-         sb[r->index].buffer_offset = (unsigned)boffset;
-         sb[r->index].buffer_size = b->size - MIN2(b->size, boffset);
+         ssbo_bias[r->index] = boffset % device->ssbo_offset_align;
+         size_t aligned_offset = boffset - ssbo_bias[r->index];
+         sb[r->index].buffer_offset = (unsigned)aligned_offset;
+         sb[r->index].buffer_size = b->size - aligned_offset;
          num_ssbo = MAX2(num_ssbo, r->index + 1);
          if (r->write)
             writable |= 1u << r->index;
@@ -3902,6 +3940,18 @@ bind_stage(struct rwa_device *device, enum pipe_shader_type stage,
       num_samplers = MAX2(num_samplers, i + 1);
    }
 
+   if (ssbo_bias_ubo >= 0) {
+      struct pipe_constant_buffer cb = { .buffer_size = sizeof(ssbo_bias) };
+      u_upload_data(pipe->const_uploader, 0, sizeof(ssbo_bias),
+                    device->ubo_offset_align, ssbo_bias, &cb.buffer_offset, &cb.buffer);
+      u_upload_unmap(pipe->const_uploader);
+      if (!cb.buffer) {
+         say(why, why_size, "could not upload device-buffer offsets");
+         return -1;
+      }
+      /* The driver owns this allocation across deferred draws and rebinding. */
+      pipe->set_constant_buffer(pipe, stage, ssbo_bias_ubo, true, &cb);
+   }
    if (num_ssbo)
       pipe->set_shader_buffers(pipe, stage, 0, num_ssbo, sb, writable);
    if (num_views)
@@ -4021,7 +4071,7 @@ rwa_dispatch_buffers(struct rwa_compute *compute, const struct rwa_bindings *bin
     */
    struct rwa_bound bound = { 0 };
    if (bind_stage(device, PIPE_SHADER_COMPUTE, &compute->info, compute->own_sampler,
-                  compute->compare_sampler, NULL,
+                  compute->compare_sampler, NULL, compute->ssbo_bias_ubo,
                   bindings, table, table_count, name, &bound, why, why_size) != 0)
       return -1;
 
@@ -5443,6 +5493,7 @@ struct rwa_render {
    struct air_shader_info vinfo;      /* valid only when a vertex module was supplied */
    unsigned vertex_ubo_extent[PIPE_MAX_CONSTANT_BUFFERS];
    unsigned fragment_ubo_extent[PIPE_MAX_CONSTANT_BUFFERS];
+   int vertex_ssbo_bias_ubo, fragment_ssbo_bias_ubo;
    bool generated_vertex;
    bool writes_resources;
 
@@ -6416,6 +6467,9 @@ rwa_render_create(struct rwa_device *device,
       goto fail;
    }
    uniform_extents(fs, render->fragment_ubo_extent);
+   if (lower_ssbo_bias(device, fs, &render->finfo, &render->fragment_ssbo_bias_ubo,
+                        why, why_size) != 0)
+      goto fail;
    slot_shapes(fs, render->frag_slots, render->frag_compare_sampler);
    count_resources(&render->finfo, render->frag_slots, &out.fragment_buffers,
                    &out.fragment_textures, &out.fragment_samplers);
@@ -6470,6 +6524,9 @@ rwa_render_create(struct rwa_device *device,
          goto fail;
       }
       uniform_extents(vs, render->vertex_ubo_extent);
+      if (lower_ssbo_bias(device, vs, &render->vinfo, &render->vertex_ssbo_bias_ubo,
+                           why, why_size) != 0)
+         goto fail;
       /*
        * The vertex attributes, which used to be the end of this road: a shader with a
        * [[stage_in]] input was refused by name because the contract carried no layout,
@@ -7393,13 +7450,13 @@ rwa_render_draw(struct rwa_render *render, const struct rwa_draw *draw,
    if (device->timing) times[2] = os_time_get_nano();
    int rc = -1;
    if (bind_stage(device, PIPE_SHADER_FRAGMENT, &render->finfo, render->frag_own_sampler,
-                  render->frag_compare_sampler, render->fragment_ubo_extent,
+                  render->frag_compare_sampler, render->fragment_ubo_extent, render->fragment_ssbo_bias_ubo,
                   &draw->fragment, draw->fragment_buffer_table, draw->fragment_buffer_table_count,
                   fname, &fbound, why, why_size) != 0)
       goto unbind;
    if (!render->generated_vertex &&
        bind_stage(device, PIPE_SHADER_VERTEX, &render->vinfo, render->vert_own_sampler,
-                  render->vert_compare_sampler, render->vertex_ubo_extent,
+                  render->vert_compare_sampler, render->vertex_ubo_extent, render->vertex_ssbo_bias_ubo,
                   &draw->vertex, draw->vertex_buffer_table, draw->vertex_buffer_table_count, vname,
                   &vbound, why, why_size) != 0)
       goto unbind;

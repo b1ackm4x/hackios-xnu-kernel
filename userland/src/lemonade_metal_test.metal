@@ -175,3 +175,42 @@ fragment float4 lemonade_uniform_dynamic(constant float4 *values [[buffer(0)]],
 {
     return values[index];
 }
+
+kernel void lemonade_offset_copy(device const uint *src [[buffer(0)]],
+                                  device uint *dst [[buffer(1)]],
+                                  constant uint &salt [[buffer(15)]],
+                                  uint id [[thread_position_in_grid]])
+{
+    dst[id]=src[id]*3+salt;
+}
+kernel void lemonade_offset_atomic(device atomic_uint *a [[buffer(0)]],
+                                    device atomic_uint *b [[buffer(1)]])
+{
+    atomic_fetch_add_explicit(a+16,7,memory_order_relaxed);
+    atomic_fetch_add_explicit(b,11,memory_order_relaxed);
+}
+struct LemonadeOffsetArgs {
+    device const uint *src [[id(0)]];
+    device uint *dst [[id(1)]];
+};
+kernel void lemonade_offset_argbuf(constant LemonadeOffsetArgs &args [[buffer(0)]],
+                                    uint id [[thread_position_in_grid]])
+{
+    args.dst[id]=args.src[id]*3+19;
+}
+vertex float4 lemonade_offset_vertex(uint id [[vertex_id]],
+                                      device const float2 *positions [[buffer(1)]])
+{
+    return float4(positions[id],.5,1);
+}
+fragment float4 lemonade_offset_color(device const float4 *color [[buffer(0)]])
+{
+    return color[0];
+}
+fragment float4 lemonade_offset_store(float4 p [[position]],
+                                      device uint *pixels [[buffer(0)]])
+{
+    uint i=uint(p.y)*16+uint(p.x);
+    pixels[i]=i*5+7;
+    return float4(0,1,0,1);
+}

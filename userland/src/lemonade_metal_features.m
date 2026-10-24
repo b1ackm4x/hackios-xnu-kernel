@@ -133,6 +133,103 @@ static void lifetimeTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MT
     }
 }
 
+/* Typed pointers with API offsets smaller than Adreno's SSBO alignment. Every
+ * writable case checks the surrounding bytes, not only the expected payload. */
+static void deviceOffsetTests(id<MTLDevice> device,id<MTLCommandQueue> queue,id<MTLLibrary> library)
+{
+    for(unsigned mode=0;mode<5;mode++) @autoreleasepool {
+        NSUInteger offset=(NSUInteger[]){4,16,60,7408,7408}[mode];
+        NSUInteger outputOffset=mode==4?4:offset+68;
+        NSError *error=nil;
+        id<MTLFunction> function=[library newFunctionWithName:mode==4?@"lemonade_offset_argbuf":@"lemonade_offset_copy"];
+        id<MTLComputePipelineState> pipeline=[device newComputePipelineStateWithFunction:function error:&error];
+        id<MTLBuffer> src=[device newBufferWithLength:8192 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> dst=[device newBufferWithLength:8192 options:MTLResourceStorageModeShared];
+        uint32_t salt=19;
+        id<MTLBuffer> saltBuffer=[device newBufferWithBytes:&salt length:4 options:MTLResourceStorageModeShared];
+        id<MTLArgumentEncoder> args=mode==4?[function newArgumentEncoderWithBufferIndex:0]:nil;
+        id<MTLBuffer> argBuffer=args?[device newBufferWithLength:args.encodedLength options:MTLResourceStorageModeShared]:nil;
+        char name[80];snprintf(name,sizeof(name),mode==4?"device-offset-argument-buffer-%lu":"device-offset-copy-%lu",(unsigned long)offset);
+        if(!pipeline||!src.contents||!dst.contents||!saltBuffer||(mode==4&&(!args||!argBuffer))) {
+            result(name,NO,0,1);
+        } else {
+            memset(src.contents,0x5a,8192);memset(dst.contents,0xa5,8192);
+            for(unsigned i=0;i<64;i++)((uint32_t*)((uint8_t*)src.contents+offset))[i]=i*11+3;
+            id<MTLCommandBuffer> command=[queue commandBuffer];id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];
+            if(mode==4) {
+                [args setArgumentBuffer:argBuffer offset:0];[args setBuffer:src offset:offset atIndex:0];[args setBuffer:dst offset:outputOffset atIndex:1];
+                [encoder setBuffer:argBuffer offset:0 atIndex:0];[encoder useResource:src usage:MTLResourceUsageRead];[encoder useResource:dst usage:MTLResourceUsageWrite];
+            } else {
+                [encoder setBuffer:src offset:offset atIndex:0];[encoder setBuffer:dst offset:outputOffset atIndex:1];[encoder setBuffer:saltBuffer offset:0 atIndex:15];
+            }
+            [encoder dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(16,1,1)];[encoder endEncoding];
+            BOOL done=finish(command);unsigned different=0;
+            for(unsigned i=0;i<2048;i++) {
+                uint32_t out=(i>=outputOffset/4&&i<outputOffset/4+64)?((i-outputOffset/4)*11+3)*3+salt:0xa5a5a5a5;
+                uint32_t in=(i>=offset/4&&i<offset/4+64)?(i-offset/4)*11+3:0x5a5a5a5a;
+                different+=((uint32_t*)dst.contents)[i]!=out;
+                different+=((uint32_t*)src.contents)[i]!=in;
+            }
+            result(name,done&&!different,command.status,different);
+        }
+        [pipeline release];[function release];[src release];[dst release];[saltBuffer release];[args release];[argBuffer release];
+    }
+    @autoreleasepool {
+        NSError *error=nil;id<MTLFunction> function=[library newFunctionWithName:@"lemonade_offset_atomic"];
+        id<MTLComputePipelineState> pipeline=[device newComputePipelineStateWithFunction:function error:&error];
+        id<MTLBuffer> shared=[device newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        if(!pipeline||!shared.contents)result("device-offset-atomic-alias",NO,0,1);
+        else {
+            memset(shared.contents,0xa5,256);((uint32_t*)shared.contents)[17]=0;
+            id<MTLCommandBuffer> command=[queue commandBuffer];id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline];[encoder setBuffer:shared offset:4 atIndex:0];[encoder setBuffer:shared offset:68 atIndex:1];
+            [encoder dispatchThreadgroups:MTLSizeMake(4,1,1) threadsPerThreadgroup:MTLSizeMake(16,1,1)];[encoder endEncoding];
+            BOOL done=finish(command);unsigned different=0;
+            for(unsigned i=0;i<64;i++)different+=((uint32_t*)shared.contents)[i]!=(i==17?64*18:0xa5a5a5a5);
+            result("device-offset-atomic-alias",done&&!different,command.status,different);
+        }
+        [function release];[pipeline release];[shared release];
+    }
+    for(unsigned mode=0;mode<2;mode++) @autoreleasepool {
+        NSError *error=nil;
+        id<MTLFunction> vs=[library newFunctionWithName:@"lemonade_offset_vertex"];
+        id<MTLFunction> fs=[library newFunctionWithName:mode?@"lemonade_offset_store":@"lemonade_offset_color"];
+        MTLRenderPipelineDescriptor *pd=[[MTLRenderPipelineDescriptor alloc]init];pd.vertexFunction=vs;pd.fragmentFunction=fs;
+        pd.colorAttachments[0].pixelFormat=MTLPixelFormatRGBA8Unorm;
+        id<MTLRenderPipelineState> pipeline=[device newRenderPipelineStateWithDescriptor:pd error:&error];
+        MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+        td.storageMode=MTLStorageModeShared;td.usage=MTLTextureUsageRenderTarget;
+        id<MTLTexture> target=[device newTextureWithDescriptor:td];
+        id<MTLBuffer> positions=[device newBufferWithLength:8192 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> values=[device newBufferWithLength:2048 options:MTLResourceStorageModeShared];
+        const char *name=mode?"device-offset-fragment-store":"device-offset-render-rebind";
+        if(!pipeline||!target||!positions.contents||!values.contents)result(name,NO,0,1);
+        else {
+            memset(positions.contents,0x5a,8192);memset(values.contents,0xa5,2048);
+            const float quad[]={-1,-1,1,-1,-1,1,1,1},green[]={0,1,0,1},red[]={1,0,0,1};
+            memcpy((uint8_t*)positions.contents+7408,quad,sizeof(quad));
+            if(!mode){memcpy((uint8_t*)values.contents+16,green,16);memcpy((uint8_t*)values.contents+32,red,16);}
+            MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];pass.colorAttachments[0].texture=target;
+            pass.colorAttachments[0].loadAction=MTLLoadActionClear;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
+            id<MTLCommandBuffer> command=[queue commandBuffer];id<MTLRenderCommandEncoder> encoder=[command renderCommandEncoderWithDescriptor:pass];
+            [encoder setRenderPipelineState:pipeline];[encoder setVertexBuffer:positions offset:7408 atIndex:1];
+            [encoder setFragmentBuffer:values offset:mode?60:16 atIndex:0];
+            if(!mode)[encoder setScissorRect:(MTLScissorRect){0,0,8,16}];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            if(!mode){[encoder setFragmentBuffer:values offset:32 atIndex:0];[encoder setScissorRect:(MTLScissorRect){8,0,8,16}];[encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];}
+            [encoder endEncoding];BOOL done=finish(command);unsigned different=0;uint8_t pixels[1024];
+            [target getBytes:pixels bytesPerRow:64 fromRegion:MTLRegionMake2D(0,0,16,16) mipmapLevel:0];
+            for(unsigned i=0;i<256;i++)for(unsigned c=0;c<4;c++)different+=pixels[i*4+c]!=(c==3||c==(mode||i%16<8?1:0)?255:0);
+            if(mode)for(unsigned i=0;i<512;i++)different+=((uint32_t*)values.contents)[i]!=(i>=15&&i<271?(i-15)*5+7:0xa5a5a5a5);
+            uint8_t expected[8192];memset(expected,0x5a,sizeof(expected));memcpy(expected+7408,quad,sizeof(quad));
+            different+=memcmp(positions.contents,expected,sizeof(expected))!=0;
+            result(name,done&&!different,command.status,different);
+        }
+        [pipeline release];[pd release];[vs release];[fs release];[target release];[positions release];[values release];
+    }
+}
+
 int lemonade_metal_features(id<MTLDevice> device, const char *path)
 {
     @autoreleasepool {
@@ -761,6 +858,7 @@ int lemonade_metal_features(id<MTLDevice> device, const char *path)
             [values release];[selected release];[fs release];[p release];[uniformPipeline release];
         }
         lifetimeTests(device,queue,library);
+        deviceOffsetTests(device,queue,library);
         printf("lemonade-metal: feature summary checks=%u failed=%u\n", checks, failures);
         [src release]; [dst release]; [compute release]; [kernel release]; [output release]; [countBuffer release];
         [pipeline release]; [pd release]; [vertex release]; [fragment release]; [library release];

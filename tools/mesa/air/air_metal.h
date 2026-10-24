@@ -503,10 +503,9 @@ unsigned rwa_argbuf_encoded_members(const struct rwa_buffer *dest, size_t dest_o
  *     softpipe wraps the pointer). What is copied is `air.buffer_size` where the metadata
  *     carries one, which is all the shader can read, and the rest of the buffer
  *     otherwise.
- *   - a `device` member or argument (an SSBO) at an offset the GPU cannot fetch from is
- *     REFUSED BY NAME, and the reason is not symmetry: the shader may WRITE it, and the
- *     copy that serves a UBO would take the writes with it when it was thrown away.
- *     Gallium has no user_buffer on a shader buffer for the same reason.
+ *   - a `device` member or argument (an SSBO) keeps the original allocation at
+ *     an aligned hardware base. A private per-stage UBO supplies the remainder
+ *     added to shader loads, stores and atomics, preserving aliases and writes.
  *
  * It is a SECOND array beside `rwa_bindings.buffers` rather than a field in it, and the
  * reason is this project's own scar tissue: `rwa_bindings` is embedded BY VALUE in
