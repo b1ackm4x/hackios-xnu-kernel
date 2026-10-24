@@ -1443,6 +1443,7 @@ main(int argc, char **argv, char **envp)
 	show_system();
 	mount_writable();
 	restore_var();
+#ifndef REDWOOD_RELEASE
 	test_files();
 	test_writable();
 	test_memory();
@@ -1452,6 +1453,11 @@ main(int argc, char **argv, char **envp)
 	test_time();
 
 	printf("\n=== %d checks, %d failed ===\n", checks, failures);
+#else
+	/* Production images keep the mount/setup checks, but never allocate test
+	 * workloads, create test files, fork probes, or run diagnostic binaries. */
+	printf("init: runtime setup complete; failures=%d\n", failures);
+#endif
 	/* daemons that do not run as root get the console as their standard error too */
 	chmod("/dev/console", 0666);
 	configure_inject();
