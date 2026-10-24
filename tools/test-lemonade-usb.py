@@ -160,6 +160,43 @@ class DeviceSafety(unittest.TestCase):
                 self.run_action('run', '--kernel', 'built', '--userland', *extra)
         self.assertEqual(self.calls, [])
 
+    def test_display_fences_require_explicit_scope(self):
+        for action, extra in (('boot', ()), ('run', ()),
+                              ('run', ('--kernel', 'built', '--display', 'sync')),
+                              ('run', ('--kernel', 'built', '--display', 'irq', '--userland'))):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action(action, '--display-fences', *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_display_fences_capability_and_bootarg(self):
+        self.fastboot = self.loader + '\tfastboot\n'
+        self.product = 'xnuloader'
+        self.result = 'returned 19 0'
+        kernel = b'fence kernel'
+        (self.root / 'out/lemonade-kernel').write_bytes(kernel)
+        manifest = {'device': 'lemonade', 'stage': 'xnu-kernel',
+                    'sha256': hashlib.sha256(kernel).hexdigest(), 'display_modes_supported': ['sync']}
+        path = self.root / 'out/lemonade-kernel.manifest.json'
+        path.write_text(json.dumps(manifest))
+        args = ('--kernel', 'built', '--display', 'sync', '--userland', '--seconds', '1')
+        with self.assertRaisesRegex(SystemExit, 'producer-release fence support'):
+            self.run_action('run', *args, '--display-fences')
+        self.assertFalse(any('stage' in c for c in self.calls))
+        manifest['display_fences_supported'] = 'copy-release-v1'
+        path.write_text(json.dumps(manifest))
+        (self.root / 'userland').mkdir()
+        image = self.root / 'userland/root.apfs'
+        image.write_bytes(b'root')
+        record = {'bytes': image.stat().st_size, 'sha256': hashlib.sha256(image.read_bytes()).hexdigest()}
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': record, 'userland/system.apfs': record}))
+        for enabled in (False, True):
+            self.calls.clear()
+            self.run_action('run', *args, *(('--display-fences',) if enabled else ()))
+            result = json.loads((self.root / 'out/lemonade-xnu.manifest.json').read_text())
+            self.assertEqual(result['display_fences'], enabled)
+            self.assertEqual('fb_fences=1' in result['cmdline'].split(), enabled)
+
     def test_system_metal_uses_tested_default_and_records_explicit_profile(self):
         self.fastboot = self.loader + '\tfastboot\n'
         self.product = 'xnuloader'

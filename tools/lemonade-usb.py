@@ -102,6 +102,7 @@ def main():
     parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2 (tested system default); does not imply complete family compliance')
     parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual additionally disables automatic refresh and triggers each transfer; all restore firmware state')
     parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual; default 64')
+    parser.add_argument('--display-fences', action='store_true', help='experimental producer-release waits; requires --display sync --userland')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
     parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
@@ -145,6 +146,8 @@ def main():
         parser.error('--display-flips requires --display flip/manual')
     if args.display_flips == 1000 and args.seconds < 50:
         parser.error('1000 display flips require at least 50 seconds')
+    if args.display_fences and (args.action != 'run' or args.kernel != 'built' or args.display != 'sync' or not args.userland):
+        parser.error('--display-fences requires run --kernel built --display sync --userland')
     if args.metal_test and args.metal_system:
         parser.error('Choose process-local or system Metal testing')
     if args.metal_profile is not None and not args.metal_system:
@@ -315,6 +318,8 @@ def main():
                 raise SystemExit("Refusing: kernel has no requested lemonade Wi-Fi mode")
             if args.display and args.display not in kernel_manifest.get('display_modes_supported', []):
                 raise SystemExit('Refusing: kernel has no requested lemonade display mode')
+            if args.display_fences and kernel_manifest.get('display_fences_supported') != 'copy-release-v1':
+                raise SystemExit('Refusing: kernel has no producer-release fence support')
             if args.gpu_clock is not None and args.gpu_clock not in kernel_manifest.get('gpu_clock_mhz_supported', []):
                 raise SystemExit('Refusing: kernel has no requested stock GPU clock')
             expected_kernel = kernel_manifest["sha256"]
@@ -349,6 +354,9 @@ def main():
         if args.touch:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("touchscreen="))
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
+        if args.display_fences:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('fb_fences='))
+            cmdline += ' fb_fences=1'
         if args.wifi:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith(("wifi=", "wifi_step=", "lemonade_wifi=")))
             cmdline += " wifi=0 lemonade_wifi=" + str({"inspect": 1, "rails": 2, "domain": 3, "clocks": 4, "resets": 5, "controller": 6, "phy": 7, "root": 8, "radio": 9, "link": 10, "endpoint": 11, "mmio": 12, "smmu": 13, "sid": 14, "dma": 15, "dma-fault": 16, "bhi": 17, "mhi": 18, "bhie": 19, "ipcr": 20, "qmi": 21, "driver": 22, "scan": 23, "station": 24}[args.wifi])
@@ -431,6 +439,7 @@ def main():
         record['metal_system'] = args.metal_system
         record['metal_profile'] = args.metal_profile
         record['display'] = args.display
+        record['display_fences'] = args.display_fences
         if graphics_record:
             record['graphics_image'] = graphics_record
         if firmware_record:

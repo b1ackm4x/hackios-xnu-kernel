@@ -165,6 +165,9 @@ static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
 static TUNABLE(uint32_t, gThreads, "fb_threads", 3);
 #define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
 static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
+/* Experimental producer-release waits; opt in until desktop acceptance is complete. */
+static TUNABLE(uint32_t, gFences, "fb_fences", 0);
+#define SWAP_WAIT_MS            5000
 static inline unsigned
 swapQueue(void)
 {
@@ -249,10 +252,13 @@ public:
 	 * clock of its own, and a SwapEnd held past its next tick makes that tick late, the clock going
 	 * on from there (rc.jobs.fps: 28% of the frames over 16.7 ms with two, 33% with one).
 	 */
-	IOLock *        fSwapLock;              /* around the next five */
+	IOLock *        fSwapLock;              /* queue and producer-release state */
 	uint8_t         fSwap[SWAP_QUEUE][SWAP_SIZE];   /* the swaps on their way to the panel (fb_queue), from fSwapFirst on */
 	MiniIOSurface * fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS]; /* ... their surfaces, held from SwapEnd on: their maker may let go of them */
 	unsigned        fSwapFirst, fSwapsWaiting;
+	uint32_t        fReadingSwapID;         /* dequeuing a swap does not finish reading its surfaces */
+	bool            fReadingSwap;
+	uint32_t        fFenceGeneration;       /* wait event: all waiters recheck their own condition */
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
 	 * (boot-arg fb_beat=0: at once): frames then follow each other at an even pace whatever
@@ -300,6 +306,9 @@ public:
 	void publishModes(void);
 	MiniIOSurface * defaultSurface(void);
 	void present(const uint8_t * swap);
+	bool swapPending(uint32_t id, uint32_t mode); /* fSwapLock held */
+	IOReturn waitSwap(uint32_t id, uint32_t flags, uint32_t timeoutMS, const bool * closed);
+	void finishSwap(void);
 	void show(const uint8_t * swap, MiniIOSurface ** surfaces);
 	void presenter(void);
 	static void presenterMain(void * self, wait_result_t result);
@@ -405,6 +414,8 @@ IOMobileFramebuffer::start(IOService * provider)
 	}
 	fLock = IOLockAlloc();
 	fSwapLock = IOLockAlloc();
+	if (fLock == NULL || fSwapLock == NULL) return false;
+	if (gFences) IOLog("MiniIOMobileFramebuffer: producer release fences enabled (CPU copy, default wait %u ms)\n", SWAP_WAIT_MS);
 	if (kernel_thread_start(&IOMobileFramebuffer::presenterMain, this, &thread) != KERN_SUCCESS) {
 		IOLog("MiniIOMobileFramebuffer: no thread to put frames on the panel with\n");
 		return false;
@@ -863,6 +874,67 @@ IOMobileFramebuffer::reportFrameTimes(void)
 	fFramePauses = fFrameLongest = 0;
 }
 
+/*
+ * iOS 16.5 SwapWait: low flags 0 = no longer scanned/read, 1 = no longer pending,
+ * 2 = drain; bit 31 polls (Busy instead of sleeping), third scalar is milliseconds.
+ * The copy presenter conservatively completes both per-ID stages after its last
+ * read and surface cleanup. The panel then reads the separate GOP framebuffer.
+ * Check IDs by equality, not ordering: they wrap and need not retire in ID order.
+ */
+bool
+IOMobileFramebuffer::swapPending(uint32_t id, uint32_t mode)
+{
+	if (fReadingSwap && (mode == 2 || fReadingSwapID == id)) return true;
+	for (unsigned i = 0; i < fSwapsWaiting; i++) {
+		unsigned slot = (fSwapFirst + i) % SWAP_QUEUE;
+		if (mode == 2 || swapWord(fSwap[slot], SWAP_ID) == id) return true;
+	}
+	return false;
+}
+
+IOReturn
+IOMobileFramebuffer::waitSwap(uint32_t id, uint32_t flags, uint32_t timeoutMS, const bool * closed)
+{
+	const uint32_t mode = flags & 0x7fffffff;
+	const bool poll = (flags & 0x80000000) != 0;
+	AbsoluteTime deadline;
+	IOReturn result = kIOReturnSuccess;
+	uint64_t completed;
+
+	if (mode > 4) return kIOReturnBadArgument;
+	clock_interval_to_deadline(timeoutMS ? timeoutMS : SWAP_WAIT_MS, kMillisecondScale, &deadline);
+	IOLockLock(fSwapLock);
+	for (;;) {
+		if (*closed) { result = kIOReturnNotOpen; break; }
+		/* 3/4 are immediate on/off state checks, not queue waits. Our panel
+		 * remains powered on; RequestPowerChange does not yet turn it off. */
+		if (mode == 3) break;
+		if (mode == 4) { result = kIOReturnBadArgument; break; }
+		if (!swapPending(id, mode)) break;
+		if (poll) { result = kIOReturnBusy; break; }
+		if (mach_absolute_time() >= deadline) { result = kIOReturnTimeout; break; }
+		int waited = IOLockSleepDeadline(fSwapLock, &fFenceGeneration, deadline, THREAD_ABORTSAFE);
+		if (waited == THREAD_INTERRUPTED) { result = kIOReturnAborted; break; }
+		/* Completion and close win a simultaneous timeout. Spurious wakes
+		 * keep the original deadline rather than extending the wait. */
+	}
+	completed = mach_absolute_time();        /* timestamp the result while queue state is still locked */
+	IOLockUnlock(fSwapLock);
+	if (gTouchLat) redwood_tl("tl: wr %u %#x %#x at %llu\n", id, flags, result, micros(completed));
+	return result;
+}
+
+void
+IOMobileFramebuffer::finishSwap(void)
+{
+	IOLockLock(fSwapLock);
+	if (gFences && gTouchLat) redwood_tl("tl: r %u at %llu\n", fReadingSwapID, micros(mach_absolute_time()));
+	fReadingSwap = false;
+	fFenceGeneration++;
+	IOLockWakeup(fSwapLock, &fFenceGeneration, false);
+	IOLockUnlock(fSwapLock);
+}
+
 /* SwapEnd: the swap is handed to the thread that puts frames on the panel, as soon as that has no other waiting. */
 void
 IOMobileFramebuffer::present(const uint8_t * swap)
@@ -899,6 +971,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
 	}
 	fSwapsWaiting++;
+	if (gFences && gTouchLat) redwood_tl("tl: q %u at %llu\n", swapWord(swap, SWAP_ID), micros(mach_absolute_time()));
 	IOLockWakeup(fSwapLock, fSwap, true);
 	IOLockUnlock(fSwapLock);
 }
@@ -922,6 +995,8 @@ IOMobileFramebuffer::presenter(void)
 		}
 		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
 		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
+		fReadingSwapID = swapWord(swap, SWAP_ID);
+		fReadingSwap = true;
 		IOLockUnlock(fSwapLock);
 		show(swap, surfaces);
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
@@ -930,6 +1005,7 @@ IOMobileFramebuffer::presenter(void)
 			}
 		}
 		MiniIOSurfaceClearKept();               /* (the next frame is some milliseconds away) */
+		finishSwap();                          /* no source surface is read after release */
 	}
 }
 
@@ -1140,6 +1216,7 @@ class IOMobileFramebufferUserClient : public IOUserClient
 	bool                    fVSyncRunning;
 	bool                    fHardwareVSync;
 	bool                    fClosed;
+	bool                    fFenceClosed;        /* protected by the owner's fSwapLock */
 
 	static void vsyncFired(thread_call_param_t self, thread_call_param_t unused);
 	void vsync(void);
@@ -1183,6 +1260,12 @@ IOMobileFramebufferUserClient::start(IOService * provider)
 IOReturn
 IOMobileFramebufferUserClient::clientClose(void)
 {
+	if (fOwner != NULL && fOwner->fSwapLock != NULL) {
+		IOLockLock(fOwner->fSwapLock);
+		fFenceClosed = true;
+		IOLockWakeup(fOwner->fSwapLock, &fOwner->fFenceGeneration, false);
+		IOLockUnlock(fOwner->fSwapLock);
+	}
 	if (fLock != NULL) {
 		IOLockLock(fLock);
 		fClosed = true;
@@ -1395,12 +1478,13 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		fOwner->present((const uint8_t *) args->structureInput);
 		return kIOReturnSuccess;
 
-	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
+	case kFBMethodSwapWait:
+		if (gFences && args->scalarInputCount < 3) return kIOReturnBadArgument;
 		if (gTouchLat) {
 			redwood_tl("tl: w %llu %#llx %#llx at %llu\n", args->scalarInputCount > 0 ? in[0] : 0,
 			    args->scalarInputCount > 1 ? in[1] : 0, args->scalarInputCount > 2 ? in[2] : 0, micros(mach_absolute_time()));
 		}
-		return kIOReturnSuccess;
+		return gFences ? fOwner->waitSwap((uint32_t) in[0], (uint32_t) in[1], (uint32_t) in[2], &fFenceClosed) : kIOReturnSuccess;
 	case kFBMethodSwapSignal:
 	case kFBMethodSwapCancel:
 	case kFBMethodSwapCancelAll:

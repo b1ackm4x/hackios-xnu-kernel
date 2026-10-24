@@ -231,7 +231,8 @@ AddressSanitizer / UndefinedBehaviorSanitizer 均通过。这只验证 CPU 执�
 检查器同时验证无自动传输、单命令单帧、主 PP 完成和恢复顺序；14 项证据失效测试通过。
 实际 C 驱动的 9 组主机检查覆盖中断恢复、真实 INTF_MUX 高位以及拒绝错误 PP，
 AddressSanitizer / UndefinedBehaviorSanitizer 通过；USB 工具的 41 项检查通过。
-这仍是明确启用的独立缓冲实验。它建立了逐帧完成依据，尚未接入桌面生产者的缓冲区复用同步。
+这仍是明确启用的独立缓冲实验。它建立了逐帧完成依据；桌面 CPU 复制路径的生产者复用同步见下节，
+两项结果尚未组成桌面直接扫描路径。
 
 时序依据：[OnePlus SM8350 命令 encoder](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/oneplus/SM8350_R_11.0/techpack/display/msm/sde/sde_encoder_phys_cmd.c)、
 [INTF 和通道选择](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/oneplus/SM8350_R_11.0/techpack/display/msm/sde/sde_hw_intf.c)。
@@ -243,7 +244,7 @@ profile 1，并在运行记录中写入实际值；仍可显式选择 profile 0 
 和 4 项 CoreAnimation 检查全部通过，90 秒桌面运行正常返回；这不代表已全面满足
 Apple2 家族的全部能力。
 
-这仍是独立显示缓冲测试，尚未把桌面 IOSurface 直接送屏，也没有完成生产者 release fence、
+这仍是独立显示缓冲测试，尚未把桌面 IOSurface 直接送屏，也没有完成直接扫描所需的 release fence、
 1125×2436 到 1080×2400 的硬件缩放或多图层合成。MISR 是 DPU 内部输出检查，
 不等于实际面板的光学测量。默认桌面继续使用此前验证的同步 CPU 复制路径。
 
@@ -289,6 +290,54 @@ CPU 复制平均 3.165 ms。GPU 两路温度均为 47.6°C。长帧仍保留，�
 验收汇总是 `graphics-20261024/metal-lifetime-device-evidence.json`，性能记录是
 `graphics-20261024/metal-lifetime-device-performance.json`。
 
+### CPU 复制的生产者 release fence
+
+此前 `SwapWait` 总是立即返回成功，即使 presenter 仍在读取源 IOSurface。现在新增显式
+`--display-fences`（`fb_fences=1`），按实际排队与读取状态返回结果。该开关要求已构建且带
+`copy-release-v1` 能力标记的内核、`--display sync` 和用户空间；默认仍关闭。
+
+接口按本地 iOS 16.5 的 framework 与驱动调用约定核对：低位 flags 0/1 是按 swap ID 的
+读取/待呈现阶段，2 等待队列清空，高位 bit 31 表示查询，尚在使用时返回 `kIOReturnBusy`。
+第三标量的单位是毫秒。当前复制路径保守地把 0/1 都放到最后一次源读取、`MiniIOSurfaceDrop`
+和 `MiniIOSurfaceClearKept` 之后完成；从队列取出不是允许复用的时点。ID 按相等比较，支持回绕。
+flags 3/4 是立即状态查询，不能当作队列等待；本驱动仍保持面板开启，尚未实现实际电源切换。
+
+阻塞等待释放队列锁，醒后重新检查；虚假唤醒不延长期限，连接关闭会唤醒所有等待者。
+超时 0 使用本实现的 5 秒上限，超时返回错误，不伪造完成。取消/信号接口仍未实现完整语义，
+也不会因此提前释放正在读取的源。主机测试编译实际队列、等待、presenter 循环和关闭方法，
+覆盖出队后仍忙、两次资源清理期间仍忙、ID/环形队列回绕、毫秒期限、虚假唤醒、超时边界、
+中断和关闭；6 组检查在 AddressSanitizer / UndefinedBehaviorSanitizer 下通过。
+
+首轮真机 `1792800145-run-cp0.log` 使用内核 `b1c3c89a858376f4a2fa3e1c1a125da44c1cab2f49c5b0dc81268e40f79a9dd4`，
+90 秒系统 Metal 桌面录得 1,262 次入队、呈现与释放，562 次 Busy、1,968 次可对应到已释放
+swap 的成功等待，未发现提前释放或提前返回成功。93 项 Metal、2 项 MPS、4 项 CA 全部通过。
+5,351 次 TE、1,262 次呈现的越窗/丢弃/异常中断均为零，显示中断和总线时钟均恢复。
+
+11 个固定输入动作的手指按下期间为 56.22 FPS，全部活动窗口为 55.12 FPS，间隔 P95
+31.866 ms、最大 244.298 ms；CPU 复制平均 3.183 ms，GPU 两路温度 48.6/47.9°C。
+这不证明帧率提升：与前轮相比存在运行波动，长帧仍在。截图 `1792800154-screen.png`
+保留正常文字、图标与圆角，天气/日历小组件仍为空白。日志检查器按同一锁内记录的
+`q/r/wr` 时间点检查顺序，拒绝缺失、矛盾、提前释放、假成功及退出恢复失败的证据。
+内核启动提示可能从较小的 printf 环形缓冲中被覆盖，因此启用检查使用加载器的实际
+boot args、运行清单和持续的运行事件，不依赖单条启动提示。
+
+普通 GLES 桌面与进程内 Metal 回归 `1792800300-run-cp0.log` 运行 100 秒，同一内核录得
+1,352 次入队/呈现/释放、230 次 Busy、2,484 次可对应已释放 swap 的成功等待，顺序检查通过。
+FD660 GLES 三角形像素读回、26 项 drawable/IOSurface、15 项栅格和 93 项 Metal 特性通过；5,959 次 TE，越窗/丢弃/
+异常中断均为零，恢复检查通过。两轮结束后 Android 正常启动，USB 身份、原槽位和锁状态一致，
+`boot/vendor_boot/dtbo/vbmeta/xbl` 五个活动分区哈希均与原备份相同
+（`android-roundtrip-20261024T080550.json`）。
+
+此处完成表示 **CPU 已不再读取生产者的源**。面板仍扫描独立 GOP，不能把这套结果称为
+DPU 直接扫描完成通知、硬件缩放、零拷贝或完整显示电源管理。
+
+```sh
+python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --display sync --display-fences --metrics --seconds 90
+python3 tools/lemonade-check-fences.py local/lemonade/RUN-run-cp0.log
+python3 tools/test-lemonade-display-fences.py
+python3 tools/test-lemonade-check-fences.py
+```
+
 ## 复现
 
 先准备项目的 Linux 构建环境、iOS 16.5 SDK、核验过的系统镜像和有权使用的 Metal 编译器。
@@ -303,6 +352,8 @@ tools/lemonade-build-kernel.sh
 python3 tools/test-lemonade-usb.py
 python3 tools/test-lemonade-display-stop.py
 python3 tools/test-lemonade-check-display.py
+python3 tools/test-lemonade-display-fences.py
+python3 tools/test-lemonade-check-fences.py
 python3 tools/test-lemonade-metal-lifetime.py
 python3 tools/lemonade-usb.py run --profile performance --metal-test --display sync --metrics --seconds 100
 ```
@@ -320,7 +371,8 @@ python3 tools/lemonade-usb.py run --profile performance --metal-test --display s
 ## 尚未达到的边界
 
 系统所有应用的 Metal 兼容、深度 MSAA resolve、完整 texture view、heaps/events 和全部私有 SPI
-尚未全面验收。独立双缓冲的 DPU SMMU 读取已通过上述有界测试；桌面直接扫描、生产者 release fence、硬件缩放、
+尚未全面验收。独立双缓冲的 DPU SMMU 读取及 CPU 复制的生产者 release fence 已通过上述有界测试；
+桌面直接扫描及其完成通知、硬件缩放、
 Wi-Fi 与 GPU 联合运行、120 Hz 模式及长时间温控也不能据本页结果宣称完成。
 当前安全窗口内复制仍有约 3 ms 成本，动画绘制也有长帧；GPU 可用并不意味着所有刷新瓶颈消失。
 
