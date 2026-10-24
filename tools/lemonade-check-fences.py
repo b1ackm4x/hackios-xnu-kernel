@@ -85,7 +85,7 @@ def check(record, raw):
         'synchronized_copy_presenter': record.get('display') == 'sync' and 'lemonade_display=4' in args,
         'storage_writes_disabled': 'ufs_write=0' in args,
         'returned_to_loader': bool(re.search(r'result: returned \d+ 0(?:\s|$)', record.get('result', ''))),
-        'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|uncaught exception', text, re.I),
+        'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|Debugger message:\s*panic|uncaught exception', text, re.I),
         'sustained_frame_evidence': len(retired) >= 100 and set(shown).issubset(retired) and len(queued) >= len(retired),
         'observed_busy_and_success': busy > 0 and checked_success >= 100 and blocking > 0,
         'release_and_wait_order': not errors,

@@ -44,6 +44,11 @@ class StageEvidence(unittest.TestCase):
     def test_timeout_overrides_pass_marker(self):
         self.assertFalse(wifi.check(*self.record(extra='wifi-lemonade: wait failed'))['passed'])
 
+    def test_truncated_panic_header_is_rejected(self):
+        result=wifi.check(*self.record(extra='aec548): kmem_alloc failed\nDebugger message: panic\n'))
+        self.assertFalse(result['passed'])
+        self.assertFalse(result['checks']['no_kernel_panic'])
+
     def test_tampered_log_is_rejected(self):
         manifest, raw = self.record()
         self.assertFalse(wifi.check(manifest, raw + b'changed')['passed'])

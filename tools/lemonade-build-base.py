@@ -31,6 +31,52 @@ RUNTIME_METAL = ('libredwoodmetal.dylib', 'libredwoodair.dylib', 'libredwood.dyl
                  'RedwoodMetal.bundle/RedwoodMetal', 'RedwoodMetal.bundle/Info.plist')
 REMOVED_JOBS = ('com.redwood.demo', 'com.redwood.wifi', 'com.redwood.varstore')
 DEBUG_ENV = ('REDWOOD_METAL_TRACE', 'OS_ACTIVITY_DT_MODE', 'CA_ASSERT_MAIN_THREAD_TRANSACTIONS')
+DESKTOP_SERVICES = {
+    'com.apple.geod': ('/System/Library/PrivateFrameworks/GeoServices.framework/geod', 'com.apple.geod'),
+    'com.apple.navd': ('/System/Library/PrivateFrameworks/MapsSupport.framework/navd', 'com.apple.navigationService'),
+    'com.apple.sleepd': ('/System/Library/PrivateFrameworks/SleepDaemon.framework/sleepd', 'com.apple.sleepd.sleepserver'),
+}
+
+
+def desktop_services():
+    """Register actual stock providers requested by SpringBoard and widgets."""
+    system = ROOT / 'userland/system.apfs'
+    expected = json.loads((ROOT / 'local/lemonade/images.json').read_text())['userland/system.apfs']['sha256']
+    if digest(system) != expected:
+        raise SystemExit('Normal System image differs from its verified manifest')
+    container = base.apfs.Container(str(system))
+    entries, receipts = {}, {}
+    try:
+        volume = base.apfs.pick_volume(container, None)
+        for name, (program, service) in DESKTOP_SERVICES.items():
+            source_path = ROOT / 'ios165/rootfs/System/Library/LaunchDaemons' / (name + '.plist')
+            source = source_path.read_bytes()
+            job = plistlib.loads(source)
+            executable = volume.lookup(program)
+            if not executable:
+                raise SystemExit('Stock desktop service is missing from System: ' + name)
+            program_hash = hashlib.sha256(volume.inode(executable[0]).contents()).hexdigest()
+            if digest(ROOT / 'ios165/rootfs' / program.lstrip('/')) != program_hash:
+                raise SystemExit('Unpacked service differs from verified System: ' + name)
+            if (job.get('Label') != name or job.get('ProgramArguments') != [program] or
+                    job.get('Program', program) != program or job.get('UserName') != 'mobile' or
+                    service not in job.get('MachServices', {})):
+                raise SystemExit('Unexpected stock desktop service identity: ' + name)
+            # Preserve stock MachServices, executable and user. Launch on demand
+            # without eager background work or unattended crash-restart loops.
+            for key in ('KeepAlive', 'RunAtLoad', 'LaunchEvents'):
+                job.pop(key, None)
+            job['ThrottleInterval'] = 30
+            job['StandardOutPath'] = job['StandardErrorPath'] = '/dev/console'
+            data = plistlib.dumps(job, fmt=plistlib.FMT_BINARY)
+            entries['LaunchDaemons/' + name + '.plist'] = (0o100644, 0, 0, data)
+            receipts[name] = {'program': program, 'system_sha256': expected,
+                'stock_plist_source': str(source_path.relative_to(ROOT)),
+                'stock_plist_sha256': hashlib.sha256(source).hexdigest(),
+                'program_sha256': program_hash, 'job_sha256': hashlib.sha256(data).hexdigest()}
+        return entries, receipts
+    finally:
+        container.close()
 
 
 def checked_receipt(directory):
@@ -65,7 +111,7 @@ def validate_tree(tree):
             program = job.get('Program') or job.get('ProgramArguments', [''])[0]
             if program.startswith('/redwood/'):
                 raise ValueError('Unwanted automatic helper in base: ' + program)
-    for name in ('com.apple.wifid', 'com.apple.configd', 'com.apple.mDNSResponder', 'com.apple.chronod'):
+    for name in ('com.apple.wifid', 'com.apple.configd', 'com.apple.mDNSResponder', 'com.apple.chronod', *DESKTOP_SERVICES):
         if 'LaunchDaemons/' + name + '.plist' not in tree:
             raise ValueError('Missing runtime service: ' + name)
 
@@ -141,6 +187,8 @@ def main():
     tree.update(base.network_services(browser=True))
     widgets, widget_receipt = graphics.widget_services()
     tree.update(widgets)
+    desktop, desktop_receipts = desktop_services()
+    tree.update(desktop)
     for p, (mode, uid, gid, data) in list(tree.items()):
         if p.startswith('LaunchDaemons/') and stat.S_ISREG(mode):
             job = plistlib.loads(data)
@@ -177,13 +225,15 @@ def main():
 
 ## 使用
 
-Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接入并允许 USB 调试，双击 `Start.command`。首次上传系统到内存约两分钟，随后直接进入桌面。在系统设置中自行选择 Wi-Fi 并输入密码。返回原 Android 双击 `Return-to-Android.command`。
+Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接入并允许 USB 调试，双击 `Start.command`。首次上传系统到内存约两分钟，随后直接进入桌面。返回原 Android 双击 `Return-to-Android.command`。
 
 此包没有开机自检、图形/网络测试程序、自动手势、调试录制或定时退出。启动只用 RAM，不刷写分区、不改槽。Wi-Fi 密码、账号和先前测试的网络信息没有打入包内。`python3 launch.py verify` 可检查所有运行文件。
 
 ## 当前范围
 
 这是现阶段 base，并非所有功能都完成的手机系统。显示沿用 60 Hz；完整 Metal 兼容、120 Hz、睡眠唤醒、完整温控、电源管理和未移植外设仍待后续版本。当前数据卷在 RAM 中，重启后设置和会话不保留；蜂窝通信等未列入本次功能基线。详细验证状态在 `manifest.json`。
+
+Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副本覆盖关联、地址获取、DNS、HTTP 和断线重连。正式包不包含该联网程序或网络配置；原生设置中首次输入密码的完整流程尚未单独验收。
 
 原作者为 hackios 项目的 oosexgang；本包是 b1ackm4x 私有 OnePlus 9 适配版本。它包含本机系统与固件材料，仅留在本机使用，不作为可公开转发的固件下载包。源代码分别维护在 hackios-xnu-kernel 与 hackios-xnu-userland 私有仓库。
 '''
@@ -198,6 +248,7 @@ Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接�
         'base_root_sha256': images['userland/root.apfs']['sha256'], 'kernel_inputs': inputs,
         'runtime_build': runtime, 'metal_runtime': {n: metal['artifacts'][n] for n in RUNTIME_METAL},
         'wifi_firmware': selected, 'widget_service': {k:v for k,v in widget_receipt.items() if k!='job_sha256'},
+        'desktop_services': desktop_receipts,
         'root_file_inventory': {p: {'mode': oct(v[0]), 'uid': v[1], 'gid': v[2], 'sha256': hashlib.sha256(v[3]).hexdigest()}
                                 for p,v in sorted(tree.items())},
         'files': {p.name: {'sha256': digest(p), 'bytes': p.stat().st_size} for p in sorted(destination.iterdir()) if p.is_file()}}

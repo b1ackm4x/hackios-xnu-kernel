@@ -20,7 +20,7 @@ def check(manifest, raw):
         'returned_to_loader': bool(re.search(r'result: returned \d+ 0(?:\s|$)', manifest.get('result', ''))),
         'read_only_survey_completed': 'wifi-lemonade: inspection complete; hardware writes=0;' in log,
         'no_driver_failure': not re.search(r'wifi-lemonade: (?:wait failed|stage \d+ failed|root-power failed)|request timed out|DMA cleanup failed|restoration failed|release failed', log),
-        'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|uncaught exception', log, re.I),
+        'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|Debugger message:\s*panic|uncaught exception', log, re.I),
         'redwood_radio_disabled': 'wifi=0' in manifest.get('cmdline', '').split(),
         'matching_stage_argument': ('lemonade_wifi=' + str(MODES.get(mode))) in manifest.get('cmdline', '').split(),
     }

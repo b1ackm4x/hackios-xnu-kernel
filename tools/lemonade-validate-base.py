@@ -39,6 +39,19 @@ def run(args, output=None):
     return result.stdout
 
 
+def wait_for_loader(manifest, seconds=60):
+    deadline=time.monotonic()+seconds
+    while time.monotonic()<deadline:
+        try:
+            serial=launch.fastboot_target(manifest)
+            if serial and launch.product(serial)=='xnuloader':
+                return serial
+        except (subprocess.TimeoutExpired, SystemExit):
+            pass
+        time.sleep(1)
+    raise SystemExit('Exact RAM loader did not enumerate after boot; no System payload sent')
+
+
 def main():
     os.umask(0o077)
     folder=ROOT/'out/releases/lemonade-2026.10.24-base.1'
@@ -78,7 +91,9 @@ def main():
         changed=sorted(p for p,v in tree.items() if runtime.get(p)!=v)
         print('Disposable validation overlay prepared; release image unchanged.',flush=True)
         run(['python3','tools/lemonade-usb.py','boot'],evidence/'loader-boot.log')
-        print('Loader booted; uploading System.',flush=True)
+        print('Boot image accepted; waiting for the RAM loader USB interface.',flush=True)
+        wait_for_loader(manifest)
+        print('RAM loader identity verified; uploading System.',flush=True)
         run(['python3','tools/lemonade-usb.py','ramdisk'],evidence/'system-upload.log')
         before=set((ROOT/'local/lemonade').glob('*-run-cp0.manifest.json'))
         run(['python3','tools/lemonade-usb.py','run','--kernel','built','--boot-cpu','7','--cpus','1',
@@ -117,7 +132,9 @@ def main():
         launch.fb(serial,'oem','run','0')
         start=time.monotonic()
         while time.monotonic()-start<seconds+8:
-            time.sleep(2)
+            # Native service logging can fill the 1 MiB ring between slow
+            # samples. Capture frequently to retain retirement evidence.
+            time.sleep(0.25)
             path=evidence/(str(time.time_ns())+'-combined-live.log')
             try:
                 launch.fb(serial,'oem','log',timeout=10)
@@ -141,12 +158,29 @@ def main():
         w=wifi.check(aggregate,joined)
         (evidence/'combined-wifi-evidence.json').write_text(json.dumps(w,indent=2)+'\n')
         text=joined.decode(errors='replace')
+        metal_checks={name: f'lemonade-metal: {name} summary checks={count} failed=0' in text
+                      for name,count in (('feature',101),('MPS',2),('CA',4))}
+        acceptance={'passed':d['passed'] and w['passed'] and all(metal_checks.values()) and
+                    'init: runtime setup complete; failures=0' in text and '=== 36 checks' not in text,
+                    'kernel_sha256':record['kernel_sha256'],'base_root_sha256':record['base_root_sha256'],
+                    'metal_checks':metal_checks,'direct_passed':d['passed'],'wifi_passed':w['passed'],
+                    'manifest_path':str(path.with_suffix('.manifest.json').relative_to(ROOT)),
+                    'manifest_sha256':build.digest(path.with_suffix('.manifest.json'))}
+        (evidence/'combined-acceptance.json').write_text(json.dumps(acceptance,indent=2)+'\n')
         print(json.dumps({'log':str(path),'direct_passed':d['passed'],'direct_frames':d['completed_direct_frames'],
                           'wifi_passed':w['passed'],'networking_verified':w['networking_verified'],
                           'runtime_setup_complete':'init: runtime setup complete; failures=0' in text,
                           'runtime_boot_self_tests_absent':'=== 36 checks' not in text},indent=2),flush=True)
-        if not d['passed'] or not w['passed'] or 'init: runtime setup complete; failures=0' not in text:
+        if not acceptance['passed']:
             raise SystemExit('Combined validation did not pass; inspect the evidence before accepting the base')
+        current=json.loads((folder/'manifest.json').read_text())
+        for name in ('kernel','root.apfs','system.apfs','boot.img'):
+            if current['files'][name]!=manifest['files'][name] or build.digest(folder/name)!=current['files'][name]['sha256']:
+                raise SystemExit('Runtime package changed before recording acceptance')
+        current.update(integration_verified=True,integration_kernel_sha256=record['kernel_sha256'],
+                       integration_root_sha256=record['base_root_sha256'],
+                       integration_evidence_sha256=build.digest(evidence/'combined-acceptance.json'))
+        (folder/'manifest.json').write_text(json.dumps(current,indent=2)+'\n');build.checksums(folder)
     print('Disposable overlay and network input removed; release package contains neither.',flush=True)
 
 

@@ -46,6 +46,10 @@ def verify(folder=HERE):
             raise SystemExit('发布包校验失败：' + name)
     if (not manifest.get('dma_guard_verified') or manifest.get('dma_guard_kernel_sha256') != manifest['files']['kernel']['sha256']):
         raise SystemExit('此候选尚未完成对应内核的 Wi-Fi DMA 验证')
+    if (not manifest.get('integration_verified') or
+            manifest.get('integration_kernel_sha256') != manifest['files']['kernel']['sha256'] or
+            manifest.get('integration_root_sha256') != manifest['files']['root.apfs']['sha256']):
+        raise SystemExit('此候选尚未通过 GPU、显示与 Wi-Fi 联合验收')
     return manifest
 
 

@@ -27,7 +27,6 @@
 #include <vm/vm_kern.h>
 #include "lemonade_mhi_protocol.h"
 
-extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern void redwood_tl(const char *format, ...) __printflike(1, 2);
 static vm_offset_t gcc, pins, parf, dbi, phy, rsc, database, config, bar;
 static bool phy_started, perst_saved, radio_started, link_started, bar_saved;
@@ -39,8 +38,12 @@ static bool sid_saved, bus_master_was_enabled, msi_saved;
 static unsigned msi_offset, msi_data_offset, msi_mask_offset;
 static uint32_t msi_old_control, msi_old_low, msi_old_high, msi_old_data, msi_old_mask;
 static uint32_t sid_table_old[256], sid_cfg_old;
-extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
 extern uint64_t kvtophys(vm_offset_t va);
+/* These late BSD-init mappings must use kernel_map. The permanent io_submap
+ * is only 8 MiB, and concurrent display/GPU/touch leave too little room for
+ * WLAN's BAR and SMMU. Register mappings retain the existing kernel lifetime:
+ * stop restores/quiesces hardware while they are valid, and this RAM kernel
+ * is then discarded. DMA data aliases below still have explicit teardown. */
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern lck_mtx_t redwood_smmu_lock;
@@ -338,8 +341,8 @@ static bool inspect(void) {
         {"rchng_src", 0x6b03c}, {"rchng_cfg", 0x6b040}
     };
     static const unsigned gpio[] = {64, 65, 94, 95, 96, 153};
-    gcc = ml_io_map(0x100000, 0x100000);
-    pins = ml_io_map(0xf100000, 0x100000);
+    gcc = ml_io_map_unmappable(0x100000, 0x100000, VM_WIMG_IO);
+    pins = ml_io_map_unmappable(0xf100000, 0x100000, VM_WIMG_IO);
     if (!gcc || !pins) { return false; }
     for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
         redwood_tl("wifi-lemonade: GCC %s %#x = %#x\n", clocks[i].name,
@@ -356,7 +359,7 @@ static bool inspect(void) {
         redwood_tl("wifi-lemonade: PCIe power/clocks not ready; PARF/DBI/endpoint not accessed\n");
         return true;
     }
-    parf = ml_io_map(0x1c00000, 0x3000);
+    parf = ml_io_map_unmappable(0x1c00000, 0x3000, VM_WIMG_IO);
     if (!parf) { return false; }
     redwood_tl("wifi-lemonade: PARF sys %#x pm %#x phy %#x ltssm %#x device_type %#x\n",
         rd(parf, 0), rd(parf, 0x20), rd(parf, 0x40), rd(parf, 0x1b0), rd(parf, 0x1000));
@@ -647,7 +650,7 @@ static bool dma_allocate(unsigned requested, bool coherent, vm_offset_t *memory,
 }
 static bool dma_prepare(bool extended) {
     if ((rd(config, 4) | rd(dbi, 4)) & 4) { return false; }
-    dma_space.mmio = ml_io_map(0x15000000, 0x100000);
+    dma_space.mmio = ml_io_map_unmappable(0x15000000, 0x100000, VM_WIMG_IO);
     if (!dma_space.mmio) { return false; }
     uint32_t scr = rd(dma_space.mmio, 0), id0 = rd(dma_space.mmio, 0x20), id1 = rd(dma_space.mmio, 0x24);
     unsigned matches = id0 & 255, contexts = id1 & 255, s2contexts = (id1 >> 16) & 255;
@@ -1507,8 +1510,8 @@ static bool power_root(unsigned step) {
         redwood_tl("wifi-lemonade: root already clocked; refusing reset/power experiment\n");
         return false;
     }
-    rsc = ml_io_map(0x18220000, 0x10000);
-    database = ml_io_map_wcomb(0x80860000, 0x20000);
+    rsc = ml_io_map_unmappable(0x18220000, 0x10000, VM_WIMG_IO);
+    database = ml_io_map_unmappable(0x80860000, 0x20000, VM_WIMG_WCOMB);
     if (!rsc || !database || !supply_on("ldob6", 1200) || !supply_on("ldob5", 880)) { return false; }
     redwood_tl("wifi-lemonade: stage 2 rails complete\n");
     if (step == 2) { return true; }
@@ -1540,8 +1543,8 @@ static bool power_root(unsigned step) {
     change_gcc(0x6c01c, 1, 1); pause_us(1000); change_gcc(0x6c01c, 1, 0);
     redwood_tl("wifi-lemonade: stage 5 resets complete\n");
     if (step == 5) { return true; }
-    parf = ml_io_map(0x1c00000, 0x3000);
-    dbi = ml_io_map(0x60000000, 0x2000);
+    parf = ml_io_map_unmappable(0x1c00000, 0x3000, VM_WIMG_IO);
+    dbi = ml_io_map_unmappable(0x60000000, 0x2000, VM_WIMG_IO);
     if (!parf || !dbi) { return false; }
     redwood_tl("wifi-lemonade: stage 6 reading PARF first %#x\n", rd(parf, 0));
     /* pci-msm.c initializes PARF routing BEFORE any DesignWare DBI access. */
@@ -1554,7 +1557,7 @@ static bool power_root(unsigned step) {
     change_parf(0x1a8, rd(parf, 0x1a8) | (1u << 31));
     redwood_tl("wifi-lemonade: stage 6 controller routing complete; DBI not yet read\n");
     if (step == 6) { return true; }
-    phy = ml_io_map(0x1c06000, 0x2000);
+    phy = ml_io_map_unmappable(0x1c06000, 0x2000, VM_WIMG_IO);
     if (!phy) { return false; }
     redwood_tl("wifi-lemonade: stage 7 programming board PHY sequence\n");
     phy_started = true;
@@ -1609,7 +1612,7 @@ static bool power_root(unsigned step) {
     if (!linked) { return false; }
     redwood_tl("wifi-lemonade: stage 10 PCIe link ready; DMA disabled\n");
     if (step == 10) { return true; }
-    config = ml_io_map(0x60100000, 0x1000);
+    config = ml_io_map_unmappable(0x60100000, 0x1000, VM_WIMG_IO);
     if (!config || (rd(dbi, 0x1004) & (1u << 31))) { return false; }
     change_dbi(0x18, (rd(dbi, 0x18) & 0xff000000u) | 0x010100, false);
     for (unsigned i = 0; i < 7; i++) { iatu_values[0][i] = rd(dbi, 0x1000 + 4 * i); }
@@ -1626,7 +1629,7 @@ static bool power_root(unsigned step) {
     if (endpoint != 0x110317cb || (command & 4)) { return false; }
     if (step == 11) { return true; }
     if (rd(dbi, 0x1204) & (1u << 31)) { return false; }
-    bar = ml_io_map(0x60400000, 0x200000);
+    bar = ml_io_map_unmappable(0x60400000, 0x200000, VM_WIMG_IO);
     if (!bar) { return false; }
     bar0_old = rd(config, 0x10); bar1_old = rd(config, 0x14); endpoint_command_old = command & 0xffff;
     if ((bar0_old & 7) != 4) { /* Known board BAR0 is 64-bit memory. */
@@ -1657,7 +1660,7 @@ static bool power_root(unsigned step) {
     if (ee > 6) { return false; }
     redwood_tl("wifi-lemonade: stage 12 BAR/MHI registers readable; endpoint bus master disabled\n");
     if (step == 12) { return true; }
-    vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
+    vm_offset_t smmu = ml_io_map_unmappable(0x15000000, 0x2000, VM_WIMG_IO);
     if (!smmu) { return false; }
     uint32_t scr0 = rd(smmu, 0), idr0 = rd(smmu, 0x20), idr1 = rd(smmu, 0x24);
     unsigned matches = idr0 & 255, valid = 0, covering = 0;

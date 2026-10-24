@@ -169,7 +169,7 @@ python3 tools/lemonade-verify-android.py
 python3 tools/lemonade-build-wifi-image.py --driver-files
 ```
 
-已验证范围是当前 5 GHz WPA2 网络上的基本 STA。WPA3-only、企业认证、休眠、漫游、峰值速度以及与 GPU/触控同时开启尚未验收；当前仍是定时 RAM 研究环境，没有安装到手机分区。
+该轮已验证范围是当前 5 GHz WPA2 网络上的基本 STA。WPA3-only、企业认证、休眠、漫游和峰值速度尚未验收。随后与 GPU、桌面和触控同时运行的验收，以及不带测试程序的 RAM 运行包，见 [OnePlus 9 base](LEMONADE-BASE.md)；仍未安装到手机分区。
 
 ## 原生设置页面截图（2026-10-24）
 

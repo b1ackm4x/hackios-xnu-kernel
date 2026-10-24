@@ -19,13 +19,26 @@ spec.loader.exec_module(base)
 
 
 class BasePolicy(unittest.TestCase):
+    def test_validator_waits_for_loader_reenumeration(self):
+        validator=base.module('validate_base','lemonade-validate-base.py')
+        with patch.object(validator.launch,'fastboot_target',side_effect=[None,'target','target']), \
+             patch.object(validator.launch,'product',side_effect=['lahaina','xnuloader']), \
+             patch.object(validator.time,'sleep'):
+            self.assertEqual(validator.wait_for_loader({}), 'target')
+        with patch.object(validator.launch,'fastboot_target',return_value=None), \
+             patch.object(validator.time,'monotonic',side_effect=[0,0,3]), \
+             patch.object(validator.time,'sleep'):
+            with self.assertRaises(SystemExit):validator.wait_for_loader({},seconds=2)
+
     def package(self, folder):
         files={}
         for name in ('boot.img','kernel','root.apfs','system.apfs','launch.py','mkpayload.py'):
             path=folder/name;path.write_bytes(name.encode())
             files[name]={'bytes':path.stat().st_size,'sha256':base.digest(path)}
         manifest={'profile':'lemonade-base-v1','boot_arguments':base.launch.BASE_ARGUMENTS,
-                  'files':files,'dma_guard_verified':True,'dma_guard_kernel_sha256':files['kernel']['sha256']}
+                  'files':files,'dma_guard_verified':True,'dma_guard_kernel_sha256':files['kernel']['sha256'],
+                  'integration_verified':True,'integration_kernel_sha256':files['kernel']['sha256'],
+                  'integration_root_sha256':files['root.apfs']['sha256']}
         (folder/'manifest.json').write_text(json.dumps(manifest))
         return manifest
 
@@ -37,6 +50,12 @@ class BasePolicy(unittest.TestCase):
                 (folder/'kernel').write_bytes(b'other!')
                 with self.assertRaises(SystemExit):base.launch.verify(folder)
                 manifest=self.package(folder);manifest['dma_guard_kernel_sha256']='0'*64
+                (folder/'manifest.json').write_text(json.dumps(manifest))
+                with self.assertRaises(SystemExit):base.launch.verify(folder)
+                manifest=self.package(folder);manifest['integration_verified']=False
+                (folder/'manifest.json').write_text(json.dumps(manifest))
+                with self.assertRaises(SystemExit):base.launch.verify(folder)
+                manifest=self.package(folder);manifest['integration_root_sha256']='0'*64
                 (folder/'manifest.json').write_text(json.dumps(manifest))
                 with self.assertRaises(SystemExit):base.launch.verify(folder)
                 manifest=self.package(folder);manifest['boot_arguments']=['ufs_write=1']
@@ -62,7 +81,7 @@ class BasePolicy(unittest.TestCase):
         tree['etc/rc'] = (0o100644, 0, 0, b'/redwood/bin/metal-enable\nexec /sbin/launchd.ios\n')
         for n in ('amss.bin', 'm3.bin', 'board.bin', 'regdb.bin'):
             tree['fw/'+n] = (0o100644, 0, 0, b'firmware')
-        for n in ('wifid', 'configd', 'mDNSResponder', 'chronod'):
+        for n in ('wifid', 'configd', 'mDNSResponder', 'chronod', 'geod', 'navd', 'sleepd'):
             tree['LaunchDaemons/com.apple.'+n+'.plist'] = (0o100644, 0, 0,
                 plistlib.dumps({'Label':'com.apple.'+n, 'Program':'/usr/sbin/'+n}))
         return tree

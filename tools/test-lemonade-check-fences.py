@@ -67,6 +67,7 @@ class FenceEvidence(unittest.TestCase):
                          ('restored enable=0', 'restored enable=1')]:
             self.assertFalse(self.check(fixture().replace(old, new))['passed'])
         self.assertFalse(self.check(fixture() + 'panic(cpu 0)\n')['passed'])
+        self.assertFalse(self.check(fixture() + 'aec548): kmem_alloc failed\nDebugger message: panic\n')['passed'])
         self.assertFalse(self.check(fixture().replace('fb_fences=1', 'fb_fences=0'))['passed'])
         self.assertFalse(self.check(fixture().replace('fb_fences=1', 'fb_fences=1 fb_fences=0'))['passed'])
 
