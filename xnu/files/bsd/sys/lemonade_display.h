@@ -19,6 +19,9 @@ void lemonade_display_present_end(const struct lemonade_present_window *, uint32
  * 1: transferred and unmapped; 0: CPU fallback safe; -1: retain source and do
  * not release producer (transfer/restoration safety could not be established). */
 bool lemonade_display_direct_requested(void);
+/* Zero: no override. Otherwise the mode measured by the active desktop path. */
+uint32_t lemonade_display_refresh_hz(void);
+int lemonade_display_direct_blank(uint32_t swap);
 int lemonade_display_direct_present(const void *, uint32_t, uint32_t, uint32_t, uint32_t);
 int lemonade_display_direct_fallback(void);
 #ifdef __cplusplus

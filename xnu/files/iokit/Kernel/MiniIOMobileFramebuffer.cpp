@@ -193,6 +193,8 @@ micros(uint64_t absolute)
 static inline uint32_t
 refreshHz(void)
 {
+	uint32_t hardware = lemonade_display_refresh_hz();
+	if (hardware) return hardware;
 	return gRefreshHz >= 1 && gRefreshHz <= 240 ? gRefreshHz : kFBRefreshHz;
 }
 static inline uint32_t
@@ -327,6 +329,17 @@ public:
 };
 
 OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
+static IOMobileFramebuffer * gRegisteredFramebuffer;
+
+/* Called in thread context after a measured panel transition, never from the
+ * panic/return transaction. The early framebuffer remains 60 Hz until then. */
+extern "C" void
+MiniIOMobileFramebufferRefreshChanged(void)
+{
+	if (!gRegisteredFramebuffer) return;
+	gRegisteredFramebuffer->publishModes();
+	IOLog("MiniIOMobileFramebuffer: published measured desktop mode %u Hz\n", refreshHz());
+}
 
 static void
 setNumber(OSDictionary * dict, const char * key, uint64_t value)
@@ -391,6 +404,9 @@ IOMobileFramebuffer::publishModes(void)
 
 	setProperty("TimingElements", timings);
 	setProperty("ColorElements", colors);
+	/* Only the panel driver's measured desktop override authorizes the
+	 * corresponding userspace timing compatibility path; fb_hz is insufficient. */
+	setProperty("RedwoodMeasuredRefreshHz", (uint64_t)lemonade_display_refresh_hz(), 32);
 	OSSafeReleaseNULL(timings);
 	OSSafeReleaseNULL(colors);
 	OSSafeReleaseNULL(timing);
@@ -1095,8 +1111,11 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		    s->info.offset <= s->info.allocSize &&
 		    src[0] == 0 && src[1] == 0 && src[2] == 1125 && src[3] == 2436 &&
 		    dst[0] == 0 && dst[1] == 0 && dst[2] == 1125 && dst[3] == 2436;
-		for (unsigned n = 1; n < SWAP_LAYERS; n++)
+		bool blank = (set & 1) && swapWord(swap, SWAP_SURFACE(0)) == 0;
+		for (unsigned n = 1; n < SWAP_LAYERS; n++) {
 			eligible &= swapWord(swap, SWAP_SURFACE(n)) == 0;
+			blank &= swapWord(swap, SWAP_SURFACE(n)) == 0;
+		}
 		if (eligible) {
 			if (!fGraphics) {
 				fGraphics = true;
@@ -1104,7 +1123,8 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			}
 			directPresent = lemonade_display_direct_present(s->pixels(), s->info.allocSize - s->info.offset,
 			    s->info.bytesPerRow, s->sid, swapWord(swap, SWAP_ID));
-		} else directPresent = lemonade_display_direct_fallback();
+		} else if (blank) directPresent = lemonade_display_direct_blank(swapWord(swap, SWAP_ID));
+		else directPresent = lemonade_display_direct_fallback();
 		if (directPresent < 0) { IOLockUnlock(fLock); return false; }
 		if (!directPresent) {
 			hardwarePresent = lemonade_display_present_begin(&hardwareWindow);
@@ -1132,7 +1152,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		}
 		if (sid == 0) {
 			/* the bottom layer taken away: nothing is shown, the screen is black */
-			if (layer == 0 && (set & 1) && fGraphics) {
+			if (layer == 0 && (set & 1) && fGraphics && directPresent != 1) {
 				for (uint32_t y = 0; y < fPanelHeight; y++) {
 					bzero(fBase + (size_t) y * fRowBytes, (size_t) fPanelWidth * 4);
 				}
@@ -1803,6 +1823,8 @@ MiniIOMobileFramebufferStart(IOService * provider)
 		return;
 	}
 	if (fb->start(provider)) {
+		gRegisteredFramebuffer = fb;
+		fb->retain();
 		publishDisplayNode();
 		publishAccelerator(provider);
 	} else {

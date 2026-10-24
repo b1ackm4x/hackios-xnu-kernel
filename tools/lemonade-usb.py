@@ -40,6 +40,33 @@ def verified_refresh_panel(identity):
     return record
 
 
+def verified_refresh_image(part):
+    """Bind the UIKit test's two RAM images to their exact source/build receipts."""
+    folder = ROOT / 'out/lemonade-refresh'
+    record = json.loads((folder / 'manifest.json').read_text())
+    normal = json.loads((ROOT / 'local/lemonade/images.json').read_text())
+    def digest(path):
+        with path.open('rb') as stream:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+    if (part not in ('root', 'system') or record.get('profile') != 'lemonade-refresh-v1' or
+            not record.get('original_images_unchanged') or
+            record.get('base_root_sha256') != normal['userland/root.apfs']['sha256'] or
+            record.get('base_system_sha256') != normal['userland/system.apfs']['sha256'] or
+            record.get('jobs_sha256') != digest(ROOT / 'common/devices/lemonade-refresh.rc.jobs')):
+        raise SystemExit('Refusing: refresh image provenance differs')
+    _, graphics = verified_graphics_overlay(True)
+    if record.get('graphics') != graphics:
+        raise SystemExit('Refusing: refresh image uses different Metal components')
+    for name, expected in record['app']['sources'].items():
+        if digest(ROOT / name) != expected:
+            raise SystemExit('Refusing: refresh application source changed: ' + name)
+    image = folder / (part + '.apfs')
+    if (image.stat().st_size != record[part]['bytes'] or digest(image) != record[part]['sha256'] or
+            not record[part].get('entries_verified')):
+        raise SystemExit('Refusing: refresh image failed readback identity')
+    return image, record
+
+
 def verified_firmware_overlay(kernel_hash):
     """Require a real guard fault from this kernel before a firmware download."""
     guard_path = ROOT / 'local/lemonade/wifi/dma-guard-verified.json'
@@ -124,12 +151,13 @@ def main():
     parser.add_argument('--metal-test', action='store_true', help='verified RAM-only Metal pixel and IOSurface diagnostic overlay')
     parser.add_argument('--metal-system', choices=('apps', 'desktop'), help='verified RAM-only system Metal discovery; desktop also selects Metal compositing')
     parser.add_argument('--metal-widgets', action='store_true', help='separate verified widget renderer image; requires --metal-system desktop')
+    parser.add_argument('--refresh-test', action='store_true', help='dedicated verified UIKit refresh images; ramdisk first, then run with --metal-system desktop --display direct')
     parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2 (tested system default); does not imply complete family compliance')
     parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale', 'direct'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual triggers each transfer; scale also compares 1125x2436 hardware scaling; all restore firmware state')
     parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual/scale; default 64')
     parser.add_argument('--display-pattern', choices=('uniform', 'grid', 'columns', 'rows'), help='uniform or spatial scaling reference; requires --display scale')
     parser.add_argument('--display-hz', type=int, choices=(60, 120), default=60,
-                        help='experimental AMB655X 120 Hz moving-pattern probe; requires --display manual; default 60')
+                        help='experimental measured AMB655X 120 Hz; requires --display manual or direct; default 60')
     parser.add_argument('--display-return-test', action='store_true',
                         help='interrupt the 1000-frame 120 Hz probe after 6 seconds to test recovery')
     parser.add_argument('--display-record', action='store_true', help='record a bounded 64 MiB ring of held source images; requires --display direct; not an optical panel capture')
@@ -141,6 +169,9 @@ def main():
     parser.add_argument("--profile", choices=("performance",),
                         help="bounded desktop session: adapted kernel, four big cores, capped CPU policy and GPU")
     args = parser.parse_args()
+    if args.refresh_test and not (args.action == 'ramdisk' or (args.action == 'run' and
+            args.metal_system == 'desktop' and args.display == 'direct' and not args.metal_widgets)):
+        parser.error('--refresh-test requires ramdisk or a direct system Metal desktop run')
     if args.network_test and (args.action != 'run' or args.wifi != 'station' or not args.userland):
         parser.error('--network-test requires run --wifi station --userland')
     if args.profile:
@@ -177,8 +208,8 @@ def main():
         parser.error('--display-flips requires --display flip/manual/scale')
     if args.display_pattern and args.display != 'scale':
         parser.error('--display-pattern requires --display scale')
-    if args.display_hz == 120 and (args.action != 'run' or args.display != 'manual'):
-        parser.error('120 Hz currently requires the bounded --display manual probe')
+    if args.display_hz == 120 and (args.action != 'run' or args.display not in ('manual', 'direct')):
+        parser.error('120 Hz requires --display manual or --display direct')
     if args.display_return_test and not (args.display_hz == 120 and args.display_flips == 1000 and args.seconds == 6):
         parser.error('--display-return-test requires --display-hz 120 --display-flips 1000 --seconds 6')
     if args.display_flips == 1000 and args.seconds < (15 if args.display_hz == 120 else 50) and not args.display_return_test:
@@ -391,7 +422,7 @@ def main():
         return path
 
     if args.action == "ramdisk":
-        system_image = verified_image("userland/system.apfs")
+        system_image = verified_refresh_image('system')[0] if args.refresh_test else verified_image("userland/system.apfs")
         print(f"Uploading {system_image.stat().st_size} bytes to resident RAM.", flush=True)
         fb(serial, "oem", "ramdisk", timeout=30)
         r = fb(serial, "stage", str(system_image), timeout=300)
@@ -416,7 +447,9 @@ def main():
             if args.display_fences and kernel_manifest.get('display_fences_supported') != 'copy-release-v1':
                 raise SystemExit('Refusing: kernel has no producer-release fence support')
             if args.display_hz == 120:
-                if kernel_manifest.get('display_refresh_supported') != 'amb655x-diagnostic-v1':
+                support = kernel_manifest.get('display_refresh_supported')
+                allowed = ('amb655x-measured-desktop-v1',) if args.display == 'direct' else ('amb655x-diagnostic-v1', 'amb655x-measured-desktop-v1')
+                if support not in allowed:
                     raise SystemExit('Refusing: kernel has no experimental AMB655X refresh support')
                 verified_refresh_panel(expected)
             if args.gpu_clock is not None and args.gpu_clock not in kernel_manifest.get('gpu_clock_mhz_supported', []):
@@ -519,9 +552,13 @@ def main():
         if firmware_overlay:
             extra_images = [f'ramdisk={firmware_overlay}']
         graphics_record = None
+        refresh_record = None
         if args.metal_test or args.metal_system:
             graphics_overlay, graphics_record = verified_graphics_overlay(bool(args.metal_system), args.metal_widgets)
             extra_images = [f'ramdisk={graphics_overlay}']
+        if args.refresh_test:
+            refresh_overlay, refresh_record = verified_refresh_image('root')
+            extra_images = [f'ramdisk={refresh_overlay}']
         command(["python3", str(ROOT / "xnuloader/mkpayload.py"), "-o", str(payload),
                  f"kernel={kernel}", *extra_images, "--cmdline", cmdline], timeout=30)
         # The optional root disk and resident system disk both live in RAM.
@@ -549,6 +586,8 @@ def main():
         record['display_return_test'] = args.display_return_test
         record['display_fences'] = args.display_fences
         record['display_record'] = args.display_record
+        if refresh_record:
+            record['refresh_test_image'] = refresh_record
         if graphics_record:
             record['graphics_image'] = graphics_record
         if firmware_record:

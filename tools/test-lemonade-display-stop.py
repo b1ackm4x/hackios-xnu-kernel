@@ -33,6 +33,7 @@ typedef void *thread_call_t;
 #define SIMPLE_LOCK_DECLARE(n,x) int n
 #define LCK_GRP_NULL 0
 #define KERN_SUCCESS 0
+#define kPEGraphicsMode 1
 #define kSuccess 0
 #define KMA_KOBJECT 1
 #define KMA_ZERO 2
@@ -102,6 +103,8 @@ uint64_t kvtophys(vm_offset_t p) {
     return 0x92345000;
 }
 void loader_log_line(const char *s) { while (*s) { assert(host_log_used+1<sizeof(host_log)); host_log[host_log_used++]=*s++; } }
+void MiniIOMobileFramebufferRefreshChanged(void) {}
+void PE_initialize_console(void *p, int mode) {}
 kern_return_t gic_v3_spi_attach(uint32_t n, bool edge, void (*cb)(void*,uint32_t), void *p) { return 0; }
 void gic_v3_spi_mask(uint32_t n) {}
 void gic_v3_spi_detach(uint32_t n) {}

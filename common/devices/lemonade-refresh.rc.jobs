@@ -1,0 +1,5 @@
+# One UIKit application, then ordinary SpringBoard interaction. RAM only.
+/redwood/bin/rwtouch wait 25 swipe 0.5 0.985 0.5 0.3 200 wait 5
+/redwood/bin/refresh-launch
+/redwood/bin/rwtouch wait 47 button home wait 2
+/redwood/bin/rwtouch swipe 0.85 0.5 0.15 0.5 500 wait 1 swipe 0.15 0.5 0.85 0.5 500 wait 1 swipe 0.85 0.5 0.15 0.5 500 wait 1 swipe 0.15 0.5 0.85 0.5 500 wait 1

@@ -41,6 +41,7 @@ extern kern_return_t gic_v3_spi_attach(uint32_t, bool, void (*)(void *, uint32_t
 extern void gic_v3_spi_mask(uint32_t);
 extern void gic_v3_spi_detach(uint32_t);
 extern uint64_t kvtophys(vm_offset_t);
+extern void MiniIOMobileFramebufferRefreshChanged(void);
 
 #define GCC_BASE       0x00100000UL
 #define GCC_DISP_AHB   0x27004
@@ -76,6 +77,8 @@ static uint32_t direct_count, direct_fallbacks, direct_pages, direct_pitch;
 static void display_map_restore(void);
 static void display_refresh_restore(void);
 static uint32_t display_hz = 60;
+static bool desktop_refresh_requested;
+static uint32_t desktop_refresh_hz = 60;
 /* Return can interrupt the probe's thread on the same CPU. Other CPUs have
  * already been stopped by loader_return(). Keep each register transaction and
  * its journal indivisible, and reject all resumed probe accesses after return
@@ -861,7 +864,10 @@ display_refresh_restore(void)
 	bool panel = display_panel_rate(60);
 	wr(display_map.mdp + INTF1_OFFSET + 0x288, refresh.sync);
 	display_hz = 60;
+	os_atomic_store(&desktop_refresh_hz, 60, release);
+	simple_lock(&vsync_lock, LCK_GRP_NULL);
 	irq.period = 0; irq.last_tick = 0;
+	simple_unlock(&vsync_lock);
 	bool exact = rd(display_map.mdp, INTF1_OFFSET + 0x288) == refresh.sync;
 	for (unsigned i = 0; i < 4; i++) exact &= rd(refresh.dsi, refresh_offsets[i]) == refresh.saved[i];
 	tell("lemonade-display: refresh restored hz=60 commands=%u registers=%u\n", panel, exact);
@@ -902,7 +908,9 @@ display_refresh_begin(void)
 		 * Height remains the firmware's long timeout; external TE is retained. */
 		wr(intf + 0x288, (refresh.sync & ~0x7ffffu) | 67);
 		display_hz = 120;
+		simple_lock(&vsync_lock, LCK_GRP_NULL);
 		irq.period = 0; irq.last_tick = 0;
+		simple_unlock(&vsync_lock);
 	}
 	tell("lemonade-display: refresh switch requested=120 commands=%u sync=%#x height=%u external_te=%u\n",
 	    sent, rd(intf, 0x288), rd(intf, 0x28c), !!(rd(intf, 0x288) & (1u << 20)));
@@ -927,6 +935,7 @@ display_refresh_begin(void)
 	tell("lemonade-display: refresh measured valid=%u edges=%llu elapsed_us=%llu millihz=%llu\n",
 	    valid, edges, ns / 1000, mhz);
 	if (!valid && !os_atomic_load(&display_stopping, acquire)) display_refresh_restore();
+	if (valid && desktop_refresh_requested) os_atomic_store(&desktop_refresh_hz, 120, release);
 	return valid && !os_atomic_load(&display_stopping, acquire);
 }
 
@@ -1127,6 +1136,12 @@ lemonade_display_direct_requested(void)
 	return direct_requested && !os_atomic_load(&display_stopping, acquire);
 }
 
+uint32_t
+lemonade_display_refresh_hz(void)
+{
+	return desktop_refresh_requested ? os_atomic_load(&desktop_refresh_hz, acquire) : 0;
+}
+
 static void
 display_clean_tables(void)
 {
@@ -1143,7 +1158,9 @@ lemonade_display_direct_fallback(void)
 	if (os_atomic_load(&display_stopping, acquire)) return -1;
 	if (!display_map.direct_active && !display_map.active && !display_map.flip_active &&
 	    !display_map.misr_active && !display_map.intf_misr_active) return 0;
+	display_refresh_restore();
 	display_map_restore();
+	if (desktop_refresh_requested) MiniIOMobileFramebufferRefreshChanged();
 	direct_pages = 0;
 	direct_fallbacks++;
 	tell("lemonade-display: direct fallback count=%u restored=%u\n", direct_fallbacks, display_map.restore_proven);
@@ -1281,6 +1298,30 @@ lemonade_display_direct_present(const void *pixels, uint32_t available, uint32_t
 	absolutetime_to_nanoseconds(mapped_at - began, &map_ns);
 	absolutetime_to_nanoseconds(transferred_at - mapped_at, &dma_ns);
 	absolutetime_to_nanoseconds(finished - transferred_at, &retire_ns);
+	/* The elapsed time is between completed hardware command transfers. Count
+	 * content changes separately, so repeated scanout cannot pass an FPS test. */
+	static uint64_t window_start, previous_done, window_min, window_max;
+	static uint32_t window_frames, window_changed, previous_crc;
+	uint64_t elapsed_ns = 0;
+	if (previous_done) {
+		uint64_t gap;
+		absolutetime_to_nanoseconds(transferred_at - previous_done, &gap);
+		window_frames++; window_changed += crc != previous_crc;
+		if (!window_min || gap < window_min) window_min = gap;
+		if (gap > window_max) window_max = gap;
+		absolutetime_to_nanoseconds(transferred_at - window_start, &elapsed_ns);
+	} else window_start = transferred_at;
+	previous_done = transferred_at; previous_crc = crc;
+	if (elapsed_ns >= 5ull * NSEC_PER_SEC) {
+		uint64_t at_ns;
+		absolutetime_to_nanoseconds(transferred_at, &at_ns);
+		tell("lemonade-display: direct-window frames=%u changed=%u elapsed_us=%llu millifps=%llu min_us=%llu max_us=%llu active_hz=%u at_us=%llu\n",
+		    window_frames, window_changed, elapsed_ns / 1000,
+		    (uint64_t)window_frames * 1000000000000ull / elapsed_ns,
+		    window_min / 1000, window_max / 1000, display_hz, at_ns / 1000);
+		window_start = transferred_at; window_frames = window_changed = 0;
+		window_min = window_max = 0;
+	}
 	if (direct_count <= 8 || !(direct_count % 120))
 		tell("lemonade-display: direct swap=%u surface=%u count=%u pitch=%u pages=%u frame_delta=1 done=0x100 intf=%#x unmapped=1 us=%llu map_us=%llu dma_us=%llu retire_us=%llu\n",
 		    swap, sid, direct_count, pitch, pages, crc, ns / 1000, map_ns / 1000, dma_ns / 1000, retire_ns / 1000);
@@ -1290,6 +1331,25 @@ failed:
 	direct_failed = true;
 	tell("lemonade-display: direct failed count=%u pages=%u; restoring before release\n", direct_count, direct_pages);
 	return lemonade_display_direct_fallback();
+}
+
+/* Removing every layer is a real black frame. Keep the command-mode display
+ * and its measured refresh active; the compatibility CPU path would restore
+ * 60 Hz for this ordinary SpringBoard transition. This kernel-owned source
+ * lives for the whole RAM boot and obeys the same DMA completion/unmap rules. */
+int
+lemonade_display_direct_blank(uint32_t swap)
+{
+	static vm_offset_t black;
+	const uint32_t pitch = 4544, bytes = pitch * 2436;
+	if (!lemonade_display_direct_requested()) return 0;
+	if (!black) {
+		if (kmem_alloc(kernel_map, &black, round_page(bytes), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
+		    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return lemonade_display_direct_fallback();
+		uint32_t *pixels = (void *)black;
+		for (uint32_t n = 0; n < bytes / 4; n++) pixels[n] = 0xff000000;
+	}
+	return lemonade_display_direct_present((const void *)black, bytes, pitch, 0, swap);
 }
 
 static void
@@ -1555,6 +1615,22 @@ lemonade_display_init(void)
 		if (fences != 1) { tell("lemonade-display: direct requires producer-release fences\n"); goto out; }
 		irq_probe(mdp, mdss, true);
 		direct_requested = irq.streaming && irq.acquired;
+		uint32_t target_hz = 60;
+		PE_parse_boot_argn("lemonade_display_hz", &target_hz, sizeof(target_hz));
+		desktop_refresh_requested = target_hz == 120;
+		if (desktop_refresh_requested && direct_requested) {
+			/* IOKit has published a conservative 60-Hz mode already, but no
+			 * user process has started. Freeze console writes, acquire the direct
+			 * backend while still at 60 Hz, then switch and measure the panel.
+			 * Automatic transfers stay off until the first held IOSurface. */
+			PE_initialize_console(NULL, kPEGraphicsMode);
+			bool ready = display_direct_begin(4544) && display_refresh_begin();
+			if (!ready && !os_atomic_load(&display_stopping, acquire))
+				(void)lemonade_display_direct_fallback();
+			if (!os_atomic_load(&display_stopping, acquire)) MiniIOMobileFramebufferRefreshChanged();
+			tell("lemonade-display: desktop refresh requested=120 active=%u prepared=%u\n",
+			    lemonade_display_refresh_hz(), ready);
+		}
 		tell("lemonade-display: desktop direct requested=%u lazy=1\n", direct_requested);
 		goto out;
 	}

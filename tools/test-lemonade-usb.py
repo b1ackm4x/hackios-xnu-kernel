@@ -218,12 +218,58 @@ class DeviceSafety(unittest.TestCase):
                 self.run_action('run', '--kernel', 'built', '--userland', *extra)
         self.assertEqual(self.calls, [])
 
-    def test_refresh_rejects_desktop_and_other_modes_before_device_access(self):
-        for mode in ('sync', 'direct', 'flip', 'scale', 'clocks'):
+    def test_refresh_rejects_other_modes_before_device_access(self):
+        for mode in ('sync', 'flip', 'scale', 'clocks'):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.run_action('run', '--kernel', 'built', '--userland', '--display', mode,
                                 '--display-fences', '--display-hz', '120')
         self.assertEqual(self.calls, [])
+
+    def test_refresh_app_requires_its_direct_desktop_profile(self):
+        for extra in ((), ('--metal-system', 'apps'), ('--metal-system', 'desktop'),
+                      ('--metal-system', 'desktop', '--display', 'direct', '--metal-widgets')):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--profile', 'performance', '--refresh-test', *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_refresh_images_reject_changed_source_jobs_metal_or_image(self):
+        folder = self.root / 'out/lemonade-refresh'
+        folder.mkdir()
+        source = self.root / 'refresh-source.m'
+        source.write_bytes(b'UIKit fixture source')
+        jobs = self.root / 'common/devices/lemonade-refresh.rc.jobs'
+        jobs.parent.mkdir(parents=True)
+        jobs.write_bytes(b'bounded fixture jobs')
+        digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+        normal = {'userland/root.apfs': {'sha256': 'normal-root'},
+                  'userland/system.apfs': {'sha256': 'normal-system'}}
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps(normal))
+        graphics = {'sha256': 'matching-Metal-image', 'other_file_contents_and_modes_verified': True}
+        record = {'profile': 'lemonade-refresh-v1', 'original_images_unchanged': True,
+                  'base_root_sha256': 'normal-root', 'base_system_sha256': 'normal-system',
+                  'jobs_sha256': digest(jobs), 'graphics': graphics,
+                  'app': {'sources': {'refresh-source.m': digest(source)}}}
+        for part in ('root', 'system'):
+            image = folder / (part + '.apfs')
+            image.write_bytes(('verified-' + part).encode())
+            record[part] = {'sha256': digest(image), 'bytes': image.stat().st_size, 'entries_verified': 2}
+        manifest = folder / 'manifest.json'
+        manifest.write_text(json.dumps(record))
+        with patch.object(usb, 'ROOT', self.root), patch.object(usb, 'verified_graphics_overlay', return_value=(None, graphics)):
+            for part in ('root', 'system'):
+                self.assertEqual(usb.verified_refresh_image(part)[0], folder / (part + '.apfs'))
+            for target in (source, jobs, folder / 'root.apfs', folder / 'system.apfs'):
+                with self.subTest(changed=target.name):
+                    before = target.read_bytes()
+                    target.write_bytes(before + b'changed')
+                    part = 'system' if target.name == 'system.apfs' else 'root'
+                    with self.assertRaises(SystemExit): usb.verified_refresh_image(part)
+                    target.write_bytes(before)
+            with patch.object(usb, 'verified_graphics_overlay', return_value=(None, {'sha256': 'other-Metal'})):
+                with self.assertRaisesRegex(SystemExit, 'different Metal'): usb.verified_refresh_image('root')
+            record['root']['entries_verified'] = 0
+            manifest.write_text(json.dumps(record))
+            with self.assertRaisesRegex(SystemExit, 'readback'): usb.verified_refresh_image('root')
 
     def test_refresh_requires_matching_live_panel_and_prepared_dtb(self):
         with patch.object(usb, 'ROOT', self.root):
@@ -243,6 +289,38 @@ class DeviceSafety(unittest.TestCase):
                 wrong = dict(record, **{field: 'mismatch'}); path.write_text(json.dumps(wrong))
                 with self.assertRaisesRegex(SystemExit, 'differs'):
                     usb.verified_refresh_panel(self.identity)
+
+    def test_desktop_refresh_requires_desktop_kernel_and_keeps_real_fences(self):
+        self.fastboot = self.loader + '\tfastboot\n'
+        self.product = 'xnuloader'
+        self.result = 'returned 19 0'
+        kernel = b'desktop refresh kernel'
+        (self.root / 'out/lemonade-kernel').write_bytes(kernel)
+        manifest = {'device': 'lemonade', 'stage': 'xnu-kernel',
+                    'sha256': hashlib.sha256(kernel).hexdigest(),
+                    'display_modes_supported': ['direct'], 'display_fences_supported': 'copy-release-v1',
+                    'display_refresh_supported': 'amb655x-diagnostic-v1'}
+        path = self.root / 'out/lemonade-kernel.manifest.json'
+        path.write_text(json.dumps(manifest))
+        args = ('--kernel', 'built', '--userland', '--display', 'direct', '--display-fences', '--display-hz', '120')
+        with self.assertRaisesRegex(SystemExit, 'refresh support'):
+            self.run_action('run', *args)
+        self.assertFalse(any('stage' in c for c in self.calls))
+        manifest['display_refresh_supported'] = 'amb655x-measured-desktop-v1'
+        path.write_text(json.dumps(manifest))
+        (self.root / 'userland').mkdir()
+        root = self.root / 'userland/root.apfs'; root.write_bytes(b'root')
+        image_record = {'bytes': 4, 'sha256': hashlib.sha256(b'root').hexdigest()}
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': image_record, 'userland/system.apfs': image_record}))
+        self.calls.clear()
+        with patch.object(usb, 'verified_refresh_panel', return_value={}) as panel:
+            self.run_action('run', *args)
+            panel.assert_called_once_with(self.identity)
+        record = json.loads((self.root / 'out/lemonade-xnu.manifest.json').read_text())
+        for word in ('lemonade_display_hz=120', 'lemonade_panel=655', 'fb_fences=1', 'ca_vbl=1', 'ufs_write=0'):
+            self.assertIn(word, record['cmdline'].split())
+        self.assertFalse(any(word.startswith('fb_hz=') for word in record['cmdline'].split()))
 
     def test_panel_observation_is_exact_device_and_does_not_retain_cmdline(self):
         with self.assertRaisesRegex(SystemExit, 'exact device'):
