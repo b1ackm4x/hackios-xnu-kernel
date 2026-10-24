@@ -11,6 +11,8 @@
  * =8 uses explicit command transfers. =9 additionally compares two uniform
  * or spatial reference images through QSEED from 1125x2436 to 1080x2400. Geometry and
  * scaler registers are journaled; no DSI, PLL or panel timing is changed.
+ * =10 presents a held full-screen IOSurface through the same command path,
+ * then removes its temporary mapping before the presenter releases the source.
  *
  * Register definitions checked against Linux v6.12: dispcc-sm8250.c (SM8350
  * adjustments), gcc-sm8350.c, sm8350.dtsi, dpu_7_0_sm8350.h and dpu_hw_intf.c.
@@ -483,6 +485,7 @@ static const unsigned display_scale_offsets[] = {
 static struct {
 	vm_offset_t smmu, cb, tables, mdp, buffers[2];
 	unsigned table_pages;
+	uint64_t table_physical[DISPLAY_TABLE_BYTES / 4096];
 	uint32_t saved[9], misr[2], baseline[2], source[2], flush;
 	uint32_t sync_config, autorefresh;
 	uint32_t scale_saved[2][DISPLAY_SCALE_REGS], scale_reference[2][2];
@@ -496,15 +499,21 @@ static uint64_t *
 display_table(uint64_t *entry, bool create)
 {
 	if (!*entry && create && display_map.table_pages < DISPLAY_TABLE_BYTES / 4096) {
-		vm_offset_t child = display_map.tables + 4096 * display_map.table_pages++;
+		unsigned page = display_map.table_pages;
+		vm_offset_t child = display_map.tables + 4096 * page;
 		uint64_t physical = kvtophys(child);
 		if (!physical || physical >> 36 || physical & 4095) return NULL;
+		/* kmem_alloc keeps these pages wired for this entire kernel run.
+		 * Cache only their translations, never an IOSurface's physical pages.
+		 * Thousands of leaf lookups must not repeatedly walk the CPU pmap. */
+		display_map.table_physical[page] = physical;
+		display_map.table_pages++;
 		*entry = physical | 3;
 	}
 	if ((*entry & 3) != 3) return NULL;
 	for (unsigned p = 1; p < display_map.table_pages; p++) {
 		vm_offset_t child = display_map.tables + 4096 * p;
-		if (*entry == (kvtophys(child) | 3)) return (void *)child;
+		if (*entry == (display_map.table_physical[p] | 3)) return (void *)child;
 	}
 	return NULL;
 }
@@ -942,6 +951,7 @@ display_mapping_prepare(vm_offset_t mdp)
 	if (!display_map.tables && kmem_alloc(kernel_map, &display_map.tables, round_page(DISPLAY_TABLE_BYTES),
 	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return false;
 	bzero((void *)display_map.tables, DISPLAY_TABLE_BYTES);
+	bzero(display_map.table_physical, sizeof(display_map.table_physical));
 	display_map.table_pages = 1;
 	display_map.restore_proven = true;
 	unsigned size = (DISPLAY_GOP_BYTES + 4095) & ~4095u;

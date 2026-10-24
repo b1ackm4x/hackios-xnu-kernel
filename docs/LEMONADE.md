@@ -265,23 +265,25 @@ python3 tools/lemonade-verify-android.py
 此配置展开为已适配内核、`bootcpu=7 cpus=4 cpufreq=1 gpu=1` 和用户空间，并保留 UFS 写入等关闭状态。内核校验、CPU 策略能力标记、镜像校验和设备身份仍须通过；它不能与不匹配的手动 CPU/内核参数混用。返回核验脚本只选择身份哈希匹配的 USB 设备，等待 Android 启动完成，再核对机型、原槽、解锁状态和五个活动启动分区哈希，不覆写原始基线。核验完成后才释放租约。这组性能基准使用虚拟输入。后续已完成的 S6SY792 基础实体触控见文末触控适配章节；其他外设和完整电源管理仍待移植。
 
 
-## 长期显示方案调研（2026-10-23；尚未作为驱动实现）
+## 显示方案与后续路线（2026-10-23 起）
 
-以下为 10 月 23 日的设计记录。10 月 24 日已实现硬件刷新同步和独立双缓冲映射/切换，
-实测结果与仍未接入的桌面路径见 [显示增量验收](LEMONADE-DISPLAY.md#dpu-映射和独立双缓冲)。
+以下保留 10 月 23 日的设计路线。10 月 24 日已实现硬件刷新同步、独立双缓冲映射/切换，
+以及显式 `--display direct --display-fences` 的单层全屏 IOSurface 直接显示。
+950 次直接传输和 4 次 CPU 回退的释放记录已完整对应；范围和证据见
+[显示增量验收](LEMONADE-DISPLAY.md)。多层合成、完整生命周期和 120 Hz 仍待实现与验收。
 
-当前 Adreno 驱动负责执行 GLES/Mesa 的渲染命令。默认的 `blit_targets` 路径先在 Mesa 私有纹理中绘图，再由 `target_to_surface()` 用 GPU blit 导出到 IOSurface。`MiniIOMobileFramebuffer::show()` 等待 GPU fence 后，仍调用 `drawLayer()/drawRows()`，把 iOS 的 1125×2436 缩放成面板的 1080×2400，写入固件 GOP 缓冲区。GPU 负责画图和显示控制器负责送屏是两件独立的工作。正常的硬件呈现路径可以让显示控制器直接 DMA 读取渲染缓冲区，再按同步信号切换；[Android HWC](https://source.android.com/docs/core/graphics/implement-hwc) 与 [Linux KMS](https://docs.kernel.org/gpu/drm-kms.html) 的接口都以这种缓冲区、图层和同步模型组织。
+当前 Adreno 驱动执行 GLES/Mesa 及已覆盖范围内的 Metal 渲染命令。`blit_targets` 路径先在 Mesa 私有纹理中绘图，再由 `target_to_surface()` 用 GPU blit 导出到 IOSurface。默认显示路径等待 GPU fence 后，调用 `drawLayer()/drawRows()`，把 iOS 的 1125×2436 缩放成面板的 1080×2400，写入固件 GOP 缓冲区。显式 direct 路径在单层全屏 BGRA、已验证行距下，改由 DPU 读取同一 IOSurface 页面并缩放；传输完成且撤销映射后才释放生产者。不支持的层布局恢复 GOP 后回退。GPU 渲染和显示控制器送屏仍是独立环节；[Android HWC](https://source.android.com/docs/core/graphics/implement-hwc) 与 [Linux KMS](https://docs.kernel.org/gpu/drm-kms.html) 的接口也分别处理缓冲区、图层和同步。
 
 ```mermaid
 flowchart LR
-  CA[CoreAnimation / GLES] --> GPU[Adreno 660 / Mesa]
-  GPU --> Blit[当前：GPU blit 导出]
+  CA[CoreAnimation / GLES / 已覆盖的 Metal] --> GPU[Adreno 660 / Mesa]
+  GPU --> Blit[GPU blit 导出]
   Blit --> IOS[IOSurface 中的画面]
-  IOS --> CPU[当前：CPU 双线性缩放与整屏拷贝]
+  IOS --> CPU[默认或回退：CPU 缩放与整屏拷贝]
   CPU --> GOP[固件 GOP 缓冲区]
   GOP --> Panel[面板]
-  IOS -. 长期：共享同一批页面 .-> DPU[DPU 7.0：硬件缩放、合成与同步提交]
-  DPU -. DSC 1.2 / DSI 命令模式 .-> Panel
+  IOS --> DPU[显式 direct：单层共享页面、硬件缩放与完成后释放]
+  DPU --> Panel
 ```
 
 ### 已核实的硬件和可复用部分
@@ -307,7 +309,7 @@ flowchart LR
 4. **60 Hz 的同步与功耗。** 用 TE/完成中断驱动显示节奏，替换当前软件时钟节拍；整组手势检查漏帧、晚帧、GPU/显示 fence、温度。持续 30 分钟交互和多次启动/退出后，再讨论日常默认。通过高速拍摄/实际面板观察确认撕裂，帧缓冲截图本身不能证明扫描同步。
 5. **完整生命周期。** 最后补面板初始化、DSC 参数与 DSI 命令、背光、休眠/唤醒、故障恢复、DPU/内存带宽动态投票；在这些通过后才推进 120 Hz。原厂最高刷新率不代表当前移植已支持相同模式。
 
-若 DPU SMMU/固件所有权暂时阻塞，可先用 GPU blit 做缩放并写入固定 GOP 缓冲区来减少 CPU 像素工作；它仍多一次整屏搬运，也没有解决真正的显示同步，因此只作为中间方案。长期首选是共享 IOSurface 页面、DPU 硬件缩放及双/三缓冲提交。本轮调研没有修改显示寄存器；这些阶段均属于尚待实现和实机验证的工作。
+以上实施顺序是初始路线，不代表各阶段均已完成。当前 direct 已接通其中的单层共享 IOSurface 和 DPU 缩放，但仍同步等待命令完成；约 55 FPS 的有界手势结果也未达到稳定满 60 FPS。后续需要减少提交开销、使用完成中断、验证更广的图层布局与长时间交互，再推进面板生命周期和 120 Hz。
 
 
 ## S6SY792 实体触控适配（2026-10-23）

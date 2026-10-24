@@ -51,6 +51,8 @@ static unsigned host_callbacks;
 static uint64_t host_now;
 static bool host_wrong_pixels;
 static vm_offset_t host_tables;
+static unsigned host_table_walks;
+static int host_bad_table = -1;
 static uint32_t host_mdp[0x90000/4], host_smmu[0x100000/4], host_clocks[2];
 static char host_log[32768];
 static unsigned host_log_used;
@@ -90,7 +92,13 @@ static int kmem_alloc(int m, vm_offset_t *p, unsigned n, int flags, int tag) { r
 vm_offset_t ml_io_map(vm_offset_t p, vm_size_t n) { return 0; }
 vm_offset_t pe_arm_get_soc_base_phys(void) { return 0; }
 uint64_t kvtophys(vm_offset_t p) {
-    if (host_tables && p>=host_tables && p<host_tables+131072) return 0x93000000+p-host_tables;
+    if (host_tables && p>=host_tables && p<host_tables+131072) {
+        unsigned page=(p-host_tables)/4096;
+        host_table_walks++;
+        if ((int)page==host_bad_table) return 0;
+        /* Wired pages are deliberately physically noncontiguous. */
+        return 0x93000000+((page*17)%32)*4096+(p&4095);
+    }
     return 0x92345000;
 }
 void loader_log_line(const char *s) { while (*s) { assert(host_log_used+1<sizeof(host_log)); host_log[host_log_used++]=*s++; } }
@@ -111,6 +119,7 @@ static void reset_fixture(void) {
     display_stopping=display_restoring=false;
     host_interrupts=true; host_pending=NULL; host_callbacks=0; host_now=0;
     host_wrong_pixels=false;host_tables=0;
+    host_table_walks=0;host_bad_table=-1;
     direct_requested=direct_failed=false; direct_count=direct_fallbacks=direct_pages=direct_pitch=0;
     display_map.mdp=(uintptr_t)host_mdp;
     display_map.smmu=(uintptr_t)host_smmu;
@@ -340,6 +349,44 @@ int main(void) {
     *(uint32_t *)(display_map.cb+0x7f4)=1;
     assert(!display_direct_unmap() && direct_pages==1);
     puts("PASS: page retirement requires automatic transfers disabled and completed TLB invalidation");
+
+    reset_fixture();
+    memset(tables,0,sizeof(tables));host_tables=(uintptr_t)tables;
+    display_map.tables=host_tables;display_map.table_pages=1;
+    /* Cover multiple L2s and L3s and repeated mapping/retirement of the full
+     * desktop. Cache hits must preserve each PTE, not alias adjacent leaves. */
+    for (unsigned i=0;i<2741;i++) {
+        uint64_t *p=display_leaf(DISPLAY_BUFFER_IOVA(0)+i*4096ull,true);assert(p);
+        *p=(0x80000000ull+i*4096ull)|0x4c3;
+    }
+    uint64_t *gop=display_leaf(DISPLAY_GOP,true);assert(gop);*gop=0xabcdef;
+    unsigned walks=host_table_walks;
+    assert(walks==display_map.table_pages-1);
+    uint64_t *guard_before=display_leaf(DISPLAY_BUFFER_IOVA(0)-4096,false);
+    uint64_t *guard_after=display_leaf(DISPLAY_BUFFER_IOVA(0)+2741ull*4096,false);
+    assert((!guard_before || !*guard_before) && (!guard_after || !*guard_after));
+    for (unsigned repeat=0;repeat<3;repeat++) for (unsigned i=0;i<2741;i++) {
+        uint64_t *p=display_leaf(DISPLAY_BUFFER_IOVA(0)+i*4096ull,false);assert(p);
+        assert(*p==((0x80000000ull+i*4096ull)|0x4c3));
+    }
+    assert(host_table_walks==walks && *gop==0xabcdef);
+    host_mdp[0x352b4/4]=1;direct_pages=2741;
+    assert(display_direct_unmap() && host_table_walks==walks && *gop==0xabcdef);
+    for (unsigned i=0;i<2741;i++) assert(!*display_leaf(DISPLAY_BUFFER_IOVA(0)+i*4096ull,false));
+    uint64_t saved_root=tables[0];tables[0]=0xdead0003;
+    assert(!display_leaf(DISPLAY_BUFFER_IOVA(0),false));tables[0]=saved_root;
+    assert(!display_leaf(1ull<<32,true));
+    puts("PASS: cached noncontiguous tables preserve all 2741 leaves, guards and GOP without repeated pmap walks");
+
+    reset_fixture();
+    memset(tables,0,sizeof(tables));host_tables=(uintptr_t)tables;
+    display_map.tables=host_tables;display_map.table_pages=1;host_bad_table=1;
+    assert(!display_leaf(DISPLAY_BUFFER_IOVA(0),true));
+    assert(display_map.table_pages==1 && !tables[0] && !display_map.table_physical[1]);
+    host_bad_table=-1;assert(display_leaf(DISPLAY_BUFFER_IOVA(0),true));
+    display_map.table_pages=DISPLAY_TABLE_BYTES/4096;
+    assert(!display_leaf(0x40000000,true) && !tables[1]);
+    puts("PASS: invalid physical pages and exhausted table pool cannot publish descriptors");
 
     reset_fixture();
     direct_requested=true;

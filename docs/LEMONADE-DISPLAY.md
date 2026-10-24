@@ -554,3 +554,19 @@ python3 tools/lemonade-usb.py recording
 原 `_b` 槽及锁状态相符，boot/vendor_boot/dtbo/vbmeta/xbl 五个活动分区哈希均与原备份一致。
 精确内核、20 个编译输入、两种测试镜像、源录制、主机检查和上述真机证据保存在私有归档
 `kernel-desktop-direct-verified-20261024`，不上传系统镜像或设备日志。
+
+### 页表查询优化候选：尚未真机运行
+
+内核 `d770edd114f73f2c0f1d2896ab5cff20681c1d98703f9566465bc12ae09cf129`
+缓存本次运行中固定、wired 页表页的物理地址，避免每次查找显示叶项时重复遍历 CPU pmap。
+IOSurface 页面仍逐帧重新查询并校验，完成后仍撤销全部临时映射和同步 TLB；没有缓存源图像
+的物理地址，也没有改变 DMA 完成和生产者释放条件。无效页表物理地址不会消耗分配索引。
+
+主机实际 C 测试增至 17 组，新增不连续物理页上的 2,741 个叶项、重复查询、保护页、
+原 GOP 隔离、退休时零重复 pmap 查询，以及无效地址/池耗尽拒绝检查，均通过
+AddressSanitizer/UndefinedBehaviorSanitizer；内核构建成功。此结果不能证明真机加速。
+
+09:21 的 Android 检查再次确认 USB 身份、启动完成、原槽/锁状态和五个活动分区哈希。
+随后请求重启至 bootloader，但 60 秒内未出现匹配的 fastboot 接口；工具没有发出 RAM boot，
+该候选尚未在设备执行。当前等待手动重启恢复连接，不能沿用此前的 Android 检查声称手机
+此时仍在 Android。验收仍以此前 `66fc98e0…` 内核及其已归档证据为准。
