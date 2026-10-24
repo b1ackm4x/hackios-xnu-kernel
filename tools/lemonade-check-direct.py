@@ -19,6 +19,25 @@ spec.loader.exec_module(fences)
 NUMBER = r'(0x[0-9a-f]+|\d+)'
 
 
+def check_refresh(text):
+    """Verify the real default mode and its restoration; no FPS claim at idle."""
+    measured = list(dict.fromkeys(re.findall(
+        r'refresh measured valid=(\d+) edges=(\d+) elapsed_us=(\d+) millihz=(\d+)', text)))
+    valid = len(measured) == 1 and measured[0][0] == '1'
+    if valid:
+        _, edges, elapsed, millihz = map(int, measured[0])
+        valid = edges >= 64 and elapsed > 0 and 118000 <= millihz <= 122000 and abs(edges*1e9/elapsed-millihz) < 5
+    summaries = list(dict.fromkeys(re.findall(r'direct final completed=(\d+) fallbacks=(\d+) failed=(\d+) mapped_pages=(\d+)', text)))
+    active = re.findall(r'direct-window .*?active_hz=(\d+)', text)
+    return {
+        'refresh_120_measured': valid,
+        'refresh_120_desktop_prepared': 'desktop refresh requested=120 active=120 prepared=1' in text,
+        'refresh_120_system_parser': 'single-mode timing parser enabled for measured 120 Hz (protect=0)' in text,
+        'refresh_120_held_during_runtime': bool(active) and set(active) == {'120'} and len(summaries) == 1 and summaries[0][1:] == ('0', '0', '0'),
+        'refresh_panel_restored': 'refresh restored hz=60 commands=1 registers=1' in text,
+    }
+
+
 def check(record, raw, live=()):
     expected_live = record.get('live_logs', [])
     live_integrity = len(live) == len(expected_live) and all(
@@ -67,7 +86,10 @@ def check(record, raw, live=()):
         'sustained_completed_commands': len(summary) == 1 and completed >= 100 and summary[0][2] == '0',
         'sampled_commands_completed_and_unmapped': len(samples) >= 8 and
             len({m[2] for m in samples}) == len(samples) and max(int(m[2]) for m in samples) > completed - 120 and
-            all(int(m[1]) > 0 and 0 < int(m[2]) <= completed and int(m[3]) in (4544, 4608) and
+            # Surface zero is the kernel-owned 1125x2436 black source used
+            # when all layers are removed. It has exactly the 4544-byte pitch.
+            all((int(m[1]) > 0 or (m[1] == '0' and m[3] == '4544')) and
+                0 < int(m[2]) <= completed and int(m[3]) in (4544, 4608) and
                 int(m[4]) == (2703 if int(m[3]) == 4544 else 2741) and int(m[5]) == 1 and
                 int(m[6], 0) == 0x100 and int(m[8]) == 1 for m in samples),
         'changing_interface_output': len({m[7] for m in samples}) >= 3,
@@ -91,6 +113,9 @@ def check(record, raw, live=()):
         'measurement_controls_restored': 'MISR control restored=1/1 status=0/0 ' in tail and 'interface MISR restored=1 status=0 ' in tail,
         'return_access_gate_closed': 'quiesced; resumed probe access disabled' in tail,
     })
+    if 'lemonade_display_hz=120' in args:
+        checks.update(check_refresh(text))
+        checks['refresh_120_booted'] = 'lemonade_display_hz=120' in actual_args and 'lemonade_panel=655' in actual_args
     return {'passed': all(checks.values()), 'checks': checks, 'completed_direct_frames': completed,
             'cpu_fallback_frames': int(irq[0][2]) if len(irq) == 1 else None,
             'fallback_transitions': int(summary[0][1]) if len(summary) == 1 else None,

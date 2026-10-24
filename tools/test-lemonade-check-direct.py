@@ -57,6 +57,26 @@ class DirectEvidence(unittest.TestCase):
         result = self.check(r, raw)
         self.assertFalse(result['checks']['complete_retirement_trace'])
 
+    def test_owned_black_source_keeps_completion_and_release_requirements(self):
+        r,raw=fixture()
+        raw=raw.replace(b'surface=7 count=1 pitch=4608 pages=2741',b'surface=0 count=1 pitch=4544 pages=2703')
+        self.assertTrue(self.check(r,raw)['passed'])
+        self.assertFalse(self.check(r,raw.replace(b'surface=0 count=1 pitch=4544',b'surface=0 count=1 pitch=4608'))['passed'])
+        self.assertFalse(self.check(r,raw.replace(b'frame_delta=1',b'frame_delta=0',1))['passed'])
+
+    def test_refresh_requires_electrical_mode_system_parser_and_restore(self):
+        text=('refresh measured valid=1 edges=64 elapsed_us=528000 millihz=121212\n'
+              'desktop refresh requested=120 active=120 prepared=1\n'
+              'single-mode timing parser enabled for measured 120 Hz (protect=0)\n'
+              'direct-window frames=600 active_hz=120\n'
+              'direct final completed=600 fallbacks=0 failed=0 mapped_pages=0\n'
+              'refresh restored hz=60 commands=1 registers=1\n')
+        self.assertTrue(all(direct.check_refresh(text).values()))
+        for old,new in [('valid=1','valid=0'),('millihz=121212','millihz=120000'),('active=120','active=60'),
+                        ('protect=0','protect=1'),('active_hz=120','active_hz=60'),('fallbacks=0','fallbacks=1'),
+                        ('registers=1','registers=0')]:
+            with self.subTest(change=old):self.assertFalse(all(direct.check_refresh(text.replace(old,new)).values()))
+
     def test_last_completed_surface_may_remain_held_at_return(self):
         r, raw = fixture()
         raw = b'\n'.join(line for line in raw.splitlines() if not line.startswith((b'tl: r 120 ', b'tl: wr 120 0 0 ')))

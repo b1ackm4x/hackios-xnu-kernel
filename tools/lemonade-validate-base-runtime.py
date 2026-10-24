@@ -4,13 +4,19 @@
 Requires the exact phone lease and successful combined-kernel acceptance.
 No diagnostic workload is added to the release image. Logs are private.
 """
-import hashlib,importlib.util,json,os,re,subprocess,time
+import argparse,hashlib,importlib.util,json,os,re,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-PKG=ROOT/'out/releases/lemonade-2026.10.24-base.1'
-OUT=ROOT/'local/lemonade/release-20261024'
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--version',default='2026.10.25-base.1')
+options=parser.parse_args()
+if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}',options.version):parser.error('Invalid release version')
+PKG=ROOT/'out/releases'/('lemonade-'+options.version)
+OUT=ROOT/'local/lemonade'/('release-'+options.version)
 os.umask(0o077)
+OUT.mkdir(exist_ok=True)
 s=importlib.util.spec_from_file_location('base_launch',PKG/'launch.py');launch=importlib.util.module_from_spec(s);s.loader.exec_module(launch)
+s=importlib.util.spec_from_file_location('base_direct',ROOT/'tools/lemonade-check-direct.py');direct=importlib.util.module_from_spec(s);s.loader.exec_module(direct)
 m=launch.verify(PKG)
 for name,entry in m['files'].items():
  assert launch.digest(PKG/name)==entry['sha256']
@@ -63,6 +69,7 @@ checks={
  'dpu_restored':'source restore pixels=1 address=1/1 ' in text and 'scaler restored registers=1 count=50 before_gop=1' in text,
  'wifi_dma_stopped':'endpoint DMA stopped before unmap' in text and 'endpoint bus master clear verified' in text,
 }
+checks.update(direct.check_refresh(text))
 proof={'passed':all(checks.values()),'checks':checks,'kernel_sha256':m['files']['kernel']['sha256'],'root_sha256':m['files']['root.apfs']['sha256'],'elapsed_seconds':round(time.monotonic()-started,3),'direct_completed':int(summary[0][0]) if summary else 0,'log_sha256':hashlib.sha256(raw).hexdigest(),'live_logs':[{'path':str(p.relative_to(ROOT)),'sha256':launch.digest(p)} for p in live],'result':result,'native_settings_password_entry_verified':False}
 (OUT/'clean-runtime-evidence.json').write_text(json.dumps(proof,indent=2)+'\n')
 print(json.dumps(proof,indent=2),flush=True)

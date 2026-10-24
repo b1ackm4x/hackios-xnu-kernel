@@ -4,12 +4,14 @@
 Requires the exact phone's Device Hub lease. Private network input stays in a
 temporary directory and every device log is redacted before retention.
 """
+import argparse
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 import tempfile
 import time
@@ -54,8 +56,13 @@ def wait_for_loader(manifest, seconds=60):
 
 def main():
     os.umask(0o077)
-    folder=ROOT/'out/releases/lemonade-2026.10.24-base.1'
-    evidence=ROOT/'local/lemonade/release-20261024'
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version',default=launch.BASE_VERSION)
+    options=parser.parse_args()
+    if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}',options.version):parser.error('Invalid release version')
+    folder=ROOT/'out/releases'/('lemonade-'+options.version)
+    evidence=ROOT/'local/lemonade'/('release-'+options.version)
+    evidence.mkdir(exist_ok=True)
     manifest=json.loads((folder/'manifest.json').read_text())
     if build.digest(folder/'kernel')!=build.digest(ROOT/'out/lemonade-kernel'):
         raise SystemExit('Candidate and current diagnostic kernel differ')
@@ -126,6 +133,7 @@ def main():
                 'wifi':'station','network_test':True,'dma_guard':guard,
                 'wifi_firmware':{'firmware':manifest['wifi_firmware'],'network_private':True,'network_reconnect_test':True},
                 'display':'direct','display_fences':True,'gpu_enabled':True,'touch':'on','performance_metrics':True,
+                'display_hz_requested':120,
                 'base_root_sha256':manifest['files']['root.apfs']['sha256'],'validation_root_sha256':build.digest(image),
                 'validation_added_paths':changed,'live_logs':[],'network_identity_redacted':True}
         launch.fb(serial,'stage',payload,timeout=60)
@@ -177,7 +185,7 @@ def main():
         for name in ('kernel','root.apfs','system.apfs','boot.img'):
             if current['files'][name]!=manifest['files'][name] or build.digest(folder/name)!=current['files'][name]['sha256']:
                 raise SystemExit('Runtime package changed before recording acceptance')
-        current.update(integration_verified=True,integration_kernel_sha256=record['kernel_sha256'],
+        current.update(integration_verified=True,integration_display_hz=120,integration_kernel_sha256=record['kernel_sha256'],
                        integration_root_sha256=record['base_root_sha256'],
                        integration_evidence_sha256=build.digest(evidence/'combined-acceptance.json'))
         (folder/'manifest.json').write_text(json.dumps(current,indent=2)+'\n');build.checksums(folder)

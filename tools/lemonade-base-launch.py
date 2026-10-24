@@ -11,8 +11,9 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
+BASE_VERSION = '2026.10.25-base.1'
 BASE_ARGUMENTS = ('sb_delay=8 bootcpu=7 cpus=4 cpufreq=1 ddr=0 gpu=1 gpu_log=0 '
-    'metal=1 metal_profile=1 camtl=1 lemonade_display=10 ca_vbl=1 fb_fences=1 '
+    'metal=1 metal_profile=1 camtl=1 lemonade_display=10 lemonade_display_hz=120 lemonade_panel=655 ca_vbl=1 fb_fences=1 '
     'touchscreen=1 buttons=0 wifi=0 lemonade_wifi=24 lemonade_runtime=1 lemonade_dma_verified=1 '
     'adsp=0 ufs=0 ufs_native=0 ufs_write=0 var_store=0').split()
 
@@ -35,6 +36,12 @@ def verify(folder=HERE):
         raise SystemExit('不是 OnePlus 9 base 发布包')
     if manifest.get('boot_arguments') != BASE_ARGUMENTS:
         raise SystemExit('启动配置与此 RAM base 不匹配')
+    panel = manifest.get('refresh_panel', {})
+    if (manifest.get('default_display_hz') != 120 or
+            panel.get('profile') != 'amb655x-60-120-v1' or
+            panel.get('selected_panel') != 'qcom,mdss_dsi_samsung_amb655x_dsc_cmd:' or
+            panel.get('hardware_serial_sha256') != manifest.get('hardware_serial_sha256')):
+        raise SystemExit('120 Hz 面板与发布包绑定信息不匹配')
     required = {'boot.img', 'kernel', 'root.apfs', 'system.apfs', 'launch.py', 'mkpayload.py'}
     if not required.issubset(manifest.get('files', {})):
         raise SystemExit('发布包文件清单不完整')
@@ -47,6 +54,7 @@ def verify(folder=HERE):
     if (not manifest.get('dma_guard_verified') or manifest.get('dma_guard_kernel_sha256') != manifest['files']['kernel']['sha256']):
         raise SystemExit('此候选尚未完成对应内核的 Wi-Fi DMA 验证')
     if (not manifest.get('integration_verified') or
+            manifest.get('integration_display_hz') != 120 or
             manifest.get('integration_kernel_sha256') != manifest['files']['kernel']['sha256'] or
             manifest.get('integration_root_sha256') != manifest['files']['root.apfs']['sha256']):
         raise SystemExit('此候选尚未通过 GPU、显示与 Wi-Fi 联合验收')
@@ -142,7 +150,7 @@ def start(manifest):
             raise SystemExit('启动载荷超出加载器限制')
         fb(serial, 'stage', payload, timeout=60)
     fb(serial, 'oem', 'run', '0')
-    print('base 已启动。没有自动测试、手势或定时退出；等待桌面出现后直接操作手机。')
+    print('base 已按默认 120 Hz 启动。等待桌面出现后直接操作手机；没有自动测试、手势或定时退出。')
 
 
 def stop(manifest, android=False):

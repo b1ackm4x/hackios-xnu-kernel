@@ -36,8 +36,11 @@ class BasePolicy(unittest.TestCase):
             path=folder/name;path.write_bytes(name.encode())
             files[name]={'bytes':path.stat().st_size,'sha256':base.digest(path)}
         manifest={'profile':'lemonade-base-v1','boot_arguments':base.launch.BASE_ARGUMENTS,
+                  'hardware_serial_sha256':'a'*64,'default_display_hz':120,
+                  'refresh_panel':{'profile':'amb655x-60-120-v1','hardware_serial_sha256':'a'*64,
+                                   'selected_panel':'qcom,mdss_dsi_samsung_amb655x_dsc_cmd:'},
                   'files':files,'dma_guard_verified':True,'dma_guard_kernel_sha256':files['kernel']['sha256'],
-                  'integration_verified':True,'integration_kernel_sha256':files['kernel']['sha256'],
+                  'integration_verified':True,'integration_display_hz':120,'integration_kernel_sha256':files['kernel']['sha256'],
                   'integration_root_sha256':files['root.apfs']['sha256']}
         (folder/'manifest.json').write_text(json.dumps(manifest))
         return manifest
@@ -76,6 +79,15 @@ class BasePolicy(unittest.TestCase):
         with patch.object(base.launch,'command',return_value=target+' fastboot\n'):
             self.assertEqual(base.launch.fastboot_target(manifest),target)
 
+    def test_120hz_requires_matching_panel_and_combined_acceptance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory)
+            for key,value in [('default_display_hz',60),('integration_display_hz',60),('refresh_panel',{}),
+                              ('hardware_serial_sha256','b'*64)]:
+                manifest=self.package(folder);manifest[key]=value
+                (folder/'manifest.json').write_text(json.dumps(manifest))
+                with self.subTest(key=key),self.assertRaises(SystemExit):base.launch.verify(folder)
+
     def tree(self):
         tree = {p: (0o100755, 0, 0, b'program') for p in ('bin/metal-enable', 'sbin/init')}
         tree['etc/rc'] = (0o100644, 0, 0, b'/redwood/bin/metal-enable\nexec /sbin/launchd.ios\n')
@@ -106,7 +118,8 @@ class BasePolicy(unittest.TestCase):
 
     def test_default_is_unbounded_ram_runtime(self):
         args=base.launch.BASE_ARGUMENTS
-        for word in ('lemonade_runtime=1','lemonade_wifi=24','gpu=1','touchscreen=1','fb_fences=1','ufs_write=0','var_store=0'):
+        for word in ('lemonade_runtime=1','lemonade_wifi=24','gpu=1','touchscreen=1','fb_fences=1',
+                     'lemonade_display_hz=120','lemonade_panel=655','ufs_write=0','var_store=0'):
             self.assertIn(word,args)
         self.assertFalse(any(w.startswith(('loader_return_after=','touch_lat=','cpuload=','rec_','adreno_watch=')) for w in args))
         self.assertEqual(len(args),len({w.split('=')[0] for w in args}))

@@ -26,6 +26,7 @@ def module(name, filename):
 base = module('base_image', 'lemonade-build-wifi-image.py')
 graphics = module('graphics_image', 'lemonade-build-graphics-image.py')
 launch = module('base_launch', 'lemonade-base-launch.py')
+usb = module('base_usb', 'lemonade-usb.py')
 digest = base.digest
 RUNTIME_METAL = ('libredwoodmetal.dylib', 'libredwoodair.dylib', 'libredwood.dylib',
                  'RedwoodMetal.bundle/RedwoodMetal', 'RedwoodMetal.bundle/Info.plist')
@@ -153,19 +154,23 @@ def checksums(folder):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--version', default='2026.10.24-base.1')
+    parser.add_argument('--version', default=launch.BASE_VERSION)
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}', args.version):
         parser.error('Use a simple version identifier')
     destination = ROOT / 'out/releases' / ('lemonade-' + args.version)
     destination.mkdir(parents=True, exist_ok=False, mode=0o700)
     images = json.loads((ROOT / 'local/lemonade/images.json').read_text())
+    baseline = json.loads((ROOT / 'local/lemonade/baseline.json').read_text())
+    panel = usb.verified_refresh_panel(baseline['hardware_serial_sha256'])
     for name in ('userland/root.apfs', 'userland/system.apfs'):
         if digest(ROOT / name) != images[name]['sha256']:
             raise SystemExit('Normal base image differs from its manifest')
     runtime_dir, metal_dir = ROOT / 'out/lemonade-base-runtime', ROOT / 'out/lemonade-metal'
     runtime, metal = checked_receipt(runtime_dir), checked_receipt(metal_dir)
     kernel = json.loads((ROOT / 'out/lemonade-kernel.manifest.json').read_text())
+    if kernel.get('display_refresh_supported') != 'amb655x-measured-desktop-v1':
+        raise SystemExit('Kernel lacks the measured 120 Hz desktop path')
     if digest(ROOT / 'out/lemonade-kernel') != kernel['sha256']:
         raise SystemExit('Kernel differs from its manifest')
     inputs = json.loads((ROOT / 'out/lemonade-build-inputs.json').read_text())
@@ -209,8 +214,9 @@ def main():
     validate_tree(tree)
     pack_tree(tree, destination / 'root.apfs')
     boot = json.loads((ROOT / 'out/lemonade-boot.manifest.json').read_text())
-    if digest(ROOT / 'out/lemonade-boot.img') != boot['sha256']:
-        raise SystemExit('Loader boot image differs from its manifest')
+    if (digest(ROOT / 'out/lemonade-boot.img') != boot['sha256'] or
+            boot.get('dtb_sha256') != panel['dtb_sha256']):
+        raise SystemExit('Loader boot image differs from its manifest or verified panel DTB')
     for source, target in [('out/lemonade-boot.img', 'boot.img'), ('out/lemonade-kernel', 'kernel'),
                            ('userland/system.apfs', 'system.apfs'), ('tools/lemonade-base-launch.py', 'launch.py'),
                            ('xnuloader/mkpayload.py', 'mkpayload.py')]:
@@ -221,7 +227,7 @@ def main():
         (destination / name).chmod(0o700)
     readme = f'''# OnePlus 9 Base {args.version}
 
-现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、DPU 直接显示、实体触控、QCA6490 Wi-Fi 与系统网络服务。
+现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、默认 120 Hz DPU 直接显示、实体触控、QCA6490 Wi-Fi 与系统网络服务。
 
 ## 使用
 
@@ -231,16 +237,16 @@ Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接�
 
 ## 当前范围
 
-这是现阶段 base，并非所有功能都完成的手机系统。显示沿用 60 Hz；完整 Metal 兼容、120 Hz、睡眠唤醒、完整温控、电源管理和未移植外设仍待后续版本。当前数据卷在 RAM 中，重启后设置和会话不保留；蜂窝通信等未列入本次功能基线。详细验证状态在 `manifest.json`。
+这是现阶段 base，并非所有功能都完成的手机系统。默认请求 120 Hz，只有面板测量通过才向系统发布该模式；应用可使用最高 120 fps，实际帧率仍取决于应用和负载。自适应刷新率切换、完整 Metal 兼容、睡眠唤醒、长期温控、电源管理和未移植外设仍待后续版本。当前数据卷在 RAM 中，重启后设置和会话不保留；蜂窝通信等未列入本次功能基线。详细验证状态在 `manifest.json`。旧的 `2026.10.24-base.1` 保留为 60 Hz 回退包。
 
 Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副本覆盖关联、地址获取、DNS、HTTP 和断线重连。正式包不包含该联网程序或网络配置；原生设置中首次输入密码的完整流程尚未单独验收。
 
-原作者为 hackios 项目的 oosexgang；本包是 b1ackm4x 私有 OnePlus 9 适配版本。它包含本机系统与固件材料，仅留在本机使用，不作为可公开转发的固件下载包。源代码分别维护在 hackios-xnu-kernel 与 hackios-xnu-userland 私有仓库。
+原作者为 hackios 项目的 oosexgang；本包是 b1ackm4x 的 OnePlus 9 适配版本。它包含本机系统与固件材料，仅留在本机使用，不作为可公开转发的固件下载包。源代码分别维护在 hackios-xnu-kernel 与 hackios-xnu-userland 公开仓库。
 '''
     (destination / 'README.md').write_text(readme)
-    baseline = json.loads((ROOT / 'local/lemonade/baseline.json').read_text())
     manifest = {'profile': 'lemonade-base-v1', 'version': args.version, 'device': 'OnePlus 9 LE2110',
         'hardware_serial_sha256': baseline['hardware_serial_sha256'], 'boot_arguments': launch.BASE_ARGUMENTS,
+        'default_display_hz': 120, 'refresh_panel': panel,
         'automatic_tests': False, 'automatic_gestures': False, 'boot_self_tests': False,
         'debug_recording': False, 'timed_exit': False, 'credentials_included': False,
         'partition_writes': False, 'persistent_user_data': False,
