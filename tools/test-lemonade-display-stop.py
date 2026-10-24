@@ -121,7 +121,7 @@ static void reset_fixture(void) {
 static void assert_context_restored(void) {
     for (unsigned i=0;i<9;i++)
         assert(*(uint32_t *)(display_map.cb+display_cb_offsets[i])==display_map.saved[i]);
-    assert(!display_map.active && !display_map.flip_active && !display_map.misr_active && !display_map.manual_active);
+    assert(!display_map.active && !display_map.flip_active && !display_map.misr_active && !display_map.manual_active && !display_map.scale_active && !display_map.intf_misr_active);
     assert(!display_restoring);
 }
 static void return_after_complete_flip(void) {
@@ -150,6 +150,29 @@ static void return_after_complete_manual_setup(void) {
 }
 static void return_after_complete_restore(void) {
     assert_context_restored();
+    lemonade_display_quiesce();
+}
+static void return_after_complete_scaler_setup(void) {
+    assert(display_map.scale_active);
+    assert(host_mdp[0x4a04/4]==0x20034401 && host_mdp[0x6a04/4]==0x20034401);
+    assert(host_mdp[0x6008/4]==562 && host_mdp[0x6a90/4]==1092086);
+    for (unsigned n=0;n<2;n++) for (unsigned r=0;r<DISPLAY_SCALE_REGS;r++)
+        assert(display_map.scale_saved[n][r]==0x40000000u+n*256+r);
+    /* Check the actual emitted split/phase registers against an independent
+     * color-cell reference, including both bilinear taps and the center seam. */
+    const uint64_t unit=1u<<21;
+    for (unsigned x=0;x<1080;x++) {
+        unsigned pipe=0x4000+(x/540)*0x2000;
+        uint64_t at=(uint64_t)host_mdp[(pipe+8)/4]*unit+host_mdp[(pipe+0xa90)/4]+
+                    (uint64_t)(x%540)*host_mdp[(pipe+0xa10)/4];
+        unsigned lo=at/unit,hi=(at+unit-1)/unit;
+        assert(hi<1125 && lo/25==x/24 && hi/25==x/24);
+    }
+    for (unsigned y=0;y<2400;y++) {
+        uint64_t at=host_mdp[0x4a94/4]+(uint64_t)y*host_mdp[0x4a14/4];
+        unsigned lo=at/unit,hi=(at+unit-1)/unit;
+        assert(hi<2436 && lo/203==y/200 && hi/203==y/200);
+    }
     lemonade_display_quiesce();
 }
 int main(void) {
@@ -253,6 +276,28 @@ int main(void) {
     assert(host_mdp[0x35288/4]==0x180085 && host_mdp[0x352b4/4]==0x80000001);
     assert(host_mdp[0x3525c/4]==0xf0001);
     puts("PASS: non-master pingpong is refused without altering the display configuration");
+
+    reset_fixture();
+    display_map.active=display_map.flip_active=display_map.misr_active=display_map.manual_active=true;
+    display_map.sync_config=0x180085;display_map.autorefresh=0x80000001;
+    host_mdp[0x35288/4]=0x180085;host_mdp[0x352b4/4]=1;
+    for (unsigned n=0;n<2;n++) for (unsigned r=0;r<DISPLAY_SCALE_REGS;r++)
+        host_mdp[(0x4000+n*0x2000+display_scale_offsets[r])/4]=0x40000000u+n*256+r;
+    host_pending=return_after_complete_scaler_setup;
+    display_map.intf_misr_active=true; display_map.intf_misr=0;
+    host_mdp[0x35180/4]=0x81000101;
+    assert(!display_scale_configure());
+    assert(host_callbacks==1 && host_interrupts && display_stopping);
+    assert_context_restored();
+    for (unsigned n=0;n<2;n++) for (unsigned r=0;r<DISPLAY_SCALE_REGS;r++)
+        assert(host_mdp[(0x4000+n*0x2000+display_scale_offsets[r])/4]==0x40000000u+n*256+r);
+    char *geometry=strstr(host_log,"scaler restored registers=1 count=50 before_gop=1");
+    pixels=strstr(host_log,"source restore pixels=1");
+    unmap=strstr(host_log,"mapping restore registers=1");
+    assert(geometry && pixels && unmap && geometry<pixels && pixels<unmap);
+    assert(host_mdp[0x35180/4]==0);
+    assert(strstr(host_log,"interface MISR restored=1 status=0 prior_status=0"));
+    puts("PASS: interrupted scaler setup restores all 50 saved registers before GOP output and unmapping");
     return 0;
 }
 '''

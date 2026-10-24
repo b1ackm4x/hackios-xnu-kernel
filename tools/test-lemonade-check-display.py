@@ -141,6 +141,43 @@ class DisplayEvidence(unittest.TestCase):
         self.assertFalse(checked(log.replace(restore,'')+restore))
         self.assertFalse(checked(log+'lemonade-display: manual configured=0 idle=0 sync=0 auto=0 status=0\n'))
 
+    def test_scaler_needs_native_comparison_and_full_geometry_restoration(self):
+        setup = ('lemonade-display: manual configured=1 idle=1 sync=0x180085 auto=0x1 status=0\n'
+                 'lemonade-display: manual idle frames=0 done=0 line=1 tear=2400\n'
+                 'lemonade-display: scaler configured=1 source=1125x2436 pitch=4544 output=1080x2400 overlap=1 step=2184533/2128609 phase=43690/1092086/15728 pattern=0 padding=poisoned\n')
+        for n, phase in enumerate((43690,1092086)):
+            setup += f'lemonade-display: scaler readback pipe={n} size=0x9840233 xy={n*562} pitch=4544 op=0x20034401 step=2184533/2128609 preload=0x3050305 phase={phase}\n'
+        for n, value in enumerate(('0x3333', '0x4444')):
+            setup += f'lemonade-display: scaler native buffer={n} MISR={value}/{value} intf={value} status=0x81000301\n'
+            setup += f'lemonade-display: scaler interface buffer={n} actual={value} expected={value} status=0x81000301\n'
+            setup += f'lemonade-display: scaler compare buffer={n} native_mixer_match=1 actual={value}/{value} expected={value}/{value}\n'
+        for n, value in ((1,'0x3333'), (2,'0x4444'), (64,'0x4444')):
+            setup += f'lemonade-display: manual transfer n={n} frame_delta=1 done=0x100 MISR={value}/{value}\n'
+        cleanup = ('lemonade-display: mapping cleanup stopping=0 mapped=1 flipping=1 source=0x12000000/0x12000000 fsr=0x400 global=0 underrun=0\n'
+                   'lemonade-display: scaler restored registers=1 count=50 before_gop=1\n'
+                   'lemonade-display: interface MISR restored=1 status=0 prior_status=0\n'
+                   'lemonade-display: manual restored sync=1 auto=1\n')
+        log = setup + LOG.replace('buffer 0 pages=2532','buffer 0 pages=2703').replace('buffer 1 pages=2532','buffer 1 pages=2703').replace('frames=128','frames=64').replace('lemonade-display: source restore ', cleanup+'lemonade-display: source restore ')
+        def checked(value):
+            return self.checked(value, display='scale', cmdline='ufs_write=0 lemonade_display=9 lemonade_display_flips=64 lemonade_display_pattern=0')['passed']
+        self.assertTrue(checked(log))
+        for old,new in (('native_mixer_match=1','native_mixer_match=0'), ('count=50','count=48'), ('pitch=4544','pitch=4320'),
+                        ('expected=0x4444/0x4444','expected=0x4445/0x4444'), ('actual=0x3333/0x3333','actual=0x3333/0x3334'),
+                        ('scaler restored registers=1','scaler restored registers=0'), ('padding=poisoned','padding=uniform'), ('status=0x81000301','status=0x81000101'), ('interface MISR restored=1','interface MISR restored=0'), ('preload=0x3050305','preload=0x2040204')):
+            self.assertFalse(checked(log.replace(old,new)), (old,new))
+        for line in setup.splitlines()+cleanup.splitlines():
+            self.assertFalse(checked(log.replace(line+'\n','')), line)
+        # A real alpha-only mixer difference is allowed only when independently
+        # measured final interface output remains exact and the observations agree.
+        alpha = log.replace('buffer=0 MISR=0x3333/0x3333 intf=', 'buffer=0 MISR=0x7777/0x7777 intf=')
+        alpha = alpha.replace('buffer=0 native_mixer_match=1 actual=0x3333/0x3333 expected=0x3333/0x3333',
+                              'buffer=0 native_mixer_match=0 actual=0x3333/0x3333 expected=0x7777/0x7777')
+        self.assertTrue(checked(alpha))
+        self.assertFalse(checked(alpha.replace('buffer=0 actual=0x3333 expected=0x3333 status=',
+                                             'buffer=0 actual=0x3334 expected=0x3333 status=')))
+        restore='lemonade-display: scaler restored registers=1 count=50 before_gop=1\n'
+        self.assertFalse(checked(log.replace(restore,'')+restore))
+
 
 if __name__ == '__main__':
     unittest.main()

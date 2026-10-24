@@ -171,7 +171,7 @@ class DeviceSafety(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, 'display mode'):
             self.run_action('run', '--kernel', 'built', '--display', 'clocks')
         self.assertFalse(any('stage' in c for c in self.calls))
-        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual']
+        manifest['display_modes_supported'] = ['inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale']
         path.write_text(json.dumps(manifest))
         (self.root / 'userland').mkdir()
         root_image = self.root / 'userland/root.apfs'
@@ -179,26 +179,33 @@ class DeviceSafety(unittest.TestCase):
         image_record = {'bytes': root_image.stat().st_size, 'sha256': hashlib.sha256(root_image.read_bytes()).hexdigest()}
         (self.root / 'local/lemonade/images.json').write_text(json.dumps({
             'userland/root.apfs': image_record, 'userland/system.apfs': image_record}))
-        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4), ('smmu', 5), ('map', 6), ('flip', 7), ('manual', 8)):
+        for mode, number in (('inspect', 1), ('clocks', 2), ('irq', 3), ('sync', 4), ('smmu', 5), ('map', 6), ('flip', 7), ('manual', 8), ('scale', 9)):
             self.calls.clear()
             self.run_action('run', '--kernel', 'built', '--display', mode, '--seconds', '1',
-                            *(('--userland',) if mode in ('map', 'flip', 'manual') else ()))
+                            *(('--userland',) if mode in ('map', 'flip', 'manual', 'scale') else ()))
             payload = next(c for c in self.calls if c[0] == 'python3')
             cmdline = payload[payload.index('--cmdline') + 1].split()
             self.assertIn('lemonade_display=' + str(number), cmdline)
             if mode == 'sync': self.assertIn('ca_vbl=1', cmdline)
-            if mode in ('flip', 'manual'): self.assertIn('lemonade_display_flips=64', cmdline)
+            if mode in ('flip', 'manual', 'scale'): self.assertIn('lemonade_display_flips=64', cmdline)
+            if mode == 'scale': self.assertIn('lemonade_display_pattern=0', cmdline)
             self.assertIn('ufs_write=0', cmdline)
             self.assertFalse(any(p.startswith('display_probe=') for p in cmdline))
+        self.calls.clear()
+        self.run_action('run', '--kernel', 'built', '--display', 'scale', '--userland', '--display-pattern', 'grid', '--seconds', '8')
+        payload = next(c for c in self.calls if c[0] == 'python3')
+        self.assertIn('lemonade_display_pattern=1', payload[payload.index('--cmdline')+1].split())
 
     def test_display_mapping_rejects_unscoped_device_changes(self):
-        for mode in ('map', 'flip', 'manual'):
+        for mode in ('map', 'flip', 'manual', 'scale'):
             for extra in ((), ('--userland', '--gpu'), ('--userland', '--touch', 'inspect'),
                           ('--userland', '--cpu-policy', 'balanced'), ('--profile', 'performance'),
                           ('--userland', '--cpus', '4'), ('--userland', '--boot-cpu', '4')):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     self.run_action('run', '--kernel', 'built', '--display', mode, *extra)
         for extra in (('--display', 'map', '--display-flips', '64'),
+                      ('--display', 'flip', '--display-pattern', 'grid'),
+                      ('--display-pattern', 'grid'),
                       ('--display', 'flip', '--display-flips', '1000', '--seconds', '30')):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.run_action('run', '--kernel', 'built', '--userland', *extra)

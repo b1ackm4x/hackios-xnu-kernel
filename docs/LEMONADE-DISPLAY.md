@@ -379,6 +379,49 @@ python3 tools/lemonade-build-graphics-image.py --system-metal --widgets
 python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets --display sync --display-fences --metrics --seconds 90
 ```
 
+## DPU 硬件缩放诊断（2026-10-24，独立缓冲区）
+
+新增显式 `--display scale`，在启动 CPU 0、GPU 尚未启动的受控环境里，使用两块自己
+分配的缓冲区验证 1125×2436 到 1080×2400 的 QSEED 缩放。输入 stride 4544，两个 VIG
+各取 563 列、起点为 0/562，重叠一列；输出仍为每路 540×2400。相位按完整画面计算，
+包括像素中心和右侧分数余量。每行填充区写入校验色，避免错误 stride 被均匀画面掩盖。
+
+不能只比较中间 mixer 的 MISR：实测 alpha 255、128、0 会改变 mixer 校验值，却不会
+改变最终 INTF 编码输出。同灰色原生和缩放的最终接口校验值一致；对应透明度基准保留在
+`1792802704-run-cp0.log`。正式诊断仍检查两个 mixer 的稳定性，同时逐次比较最终接口
+与原生尺寸参考画面的 MISR，并要求 PP0 完成和每条命令只增加一帧。
+
+该机器实测需要启动固件的预装载值 **水平 5 / 垂直 3**。公开驱动默认的 4/2 通过了灰色
+与固定彩色测试，但横向、纵向条纹和二维网格均不匹配；因此不能采用只通过均匀图像的
+候选。恢复 5/3 后，`1792803136-run-cp0.log` 的两张彩色网格完成 64 次交替传输，最终
+接口校验分别与原生参考 `0xc4ca7e7f`、`0xab95fb49` 完全一致。原生 24×200 像素色块
+对应输入 25×203 色块，数学检查覆盖全部输出列/行及左右拼接处的两个双线性采样点。
+这仍不等于已经验收任意图像、所有滤波质量或桌面直接扫描。
+
+新增的 50 个几何、像素扩展和缩放寄存器在一次不可中断的事务中保存；退出先恢复它们，
+再恢复 GOP 源地址和自动刷新，确认原画面输出后才解除临时 SMMU 映射，最后恢复接口
+测量控制、IRQ 和时钟。`1792803194-run-cp0.log` 在 3 秒定时退出时仍扫描自有缓冲区，
+没有完成全部 64 次测试；退出前的故障和欠载状态均为零，随后上述恢复顺序全部通过。
+该中断记录不报告无法确定的已完成帧数。
+
+最终同源码候选 `6a5b732b7e8702966d01e9f723a582c442ade2d9dcaf5aebaa32353d4f037086`
+在 `1792803293-run-cp0.log` 的 60 秒运行中完成 1,000 次网格切换、1,000 次实际硬件传输；
+逐次最终接口输出与原生参考一致，无 DMA 故障、欠载或异常中断，全部退出恢复检查通过。
+它与上述 3 秒中断验收使用同一内核；这仍是独立缓冲区验收，不是桌面零拷贝。
+08:55 返回 Android 后，精确 USB 身份、启动完成、原 B 槽和锁状态相符，五个活动启动
+分区哈希均与原始备份一致（`android-roundtrip-20261024T085541.json`）。
+
+```sh
+python3 tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --seconds 8
+python3 tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --seconds 3
+python3 tools/lemonade-check-display.py local/lemonade/1792803194-run-cp0.log --interrupted
+python3 tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --display-flips 1000 --seconds 60
+```
+
+`--display-pattern` 支持固定彩色、二维网格、列条纹和行条纹；仅用于独立诊断，不能与
+GPU、CPU 档位、触控或多核桌面组合。主机实际 C 恢复测试、USB 参数边界和证据反例测试
+均通过。普通桌面仍走已验证的 CPU 复制路径；本阶段没有更改 DSI、PLL 或面板刷新模式。
+
 ## 复现
 
 先准备项目的 Linux 构建环境、iOS 16.5 SDK、核验过的系统镜像和有权使用的 Metal 编译器。
@@ -413,7 +456,7 @@ python3 tools/lemonade-usb.py run --profile performance --metal-test --display s
 
 系统所有应用的 Metal 兼容、深度 MSAA resolve、完整 texture view、heaps/events 和全部私有 SPI
 尚未全面验收。独立双缓冲的 DPU SMMU 读取及 CPU 复制的生产者 release fence 已通过上述有界测试；
-桌面直接扫描及其完成通知、硬件缩放、
+独立缓冲区的指定缩放网格已有上节证据，但桌面直接扫描及其完成通知、任意图像缩放、
 Wi-Fi 与 GPU 联合运行、120 Hz 模式及长时间温控也不能据本页结果宣称完成。
 当前安全窗口内复制仍有约 3 ms 成本，动画绘制也有长帧；GPU 可用并不意味着所有刷新瓶颈消失。
 

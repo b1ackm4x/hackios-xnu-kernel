@@ -110,8 +110,9 @@ def main():
     parser.add_argument('--metal-system', choices=('apps', 'desktop'), help='verified RAM-only system Metal discovery; desktop also selects Metal compositing')
     parser.add_argument('--metal-widgets', action='store_true', help='separate verified widget renderer image; requires --metal-system desktop')
     parser.add_argument('--metal-profile', type=int, choices=(0, 1), help='experimental system capability table: 0 Apple1, 1 Apple2 (tested system default); does not imply complete family compliance')
-    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual additionally disables automatic refresh and triggers each transfer; all restore firmware state')
-    parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual; default 64')
+    parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual triggers each transfer; scale also compares 1125x2436 hardware scaling; all restore firmware state')
+    parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual/scale; default 64')
+    parser.add_argument('--display-pattern', choices=('uniform', 'grid', 'columns', 'rows'), help='uniform or spatial scaling reference; requires --display scale')
     parser.add_argument('--display-fences', action='store_true', help='experimental producer-release waits; requires --display sync --userland')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
     parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
@@ -133,7 +134,7 @@ def main():
     args.kernel = args.kernel or "prebuilt"
     args.cpu_policy = args.cpu_policy or "firmware"
     if args.seconds is None:
-        args.seconds = 300 if args.profile else (60 if args.display_flips == 1000 else 30 if args.display in ('map', 'flip', 'manual') else 8)
+        args.seconds = 300 if args.profile else (60 if args.display_flips == 1000 else 30 if args.display in ('map', 'flip', 'manual', 'scale') else 8)
     if (args.boot_cpu is not None or args.cpus is not None) and (args.action != "run" or args.kernel != "built"):
         parser.error("CPU topology tests require run --kernel built")
     if args.gpu_trace and (args.action != "run" or not args.gpu):
@@ -149,11 +150,13 @@ def main():
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
     if args.display and (args.action != 'run' or args.kernel != 'built' or args.checkpoint or args.gpu_step or args.wifi):
         parser.error('Display survey requires run --kernel built without checkpoints, GPU steps or Wi-Fi tests')
-    if args.display in ('map', 'flip', 'manual') and (not args.userland or args.gpu or args.touch or args.cpu_policy != 'firmware' or
+    if args.display in ('map', 'flip', 'manual', 'scale') and (not args.userland or args.gpu or args.touch or args.cpu_policy != 'firmware' or
                                           args.cpus not in (None, 1) or args.boot_cpu not in (None, 0)):
         parser.error('Display mapping probe requires --userland on boot CPU 0 only, without GPU, touch or CPU-policy changes')
-    if args.display_flips is not None and args.display not in ('flip', 'manual'):
-        parser.error('--display-flips requires --display flip/manual')
+    if args.display_flips is not None and args.display not in ('flip', 'manual', 'scale'):
+        parser.error('--display-flips requires --display flip/manual/scale')
+    if args.display_pattern and args.display != 'scale':
+        parser.error('--display-pattern requires --display scale')
     if args.display_flips == 1000 and args.seconds < 50:
         parser.error('1000 display flips require at least 50 seconds')
     if args.display_fences and (args.action != 'run' or args.kernel != 'built' or args.display != 'sync' or not args.userland):
@@ -357,9 +360,11 @@ def main():
             cmdline += ' camtl=' + ('1' if args.metal_system == 'desktop' else '0')
         if args.display:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_display='))
-            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7, 'manual': 8}[args.display])
-            if args.display in ('flip', 'manual'):
+            cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7, 'manual': 8, 'scale': 9}[args.display])
+            if args.display in ('flip', 'manual', 'scale'):
                 cmdline += ' lemonade_display_flips=' + str(args.display_flips or 64)
+            if args.display == 'scale':
+                cmdline += ' lemonade_display_pattern=' + str({None: 0, 'uniform': 0, 'grid': 1, 'columns': 2, 'rows': 3}[args.display_pattern])
             if args.display == 'sync':
                 cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('ca_vbl='))
                 cmdline += ' ca_vbl=1'

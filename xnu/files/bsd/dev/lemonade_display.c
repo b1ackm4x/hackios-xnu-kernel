@@ -8,7 +8,9 @@
  * compares hardware mixer signatures; its journal restores the context.
  * =7 additionally tests two owned buffers by changing VIG0/1 source addresses
  * and CTL flush, then verifies the original pixels before restoring bypass.
- * No DSI, PLL, panel timing, layer layout or scaler programming.
+ * =8 uses explicit command transfers. =9 additionally compares two uniform
+ * or spatial reference images through QSEED from 1125x2436 to 1080x2400. Geometry and
+ * scaler registers are journaled; no DSI, PLL or panel timing is changed.
  *
  * Register definitions checked against Linux v6.12: dispcc-sm8250.c (SM8350
  * adjustments), gcc-sm8350.c, sm8350.dtsi, dpu_7_0_sm8350.h and dpu_hw_intf.c.
@@ -456,6 +458,8 @@ display_smmu_survey(void)
 
 #define DISPLAY_GOP 0xe4d00000ull
 #define DISPLAY_GOP_BYTES (4320u * 2400u)
+#define DISPLAY_SCALE_PITCH 4544u
+#define DISPLAY_SCALE_BYTES (DISPLAY_SCALE_PITCH * 2436u)
 #define DISPLAY_TABLE_BYTES (32u * 4096u)
 #define DISPLAY_PTE_ADDRESS 0x0000fffffffff000ull
 #define DISPLAY_FSR_FAULT 0xc00001feu /* [10:9] describe the format, not faults */
@@ -464,12 +468,23 @@ display_smmu_survey(void)
 /* INTF1 is bound to master PINGPONG0; the two DSC/mixers share its transfer. */
 #define DISPLAY_PP_DONE (1u << 8)
 static const unsigned display_cb_offsets[] = {0, 0x10, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x38, 0x3c};
+/* Only writable source geometry, pixel extension and QSEED configuration.
+ * Opmode is last so all parameters precede enable/disable on both paths. */
+static const unsigned display_scale_offsets[] = {
+	0, 8, 0x24, 0x100, 0x104, 0x108, 0x110, 0x114, 0x118, 0x120, 0x124, 0x128,
+	0xa10, 0xa14, 0xa18, 0xa1c, 0xa20, 0xa40, 0xa44, 0xa48,
+	0xa90, 0xa94, 0xa98, 0xa9c, 0xa04
+};
+#define DISPLAY_SCALE_REGS (sizeof(display_scale_offsets) / sizeof(display_scale_offsets[0]))
 static struct {
 	vm_offset_t smmu, cb, tables, mdp, buffers[2];
 	unsigned table_pages;
 	uint32_t saved[9], misr[2], baseline[2], source[2], flush;
 	uint32_t sync_config, autorefresh;
-	bool active, misr_active, flip_active, manual_active;
+	uint32_t scale_saved[2][DISPLAY_SCALE_REGS], scale_reference[2][2];
+	uint32_t intf_misr, intf_reference[2];
+	uint32_t scale_pattern;
+	bool active, misr_active, flip_active, manual_active, scale_active, intf_misr_active;
 } display_map;
 
 static uint64_t *
@@ -547,6 +562,18 @@ display_map_restore(void)
 	}
 	if (display_map.flip_active) {
 		bool manual = display_map.manual_active;
+		if (display_map.scale_active) {
+			bool exact = true;
+			for (unsigned n = 0; n < 2; n++) {
+				vm_offset_t pipe = display_map.mdp + 0x4000 + n * 0x2000;
+				for (unsigned r = 0; r < DISPLAY_SCALE_REGS; r++)
+					wr(pipe + display_scale_offsets[r], display_map.scale_saved[n][r]);
+				for (unsigned r = 0; r < DISPLAY_SCALE_REGS; r++)
+					exact &= rd(pipe, display_scale_offsets[r]) == display_map.scale_saved[n][r];
+			}
+			tell("lemonade-display: scaler restored registers=%u count=%u before_gop=1\n", exact, (unsigned)(2 * DISPLAY_SCALE_REGS));
+			display_map.scale_active = false;
+		}
 		/* Restore the physical GOP source while its identity mapping is still
 		 * live. Confirm actual output before turning translation off. */
 		wr(display_map.mdp + 0x4014, display_map.source[0]);
@@ -613,6 +640,15 @@ display_map_restore(void)
 		    rd(display_map.mdp, 0x44310) & 0x200, rd(display_map.mdp, 0x45310) & 0x200,
 		    display_map.misr[0] & 0x200, display_map.misr[1] & 0x200);
 		display_map.misr_active = false;
+	}
+	if (display_map.intf_misr_active) {
+		vm_offset_t control = display_map.mdp + INTF1_OFFSET + 0x180;
+		wr(control, 1u << 10);
+		wr(control, display_map.intf_misr & DISPLAY_MISR_CONTROL);
+		tell("lemonade-display: interface MISR restored=%u status=%#x prior_status=%#x\n",
+		    (rd(control, 0) & DISPLAY_MISR_CONTROL) == (display_map.intf_misr & DISPLAY_MISR_CONTROL),
+		    rd(control, 0) & 0x200, display_map.intf_misr & 0x200);
+		display_map.intf_misr_active = false;
 	}
 	/* Keep the small table allocation until the timed kernel return. No live
 	 * translation can ever reference freed kernel pages during this probe. */
@@ -733,6 +769,121 @@ display_manual_sample(uint32_t value[2], uint32_t first)
 }
 
 static bool
+display_scale_configure(void)
+{
+	vm_offset_t mdp = display_map.mdp;
+	bool enabled;
+	if (!display_transaction_begin(&enabled)) return false;
+	for (unsigned n = 0; n < 2; n++)
+		for (unsigned r = 0; r < DISPLAY_SCALE_REGS; r++)
+			display_map.scale_saved[n][r] = rd(mdp + 0x4000 + n * 0x2000, display_scale_offsets[r]);
+	display_map.scale_active = true; /* complete both journals before any write */
+	uint32_t step_x = (1u << 21) * 25u / 24u, step_y = (1u << 21) * 203u / 200u;
+	uint32_t center_x = (step_x - (1u << 21)) / 2, center_y = (step_y - (1u << 21)) / 2;
+	for (unsigned n = 0; n < 2; n++) {
+		vm_offset_t pipe = mdp + 0x4000 + n * 0x2000, scaler = pipe + 0xa00;
+		uint32_t phase_x = (540u * n * step_x + center_x) & 0x1fffff;
+		wr(pipe, (2436u << 16) | 563u); wr(pipe + 8, n * 562u); wr(pipe + 0x24, DISPLAY_SCALE_PITCH);
+		for (unsigned c = 0; c < 3; c++) {
+			wr(pipe + 0x100 + c * 0x10, 0); wr(pipe + 0x104 + c * 0x10, 0);
+			wr(pipe + 0x108 + c * 0x10, (2436u << 16) | 563u);
+		}
+		wr(scaler + 0x10, step_x); wr(scaler + 0x14, step_y);
+		wr(scaler + 0x18, step_x); wr(scaler + 0x1c, step_y);
+		wr(scaler + 0x20, 0x03050305); /* Observed firmware 5/3: 4/2 passes uniform images but fails the spatial reference. */
+		wr(scaler + 0x40, (2436u << 16) | 563u); wr(scaler + 0x44, (2436u << 16) | 563u);
+		wr(scaler + 0x48, (2400u << 16) | 540u);
+		wr(scaler + 0x90, phase_x); wr(scaler + 0x94, center_y);
+		wr(scaler + 0x98, phase_x); wr(scaler + 0x9c, center_y);
+		/* Bilinear RGB/alpha, 8-bit input; no LUT or detail enhancer.
+		 * This 0x3000 block reads bit 31 back as zero (QSEED3 blend
+		 * selection is not retained); use its observed writable mode. */
+		wr(scaler + 4, 0x20034401);
+	}
+	bool valid = true;
+	for (unsigned n = 0; n < 2; n++) {
+		vm_offset_t pipe = mdp + 0x4000 + n * 0x2000;
+		tell("lemonade-display: scaler readback pipe=%u size=%#x xy=%#x pitch=%#x op=%#x step=%#x/%#x preload=%#x phase=%#x\n",
+		    n, rd(pipe, 0), rd(pipe, 8), rd(pipe, 0x24), rd(pipe, 0xa04),
+		    rd(pipe, 0xa10), rd(pipe, 0xa14), rd(pipe, 0xa20), rd(pipe, 0xa90));
+		valid &= rd(pipe, 0) == ((2436u << 16) | 563u) && rd(pipe, 8) == n * 562u &&
+		    rd(pipe, 0x24) == DISPLAY_SCALE_PITCH && rd(pipe, 0xa04) == 0x20034401;
+	}
+	tell("lemonade-display: scaler configured=%u source=1125x2436 pitch=%u output=1080x2400 overlap=1 step=%u/%u phase=%u/%u/%u pattern=%u padding=poisoned\n",
+	    valid, DISPLAY_SCALE_PITCH, step_x, step_y, center_x, (540u * step_x + center_x) & 0x1fffff, center_y, display_map.scale_pattern);
+	ml_set_interrupts_enabled(enabled);
+	return valid && !os_atomic_load(&display_stopping, acquire);
+}
+
+static void
+display_scale_fill(unsigned n, bool scaled)
+{
+	uint32_t *pixels = (void *)display_map.buffers[n];
+	unsigned width = scaled ? 1125 : 1080, height = scaled ? 2436 : 2400;
+	unsigned stride = scaled ? DISPLAY_SCALE_PITCH / 4 : 1080;
+	for (unsigned y = 0; y < height; y++) for (unsigned x = 0; x < stride; x++) {
+		uint32_t color = n ? 0xff142024 : 0xff201018;
+		if (display_map.scale_pattern) {
+			/* The 25x203 input cells map exactly onto 24x200 output
+			 * cells. Pixel-center sampling never straddles a color edge. */
+			unsigned gx = display_map.scale_pattern == 3 ? 0 : x / (scaled ? 25 : 24);
+			unsigned gy = display_map.scale_pattern == 2 ? 0 : y / (scaled ? 203 : 200);
+			unsigned r = 16 + (gx * 3 + gy * 5 + n * 7) % 24;
+			unsigned g = 16 + (gx * 7 + gy * 3 + n * 11) % 24;
+			unsigned b = 16 + (gx * 5 + gy * 7 + n * 13) % 24;
+			color = 0xff000000 | (r << 16) | (g << 8) | b;
+		}
+		pixels[y * stride + x] = x < width ? color : 0xff500050;
+	}
+}
+
+static bool
+display_scale_begin(void)
+{
+	/* The command engine must be idle. Capture actual native-output references
+	 * before changing either geometry or buffer padding; these are not guessed
+	 * CRCs. Padding is then poisoned to detect an incorrect stride or crop. */
+	vm_offset_t mdp = display_map.mdp;
+	if (!display_map.manual_active || display_map.scale_active) return false;
+	bool enabled;
+	if (!display_transaction_begin(&enabled)) return false;
+	uint32_t intf_control = rd(mdp, INTF1_OFFSET + 0x180);
+	if (intf_control & 0x100) {
+		tell("lemonade-display: interface MISR already owned; refused\n");
+		ml_set_interrupts_enabled(enabled); return false;
+	}
+	display_map.intf_misr = intf_control;
+	display_map.intf_misr_active = true;
+	wr(mdp + INTF1_OFFSET + 0x180, 1u << 10);
+	wr(mdp + INTF1_OFFSET + 0x180, 0x81000101); /* Linux INTF encoder input select 1 */
+	ml_set_interrupts_enabled(enabled);
+	for (unsigned n = 0; n < 2; n++) {
+		vm_offset_t pipe = mdp + 0x4000 + n * 0x2000;
+		if (rd(pipe, 0xa00) != 0x3000 || rd(pipe, 0xa04) != 0 ||
+		    rd(pipe, 0x30) != 0x237ff || rd(pipe, 0x34) != 0x3020001 ||
+		    rd(pipe, 0x38) != 0x80000000 || rd(pipe, 8) != n * 540 ||
+		    rd(pipe, 0xc) != 0x960021c || rd(pipe, 0x10) != n * 540) {
+			tell("lemonade-display: scaler refused: firmware preflight differs\n"); return false;
+		}
+	}
+	for (unsigned n = 0; n < 2; n++) {
+		uint32_t first = rd(mdp, INTF1_OFFSET + 0xac);
+		if (!display_flip_buffer(n) || !display_manual_sample(display_map.scale_reference[n], first)) return false;
+		if ((rd(mdp, INTF1_OFFSET + 0x180) & 0x300) != 0x300) return false;
+		display_map.intf_reference[n] = rd(mdp, INTF1_OFFSET + 0x184);
+		tell("lemonade-display: scaler native buffer=%u MISR=%#x/%#x intf=%#x status=%#x\n",
+		    n, display_map.scale_reference[n][0], display_map.scale_reference[n][1], display_map.intf_reference[n], rd(mdp, INTF1_OFFSET + 0x180));
+	}
+	for (unsigned n = 0; n < 2; n++) {
+		display_scale_fill(n, true);
+		for (vm_offset_t line = display_map.buffers[n]; line < display_map.buffers[n] + DISPLAY_SCALE_BYTES; line += 64)
+			__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	return display_scale_configure();
+}
+
+static bool
 display_misr_sample(uint32_t value[2])
 {
 	/* Free-running one-frame MISR, sampled after a complete new transfer. */
@@ -749,9 +900,13 @@ display_misr_sample(uint32_t value[2])
 }
 
 static void
-display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual)
+display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual, bool scale)
 {
 	if (os_atomic_load(&display_stopping, acquire)) return;
+	uint32_t grid = 0;
+	PE_parse_boot_argn("lemonade_display_pattern", &grid, sizeof(grid));
+	if (grid > 3 || (grid && !scale)) return;
+	display_map.scale_pattern = grid;
 	display_map.mdp = mdp;
 	display_map.smmu = ml_io_map(0x15000000, 0x100000);
 	if (!display_map.smmu) return;
@@ -798,13 +953,16 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual)
 	}
 	uint64_t *before = display_leaf(DISPLAY_GOP - 4096, false), *after = display_leaf(DISPLAY_GOP + size, false);
 	if ((before && *before) || (after && *after)) return;
+	unsigned identity_size = size;
+	if (scale) size = (DISPLAY_SCALE_BYTES + 4095) & ~4095u;
 	if (flip) for (unsigned n = 0; n < 2; n++) {
 		unsigned allocation = round_page(size);
 		if (kmem_alloc(kernel_map, &display_map.buffers[n], allocation,
 		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return;
 		uint32_t *pixels = (void *)display_map.buffers[n];
 		/* Close dark greys keep the bounded alternating-pattern test unobtrusive. */
-		for (unsigned p = 0; p < DISPLAY_GOP_BYTES / 4; p++) pixels[p] = n ? 0xff121212 : 0xff101010;
+		for (unsigned p = 0; p < size / 4; p++) pixels[p] = n ? 0xff121212 : 0xff101010;
+		if (scale) display_scale_fill(n, false);
 		unsigned high = 0;
 		for (unsigned offset = 0; offset < size; offset += 4096) {
 			uint64_t physical = kvtophys(display_map.buffers[n] + offset);
@@ -827,7 +985,7 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual)
 	for (vm_offset_t line = display_map.tables; line < display_map.tables + DISPLAY_TABLE_BYTES; line += 64)
 		__asm__ volatile("dc civac, %0" : : "r"(line) : "memory");
 	__asm__ volatile("dsb sy" ::: "memory");
-	tell("lemonade-display: identity table verified pages=%u tables=%u guards=unmapped\n", size / 4096, display_map.table_pages);
+	tell("lemonade-display: identity table verified pages=%u tables=%u guards=unmapped\n", identity_size / 4096, display_map.table_pages);
 	irq_probe(mdp, mdss, true);
 	if (!irq.acquired || !irq.streaming) return;
 	bool enabled;
@@ -872,6 +1030,7 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual)
 		if (initial_underrun) { tell("lemonade-display: flip refused: pre-existing underrun\n"); goto done; }
 		if (manual) {
 			if (!display_manual_begin() || !display_manual_idle()) goto done;
+			if (scale && !display_scale_begin()) goto done;
 			first_frame = rd(mdp, INTF1_OFFSET + 0xac);
 		}
 		for (; completed < loops; completed++) {
@@ -882,10 +1041,23 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual)
 			if (!(manual ? display_manual_sample(sample, before) : display_misr_sample(sample)) ||
 			    (rd(cb, 0x58) & DISPLAY_FSR_FAULT) || rd(smmu, 0x48) ||
 			    (rd(mdp, 0x14) & (1u << 26)) || rd(mdp, 0x4014) != DISPLAY_BUFFER_IOVA(n) || rd(mdp, 0x6014) != DISPLAY_BUFFER_IOVA(n)) break;
+			if (scale && ((rd(mdp, INTF1_OFFSET + 0x180) & 0x300) != 0x300 ||
+			    rd(mdp, INTF1_OFFSET + 0x184) != display_map.intf_reference[n])) {
+				tell("lemonade-display: scaler interface mismatch buffer=%u actual=%#x expected=%#x status=%#x\n",
+				    n, rd(mdp, INTF1_OFFSET + 0x184), display_map.intf_reference[n], rd(mdp, INTF1_OFFSET + 0x180));
+				break;
+			}
 			if (manual && (completed < 2 || completed + 1 == loops))
 				tell("lemonade-display: manual transfer n=%u frame_delta=%u done=%#x MISR=%#x/%#x\n",
 				    completed + 1, rd(mdp, INTF1_OFFSET + 0xac) - before, rd(mdp, 0x14) & DISPLAY_PP_DONE, sample[0], sample[1]);
 			if (completed < 2) {
+				if (scale) {
+					tell("lemonade-display: scaler interface buffer=%u actual=%#x expected=%#x status=%#x\n",
+					    n, rd(mdp, INTF1_OFFSET + 0x184), display_map.intf_reference[n], rd(mdp, INTF1_OFFSET + 0x180));
+					bool mixer_same = sample[0] == display_map.scale_reference[n][0] && sample[1] == display_map.scale_reference[n][1];
+					tell("lemonade-display: scaler compare buffer=%u native_mixer_match=%u actual=%#x/%#x expected=%#x/%#x\n",
+					    n, mixer_same, sample[0], sample[1], display_map.scale_reference[n][0], display_map.scale_reference[n][1]);
+				}
 				checksums[n][0] = sample[0]; checksums[n][1] = sample[1];
 				tell("lemonade-display: buffer %u MISR=%#x/%#x flush=%#x\n", n, sample[0], sample[1], rd(mdp, 0x15018));
 				if ((sample[0] == baseline[0] && sample[1] == baseline[1]) ||
@@ -911,7 +1083,7 @@ lemonade_display_init(void)
 	const void *value;
 	unsigned length;
 	if (!PE_parse_boot_argn("lemonade_display", &mode, sizeof(mode)) || !mode) return;
-	if (mode > 8 || SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+	if (mode > 9 || SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
 	    SecureDTGetProperty(entry, "device_type", &value, &length) != kSuccess ||
 	    length != sizeof("lemonade") || memcmp(value, "lemonade", length)) {
 		tell("lemonade-display: refused: unsupported platform or mode\n");
@@ -958,8 +1130,28 @@ lemonade_display_init(void)
 		for (unsigned i = 0; i < sizeof(pipe_regs) / sizeof(pipe_regs[0]); i++)
 			report(mdp + pipes[n], block, "state", pipe_regs[i]);
 	}
+	if (mode == 2) {
+		/* Read-only scaler inventory before any future scaled-scanout probe.
+		 * Linux v6.12 dpu_hw_catalog.c places SM8350's QSEED3 at VIG + 0xa00;
+		 * dpu_hw_util.c and dpu_hw_sspp.c define these readable registers.
+		 * Only the two pipes already scanning the firmware GOP are inspected. */
+		static const uint32_t scaler_regs[] = {0, 4, 8, 0xc, 0x10, 0x14, 0x18,
+		    0x1c, 0x20, 0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58, 0x5c,
+		    0x60, 0x90, 0x94, 0x98, 0x9c};
+		static const uint32_t ext_regs[] = {0x100, 0x104, 0x108, 0x110, 0x114,
+		    0x118, 0x120, 0x124, 0x128};
+		for (unsigned n = 0; n < 2; n++) {
+			char block[16];
+			snprintf(block, sizeof(block), "vig%u_scaler", n);
+			for (unsigned i = 0; i < sizeof(scaler_regs) / sizeof(scaler_regs[0]); i++)
+				report(mdp + pipes[n] + 0xa00, block, "state", scaler_regs[i]);
+			snprintf(block, sizeof(block), "vig%u_ext", n);
+			for (unsigned i = 0; i < sizeof(ext_regs) / sizeof(ext_regs[0]); i++)
+				report(mdp + pipes[n], block, "state", ext_regs[i]);
+		}
+	}
 	if (mode == 5) { display_smmu_survey(); goto out; }
-	if (mode >= 6 && mode <= 8) { display_mapping_probe(mdp, mdss, mode != 6, mode == 8); goto out; }
+	if (mode >= 6 && mode <= 9) { display_mapping_probe(mdp, mdss, mode != 6, mode >= 8, mode == 9); goto out; }
 	vm_offset_t intf = mdp + INTF1_OFFSET;
 	static const uint32_t intf_regs[] = { 0, 4, 8, 0xc, 0x1c, 0x24, 0x3c, 0x60,
 	    0x84, 0xa8, 0x26c, 0x280, 0x284, 0x288, 0x28c, 0x294, 0x29c, 0x2a0, 0x2b4 };
