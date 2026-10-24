@@ -18,8 +18,9 @@
 - 以后新增机型，从适当的共同基线创建 `device/<codename>`，把机型参数和驱动保持隔离。
 - 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入 `main`；机型专用实验仍可使用机型分支。
 
-阶段基线 `2026.10.24-base.1` 在两个仓库均有标签 `base-2026.10.24-1`。
-配套提交见 `common/devices/lemonade.sources.json`，验收记录见 [LEMONADE-BASE.md](LEMONADE-BASE.md)。
+当前默认 120 Hz 基线 `2026.10.25-base.1` 在两个仓库均有标签 `base-2026.10.25-1`。
+旧的 60 Hz 标签 `base-2026.10.24-1` 保留不变。配套提交见 `common/devices/lemonade.sources.json`，
+验收记录见 [LEMONADE-BASE-120HZ.md](LEMONADE-BASE-120HZ.md)。
 
 ## 重新取出项目
 

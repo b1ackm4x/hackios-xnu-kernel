@@ -1,6 +1,6 @@
 {
   "device": "lemonade",
-  "branch": "codex/lemonade-120hz",
+  "branch": "main",
   "kernel": {
     "repository": "https://github.com/b1ackm4x/hackios-xnu-kernel",
     "upstream": "https://github.com/oosexgang/hackios-xnu-kernel",
@@ -13,10 +13,16 @@
     "commit": "c85a84d4157e606f6bc45ea11d56f256169aca98"
   },
   "base_release": {
+    "version": "2026.10.25-base.1",
+    "tag": "base-2026.10.25-1",
+    "kernel_commit": "5f13ebb7b51e2d0b31479b403de58a618eb36431",
+    "default_display_hz": 120
+  },
+  "validation_document": "docs/LEMONADE-BASE-120HZ.md",
+  "private_evidence_directory": "local/lemonade/",
+  "rollback_release": {
     "version": "2026.10.24-base.1",
     "tag": "base-2026.10.24-1",
-    "kernel_commit": "b1396abb007a0ecd4441c3d87ff10ce3e35569ed"
-  },
-  "validation_document": "docs/LEMONADE-IOS-120HZ.md",
-  "private_evidence_directory": "local/lemonade/"
+    "default_display_hz": 60
+  }
 }
