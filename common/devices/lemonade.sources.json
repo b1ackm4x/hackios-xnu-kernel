@@ -1,6 +1,6 @@
 {
   "device": "lemonade",
-  "branch": "codex/lemonade-graphics",
+  "branch": "main",
   "kernel": {
     "repository": "https://github.com/b1ackm4x/hackios-xnu-kernel",
     "upstream": "https://github.com/oosexgang/hackios-xnu-kernel",

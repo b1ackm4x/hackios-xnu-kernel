@@ -38,7 +38,7 @@ Mac 需安装 Python 3.11+、adb 和 fastboot。USB 连接这台一加 9，解�
 | `tools/lemonade-*` | 构建、打包、启动与开发验收工具 |
 | `docs/` | 移植记录、构建步骤和验收细节 |
 
-当前开发分支为 `codex/lemonade-graphics`。普通 `git` 管理本仓库，`common/ugit` 管理配套的 [用户空间仓库](https://github.com/b1ackm4x/hackios-xnu-userland)；版本对应关系见 [lemonade.sources.json](common/devices/lemonade.sources.json)。
+当前完整代码已合入两个仓库的 `main` 分支。普通 `git` 管理本仓库，`common/ugit` 管理配套的 [用户空间仓库](https://github.com/b1ackm4x/hackios-xnu-userland)；版本对应关系见 [lemonade.sources.json](common/devices/lemonade.sources.json)。
 
 详细说明：[Base 与验收](docs/LEMONADE-BASE.md) · [构建与移植](docs/LEMONADE.md) · [显示](docs/LEMONADE-DISPLAY.md) · [Wi-Fi](docs/WIFI-LEMONADE.md) · [仓库维护](docs/REPOSITORY.md)。
 

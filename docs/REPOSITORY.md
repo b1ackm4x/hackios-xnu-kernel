@@ -13,10 +13,10 @@
 
 ## 分支与远端
 
-- `main` 保留引入时的上游基线，`device/lemonade` 是默认机型分支；当前完整 base 在两边的 `codex/lemonade-graphics` 上。
+- `main` 是两个仓库的当前集成分支，已包含一加 9 的完整 base 改动；引入时的上游基线由 `lemonade.sources.json` 中的 `upstream_base` 保留。
 - `origin` 指向自己的仓库；`upstream` 指向对应的上游。推送默认使用 `origin`。
 - 以后新增机型，从适当的共同基线创建 `device/<codename>`，把机型参数和驱动保持隔离。
-- 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入目标机型分支。
+- 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入 `main`；机型专用实验仍可使用机型分支。
 
 阶段基线 `2026.10.24-base.1` 在两个仓库均有标签 `base-2026.10.24-1`。
 配套提交见 `common/devices/lemonade.sources.json`，验收记录见 [LEMONADE-BASE.md](LEMONADE-BASE.md)。
@@ -26,19 +26,19 @@
 克隆公开源码无需登录；推送前通过 `gh auth login` 配置访问权限，不要把令牌放进远端 URL。
 
 ```sh
-git clone --branch codex/lemonade-graphics https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
+git clone --branch main https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
 cd hackios
-USERLAND_REF=codex/lemonade-graphics common/setup.sh
+common/setup.sh
 git remote add upstream https://github.com/oosexgang/hackios-xnu-kernel.git
 common/ugit remote add upstream https://github.com/oosexgang/hackios-xnu-userland.git
 git config remote.pushDefault origin
 common/ugit config remote.pushDefault origin
 ```
 
-`common/setup.sh` 未指定 `USERLAND_REF` 时仍默认取 `device/lemonade`，因此初次取出当前版本须使用上面的显式分支。
+`common/setup.sh` 初次取出用户空间时默认使用 `main`；已有工作区更新当前分支，如需跟随集成分支先运行 `common/ugit switch main`。
 `common/devices/lemonade.sources.json` 记录配套用户空间提交、base 标签及两边的上游基线。
 需要复现该组合时，可用 `common/ugit switch --detach <userland.commit>` 切到记录的提交；
-继续开发前用 `common/ugit switch codex/lemonade-graphics` 回到当前开发分支。
+继续开发前用 `common/ugit switch main` 回到当前集成分支。
 
 这只取回可维护的源代码。设备原始备份、原机固件、Apple 系统文件、SDK、构建产物和私有验证日志
 不随仓库分发；准备和构建步骤见 [LEMONADE.md](LEMONADE.md)。
@@ -81,7 +81,7 @@ common/ugit log --oneline HEAD..upstream/main
 ```
 
 工作区干净后，在短期同步分支分别合并 `upstream/main`，解决冲突并完成主机测试与相关设备验证，
-再合入 `device/lemonade`。不要用 `reset --hard upstream/main` 覆盖我们的机型适配。
+再合入 `main`。不要用 `reset --hard upstream/main` 覆盖我们的机型适配。
 
 ## 留在本地的资料
 

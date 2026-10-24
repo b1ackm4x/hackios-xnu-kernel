@@ -89,7 +89,7 @@ python3 tools/lemonade-validate-base-runtime.py
 同一个版本目录不能被构建器覆盖。发布前须核对：当前内核的 DMA guard、
 图形/触控/Wi-Fi 同时运行的实际证据、未经测试程序扩展的干净 base 正常启动和退出，
 以及返回 Android 后五个活动启动分区哈希。发布包还包含逐文件 SHA-256 清单。
-只将源码与构建工具提交私有 Git；本机固件、Apple 镜像、设备身份和原始日志不上传。
+只将源码与构建工具提交 Git；本机固件、Apple 镜像、设备身份和原始日志不上传。
 
 ## 使用与范围
 
@@ -108,4 +108,4 @@ python3 tools/lemonade-validate-base-runtime.py
 这属于尚待完善的进程与 GPU 停止顺序，不能把这轮记录表述为完整生命周期无异常。
 
 项目保留 [oosexgang/hackios-xnu-kernel](https://github.com/oosexgang/hackios-xnu-kernel)
-和对应 userland 的原作者归属及许可，设备适配维护在 b1ackm4x 私有仓库中。
+和对应 userland 的原作者归属及许可，设备适配维护在 b1ackm4x 的两个公开仓库中。
