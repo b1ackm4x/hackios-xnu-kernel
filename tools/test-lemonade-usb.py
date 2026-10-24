@@ -72,6 +72,8 @@ class DeviceSafety(unittest.TestCase):
             self.assertFalse(set(parts) & {"flash", "erase", "format", "set_active", "flashing"})
             if parts[:2] == ["shell", "getprop"]:
                 out = self.props[parts[2]]
+            elif parts == ['shell', "su -c 'cat /proc/cmdline'"]:
+                out = 'serial=private-fixture msm_drm.dsi_display0=qcom,mdss_dsi_samsung_amb655x_dsc_cmd: secret=fixture-only'
             elif parts == ["reboot", "bootloader"]:
                 self.fastboot = self.serial + "\tfastboot\n"
             elif parts == ["getvar", "product"]:
@@ -214,6 +216,52 @@ class DeviceSafety(unittest.TestCase):
                       ('--display', 'flip', '--display-flips', '1000', '--seconds', '30')):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.run_action('run', '--kernel', 'built', '--userland', *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_refresh_rejects_desktop_and_other_modes_before_device_access(self):
+        for mode in ('sync', 'direct', 'flip', 'scale', 'clocks'):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--kernel', 'built', '--userland', '--display', mode,
+                                '--display-fences', '--display-hz', '120')
+        self.assertEqual(self.calls, [])
+
+    def test_refresh_requires_matching_live_panel_and_prepared_dtb(self):
+        with patch.object(usb, 'ROOT', self.root):
+            with self.assertRaisesRegex(SystemExit, 'no live'):
+                usb.verified_refresh_panel(self.identity)
+            dtb = self.root / 'local/lemonade/boot.dtb'; dtb.write_bytes(b'fixture device tree')
+            path = self.root / 'local/lemonade/refresh-panel.json'
+            record = {'profile': 'amb655x-60-120-v1', 'hardware_serial_sha256': self.identity,
+                      'selected_panel': 'qcom,mdss_dsi_samsung_amb655x_dsc_cmd:',
+                      'source': 'verified-device-android-proc-cmdline',
+                      'dtb_sha256': hashlib.sha256(dtb.read_bytes()).hexdigest()}
+            path.write_text(json.dumps(record))
+            self.assertEqual(usb.verified_refresh_panel(self.identity), record)
+            with self.assertRaisesRegex(SystemExit, 'differs'):
+                usb.verified_refresh_panel('different-device')
+            for field in ('selected_panel', 'source', 'profile', 'dtb_sha256'):
+                wrong = dict(record, **{field: 'mismatch'}); path.write_text(json.dumps(wrong))
+                with self.assertRaisesRegex(SystemExit, 'differs'):
+                    usb.verified_refresh_panel(self.identity)
+
+    def test_panel_observation_is_exact_device_and_does_not_retain_cmdline(self):
+        with self.assertRaisesRegex(SystemExit, 'exact device'):
+            self.run_action('panel')
+        self.adb += self.serial + ' device usb:2 product:lemonade\n'
+        (self.root / 'local/lemonade/boot.dtb').write_bytes(b'fixture dtb')
+        self.run_action('panel')
+        record = (self.root / 'local/lemonade/refresh-panel.json').read_text()
+        self.assertNotIn('private-fixture', record)
+        self.assertNotIn('fixture-only', record)
+        self.assertNotIn(self.serial, record)
+        with patch.object(usb, 'ROOT', self.root):
+            self.assertEqual(usb.verified_refresh_panel(self.identity)['profile'], 'amb655x-60-120-v1')
+
+    def test_refresh_return_probe_is_explicit_and_bounded(self):
+        for extra in ((), ('--display-hz', '120'), ('--display-hz', '120', '--display-flips', '1000', '--seconds', '5')):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--kernel', 'built', '--userland', '--display', 'manual',
+                                '--display-return-test', *extra)
         self.assertEqual(self.calls, [])
 
     def test_direct_requires_held_userland_surfaces_before_device_access(self):

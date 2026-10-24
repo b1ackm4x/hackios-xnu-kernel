@@ -25,6 +25,21 @@ def command(argv, timeout=15, check=True):
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=check)
 
 
+def verified_refresh_panel(identity):
+    """Match the private live-panel observation to this device and prepared DTB."""
+    path = ROOT / 'local/lemonade/refresh-panel.json'
+    if not path.exists():
+        raise SystemExit('Refusing 120 Hz: no live AMB655X panel observation')
+    record = json.loads(path.read_text())
+    if (record.get('profile') != 'amb655x-60-120-v1' or
+            record.get('hardware_serial_sha256') != identity or
+            record.get('selected_panel') != 'qcom,mdss_dsi_samsung_amb655x_dsc_cmd:' or
+            record.get('source') != 'verified-device-android-proc-cmdline' or
+            record.get('dtb_sha256') != hashlib.sha256((ROOT / 'local/lemonade/boot.dtb').read_bytes()).hexdigest()):
+        raise SystemExit('Refusing 120 Hz: live panel or prepared device tree differs')
+    return record
+
+
 def verified_firmware_overlay(kernel_hash):
     """Require a real guard fault from this kernel before a firmware download."""
     guard_path = ROOT / 'local/lemonade/wifi/dma-guard-verified.json'
@@ -92,7 +107,7 @@ def verified_graphics_overlay(system=False, widgets=False):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "boot", "log", "memmap", "selftest", "run", "ramdisk", "screenshot", "recording", "reboot"))
+    parser.add_argument("action", choices=("status", "panel", "boot", "log", "memmap", "selftest", "run", "ramdisk", "screenshot", "recording", "reboot"))
     parser.add_argument("--checkpoint", type=int, default=0, help="XNU bring-up checkpoint; 0 runs normally")
     parser.add_argument("--seconds", type=int, help="XNU timed return, 1..300 seconds; up to 900 for performance + physical touch; default 8 or 300 with --profile")
     parser.add_argument("--userland", action="store_true", help="include root.apfs; upload system.apfs with ramdisk first")
@@ -113,6 +128,10 @@ def main():
     parser.add_argument('--display', choices=('inspect', 'clocks', 'irq', 'sync', 'smmu', 'map', 'flip', 'manual', 'scale', 'direct'), help='SM8350 display; map identity-maps GOP; flip tests two owned buffers; manual triggers each transfer; scale also compares 1125x2436 hardware scaling; all restore firmware state')
     parser.add_argument('--display-flips', type=int, choices=(64, 1000), help='bounded dual-buffer test count, only with --display flip/manual/scale; default 64')
     parser.add_argument('--display-pattern', choices=('uniform', 'grid', 'columns', 'rows'), help='uniform or spatial scaling reference; requires --display scale')
+    parser.add_argument('--display-hz', type=int, choices=(60, 120), default=60,
+                        help='experimental AMB655X 120 Hz moving-pattern probe; requires --display manual; default 60')
+    parser.add_argument('--display-return-test', action='store_true',
+                        help='interrupt the 1000-frame 120 Hz probe after 6 seconds to test recovery')
     parser.add_argument('--display-record', action='store_true', help='record a bounded 64 MiB ring of held source images; requires --display direct; not an optical panel capture')
     parser.add_argument('--display-fences', action='store_true', help='producer-release waits; requires --display sync/direct --userland')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
@@ -158,8 +177,12 @@ def main():
         parser.error('--display-flips requires --display flip/manual/scale')
     if args.display_pattern and args.display != 'scale':
         parser.error('--display-pattern requires --display scale')
-    if args.display_flips == 1000 and args.seconds < 50:
-        parser.error('1000 display flips require at least 50 seconds')
+    if args.display_hz == 120 and (args.action != 'run' or args.display != 'manual'):
+        parser.error('120 Hz currently requires the bounded --display manual probe')
+    if args.display_return_test and not (args.display_hz == 120 and args.display_flips == 1000 and args.seconds == 6):
+        parser.error('--display-return-test requires --display-hz 120 --display-flips 1000 --seconds 6')
+    if args.display_flips == 1000 and args.seconds < (15 if args.display_hz == 120 else 50) and not args.display_return_test:
+        parser.error('1000 display flips require at least 50 seconds at 60 Hz or 15 seconds at 120 Hz')
     if args.display_fences and (args.action != 'run' or args.kernel != 'built' or args.display not in ('sync', 'direct') or not args.userland):
         parser.error('--display-fences requires run --kernel built --display sync/direct --userland')
     if args.display_record and (args.action != 'run' or args.display != 'direct'):
@@ -231,6 +254,22 @@ def main():
         print(json.dumps({"usb_adb": bool(android_serial), "usb_fastboot": bool(serial),
                           "fastboot_product": product(serial) if serial else None,
                           "identity": "baseline SHA-256 match required"}, indent=2))
+        return
+
+    if args.action == 'panel':
+        if not android_serial:
+            raise SystemExit('Panel observation requires this exact device over Android USB')
+        # Capture privately: /proc/cmdline also contains device identity. Retain
+        # only the selected panel and hashes, never the raw command line.
+        response = command(['adb', '-s', android_serial, 'shell', "su -c 'cat /proc/cmdline'"], check=False)
+        selected = re.findall(r'(?:^|\s)msm_drm\.dsi_display0=([^\s]+)', response.stdout)
+        if response.returncode or selected != ['qcom,mdss_dsi_samsung_amb655x_dsc_cmd:']:
+            raise SystemExit('Refusing: current panel is not the verified AMB655X variant or root read failed')
+        record = {'profile': 'amb655x-60-120-v1', 'hardware_serial_sha256': expected,
+                  'selected_panel': selected[0], 'source': 'verified-device-android-proc-cmdline',
+                  'dtb_sha256': hashlib.sha256((ROOT / 'local/lemonade/boot.dtb').read_bytes()).hexdigest()}
+        (ROOT / 'local/lemonade/refresh-panel.json').write_text(json.dumps(record, indent=2) + '\n')
+        print('Verified AMB655X panel on the exact Android USB device; private guard saved.')
         return
 
     if args.action == "boot":
@@ -376,6 +415,10 @@ def main():
                 raise SystemExit('Refusing: kernel has no requested lemonade display mode')
             if args.display_fences and kernel_manifest.get('display_fences_supported') != 'copy-release-v1':
                 raise SystemExit('Refusing: kernel has no producer-release fence support')
+            if args.display_hz == 120:
+                if kernel_manifest.get('display_refresh_supported') != 'amb655x-diagnostic-v1':
+                    raise SystemExit('Refusing: kernel has no experimental AMB655X refresh support')
+                verified_refresh_panel(expected)
             if args.gpu_clock is not None and args.gpu_clock not in kernel_manifest.get('gpu_clock_mhz_supported', []):
                 raise SystemExit('Refusing: kernel has no requested stock GPU clock')
             expected_kernel = kernel_manifest["sha256"]
@@ -404,6 +447,8 @@ def main():
             cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7, 'manual': 8, 'scale': 9, 'direct': 10}[args.display])
             if args.display in ('flip', 'manual', 'scale'):
                 cmdline += ' lemonade_display_flips=' + str(args.display_flips or 64)
+            if args.display_hz == 120:
+                cmdline += ' lemonade_display_hz=120 lemonade_panel=655'
             if args.display == 'scale':
                 cmdline += ' lemonade_display_pattern=' + str({None: 0, 'uniform': 0, 'grid': 1, 'columns': 2, 'rows': 3}[args.display_pattern])
             if args.display in ('sync', 'direct'):
@@ -500,6 +545,8 @@ def main():
         record['metal_widgets'] = args.metal_widgets
         record['metal_profile'] = args.metal_profile
         record['display'] = args.display
+        record['display_hz_requested'] = args.display_hz
+        record['display_return_test'] = args.display_return_test
         record['display_fences'] = args.display_fences
         record['display_record'] = args.display_record
         if graphics_record:

@@ -15,6 +15,8 @@
 
 以上包含同机联合验收，尚未完成长期稳定性验证。系统只在 RAM 中运行，不刷写 Android 分区，重启后设置与会话不保留。
 
+实验分支 `codex/lemonade-120hz` 已完成驱动层的 1000 帧移动图形测试：实测 **121.16 FPS**，正常及中断退出均恢复 60 Hz。原 base 保持不变；全系统 120 Hz 尚未启用。详见 [120 Hz 实验与验收](docs/LEMONADE-120HZ.md)。
+
 ## 使用
 
 本机发布包：`out/releases/lemonade-2026.10.24-base.1.zip`。
@@ -23,7 +25,7 @@ Mac 需安装 Python 3.11+、adb 和 fastboot。USB 连接这台一加 9，解�
 
 ## 待完善
 
-- 完整 Metal 兼容、120 Hz、睡眠唤醒、温控与电源管理，以及其余外设。
+- 完整 Metal 兼容、全系统 120 Hz、睡眠唤醒、温控与电源管理，以及其余外设。
 - 原生设置首次输入 Wi-Fi 密码的完整流程尚未单独验收；天气小组件仍显示占位内容。
 - 压力测试结束时存在显示服务清理异常；干净 base 的正常退出已通过。
 
@@ -38,7 +40,7 @@ Mac 需安装 Python 3.11+、adb 和 fastboot。USB 连接这台一加 9，解�
 | `tools/lemonade-*` | 构建、打包、启动与开发验收工具 |
 | `docs/` | 移植记录、构建步骤和验收细节 |
 
-当前完整代码已合入两个仓库的 `main` 分支。普通 `git` 管理本仓库，`common/ugit` 管理配套的 [用户空间仓库](https://github.com/b1ackm4x/hackios-xnu-userland)；版本对应关系见 [lemonade.sources.json](common/devices/lemonade.sources.json)。
+Base 代码已合入两个仓库的 `main` 分支；120 Hz 实验保留在独立分支。普通 `git` 管理本仓库，`common/ugit` 管理配套的 [用户空间仓库](https://github.com/b1ackm4x/hackios-xnu-userland)；版本对应关系见 [lemonade.sources.json](common/devices/lemonade.sources.json)。
 
 详细说明：[Base 与验收](docs/LEMONADE-BASE.md) · [构建与移植](docs/LEMONADE.md) · [显示](docs/LEMONADE-DISPLAY.md) · [Wi-Fi](docs/WIFI-LEMONADE.md) · [仓库维护](docs/REPOSITORY.md)。
 

@@ -10,9 +10,13 @@
  * and CTL flush, then verifies the original pixels before restoring bypass.
  * =8 uses explicit command transfers. =9 additionally compares two uniform
  * or spatial reference images through QSEED from 1125x2436 to 1080x2400. Geometry and
- * scaler registers are journaled; no DSI, PLL or panel timing is changed.
+ * scaler registers are journaled. These default modes do not change panel timing.
  * =10 presents a held full-screen IOSurface through the same command path,
  * then removes its temporary mapping before the presenter releases the source.
+ * Only =8 plus lemonade_display_hz=120 and a verified AMB655X panel guard may
+ * send the stock 120-Hz command sequence for a bounded owned-buffer animation.
+ * It restores the stock 60-Hz sequence, TE counter and command-engine registers.
+ * No DSI PLL or DSC parameters are changed.
  *
  * Register definitions checked against Linux v6.12: dispcc-sm8250.c (SM8350
  * adjustments), gcc-sm8350.c, sm8350.dtsi, dpu_7_0_sm8350.h and dpu_hw_intf.c.
@@ -70,6 +74,8 @@ static uint32_t present_count, present_late, present_dropped;
 static bool direct_requested, direct_failed;
 static uint32_t direct_count, direct_fallbacks, direct_pages, direct_pitch;
 static void display_map_restore(void);
+static void display_refresh_restore(void);
+static uint32_t display_hz = 60;
 /* Return can interrupt the probe's thread on the same CPU. Other CPUs have
  * already been stopped by loader_return(). Keep each register transaction and
  * its journal indivisible, and reject all resumed probe accesses after return
@@ -188,7 +194,8 @@ display_interrupt(void *context, uint32_t intid)
 	if (irq.last_tick) {
 		uint64_t elapsed = tick - irq.last_tick, ns;
 		absolutetime_to_nanoseconds(elapsed, &ns);
-		if (ns >= 12 * NSEC_PER_MSEC && ns <= 20 * NSEC_PER_MSEC)
+		uint64_t nominal = NSEC_PER_SEC / display_hz;
+		if (ns >= nominal * 3 / 4 && ns <= nominal * 5 / 4)
 			irq.period = irq.period ? (irq.period * 7 + elapsed) / 8 : elapsed;
 		else if (ns < NSEC_PER_MSEC) {
 			os_atomic_store(&irq.unexpected, 0x40000000, release);
@@ -302,6 +309,9 @@ int
 lemonade_display_present_begin(struct lemonade_present_window *window)
 {
 	if (os_atomic_load(&display_stopping, acquire) || !os_atomic_load(&irq.streaming, acquire)) return 0;
+	/* The CPU-copy window is measured only at 60 Hz. The experimental 120 Hz
+	 * path owns two buffers and uses completed, TE-gated command transfers. */
+	if (display_hz != 60) return -1;
 	uint64_t start = mach_absolute_time(), tick, period, count, now, ns;
 	uint64_t earliest, latest;
 	nanoseconds_to_absolutetime(6 * NSEC_PER_MSEC, &earliest);
@@ -362,6 +372,7 @@ lemonade_display_quiesce(void)
 	display_restoring = true;
 	if (direct_requested) tell("lemonade-display: direct final completed=%u fallbacks=%u failed=%u mapped_pages=%u\n",
 	    direct_count, direct_fallbacks, direct_failed, direct_pages);
+	display_refresh_restore();
 	display_map_restore();
 	irq_stop(false);
 	for (int i = 1; i >= 0; i--) {
@@ -784,6 +795,141 @@ display_manual_sample(uint32_t value[2], uint32_t first)
 	return false;
 }
 
+/* AMB655X only, opt-in diagnostic. The exact stock panel table uses identical
+ * lane clocks/PHY/DSC at 60 and 120 Hz: HS long writes F0 5A 5A, 60 00/10,
+ * F0 A5 A5. DSI FIFO layout follows the SM8350 dsi_ctrl_hw_cmn implementation.
+ * Never issue these commands to a guessed panel or change the DSI PLL. */
+static struct {
+	vm_offset_t dsi;
+	uint32_t saved[4], sync;
+	bool owned;
+} refresh;
+static const uint32_t refresh_offsets[] = {0x3c, 0x4c, 0x84, 0x15c};
+
+static bool
+display_panel_write(uint32_t payload, unsigned length)
+{
+	vm_offset_t dsi = refresh.dsi;
+	/* Acknowledgement clears only our command-DMA completion; preserve masks
+	 * and unrelated status. No DSI interrupt is enabled by this polled path. */
+	uint32_t masks = rd(dsi, 0x110) & 0xaaaaaaaa;
+	wr(dsi + 0x110, masks | 1);
+	wr(dsi + 0x15c, 0);
+	wr(dsi + 0x1ec, 1); delay(1); wr(dsi + 0x1ec, 0);
+	wr(dsi + 0x15c, 0x30006);
+	wr(dsi + 0x17c, 0xc0390000 | length);
+	wr(dsi + 0x17c, payload);
+	wr(dsi + 0x3c, (refresh.saved[0] & ~0xc4000000u) | 0x10000000);
+	wr(dsi + 0x84, (refresh.saved[2] & ~7u) | 4);
+	wr(dsi + 0x4c, 8);
+	wr(dsi + 0x90, 1);
+	bool done = false;
+	for (unsigned i = 0; i < 2000; i++) {
+		if (rd(dsi, 0x110) & 1) { done = true; break; }
+		delay(10);
+	}
+	uint32_t status = rd(dsi, 0x110), fifo = rd(dsi, 0xc);
+	wr(dsi + 0x110, masks | 1);
+	wr(dsi + 0x15c, 0);
+	wr(dsi + 0x1ec, 1); delay(1); wr(dsi + 0x1ec, 0);
+	bool clean = !(status & (1u << 24)) && !(fifo & 0xcccc0480u) &&
+	    !rd(dsi, 0x68) && !(rd(dsi, 0xb4) & 0x11111) && !(rd(dsi, 0xc0) & 0x111);
+	if (!done || !clean)
+		tell("lemonade-display: panel command failed done=%u clean=%u status=%#x fifo=%#x ack=%#x phy=%#x timeout=%#x\n",
+		    done, clean, status, fifo, rd(dsi, 0x68), rd(dsi, 0xb4), rd(dsi, 0xc0));
+	return done && clean;
+}
+
+static bool
+display_panel_rate(uint32_t hz)
+{
+	bool unlocked = display_panel_write(0xff5a5af0, 3);
+	bool sent = unlocked && display_panel_write(hz == 120 ? 0xffff1060 : 0xffff0060, 2);
+	/* Relock even when an earlier command failed. */
+	bool locked = display_panel_write(0xffa5a5f0, 3);
+	if (hz == 60) delay(12000); /* stock 60-Hz switch command's post-wait */
+	for (unsigned i = 0; i < 4; i++) wr(refresh.dsi + refresh_offsets[i], refresh.saved[i]);
+	return unlocked && sent && locked;
+}
+
+static void
+display_refresh_restore(void)
+{
+	if (!refresh.owned) return;
+	bool enabled = ml_set_interrupts_enabled(false);
+	if (display_stopping && !display_restoring) goto out;
+	bool panel = display_panel_rate(60);
+	wr(display_map.mdp + INTF1_OFFSET + 0x288, refresh.sync);
+	display_hz = 60;
+	irq.period = 0; irq.last_tick = 0;
+	bool exact = rd(display_map.mdp, INTF1_OFFSET + 0x288) == refresh.sync;
+	for (unsigned i = 0; i < 4; i++) exact &= rd(refresh.dsi, refresh_offsets[i]) == refresh.saved[i];
+	tell("lemonade-display: refresh restored hz=60 commands=%u registers=%u\n", panel, exact);
+	refresh.owned = false;
+out:
+	ml_set_interrupts_enabled(enabled);
+}
+
+static bool
+display_refresh_begin(void)
+{
+	uint32_t guard = 0;
+	PE_parse_boot_argn("lemonade_panel", &guard, sizeof(guard));
+	if (guard != 655 || !display_map.manual_active || display_hz != 60) return false;
+	refresh.dsi = ml_io_map(0x0ae94000, 0x1000);
+	if (!refresh.dsi) return false;
+	bool enabled;
+	if (!display_transaction_begin(&enabled)) return false;
+	vm_offset_t dsi = refresh.dsi, intf = display_map.mdp + INTF1_OFFSET;
+	/* Exact inherited command-mode geometry and idle ownership are mandatory.
+	 * All enabled DSI interrupts, test patterns and error latches must be clear. */
+	uint32_t version = rd(dsi, 0), control = rd(dsi, 4);
+	refresh.sync = rd(intf, 0x288);
+	if (version != 0x20050000 || control != 0x1f5 || rd(dsi, 0x15c) ||
+	    rd(dsi, 0x58) != 0x21d0039 || rd(dsi, 0x5c) != 0x96000b4 || rd(dsi, 0x2a8) != 0x3941 ||
+	    (rd(dsi, 8) & (1u << 2)) || (rd(dsi, 0xc) & 0xcccc0480u) || (rd(dsi, 0x120) & (1u << 16)) ||
+	    (rd(dsi, 0x110) & 0xaaaaaaaa) || rd(dsi, 0x68) || (rd(dsi, 0xb4) & 0x11111) || (rd(dsi, 0xc0) & 0x111) ||
+	    refresh.sync != 0x180085 || rd(intf, 0x2b4) != 1) {
+		tell("lemonade-display: refresh refused version=%#x ctrl=%#x int=%#x sync=%#x auto=%#x\n",
+		    version, control, rd(dsi, 0x110), refresh.sync, rd(intf, 0x2b4));
+		ml_set_interrupts_enabled(enabled); return false;
+	}
+	for (unsigned i = 0; i < 4; i++) refresh.saved[i] = rd(dsi, refresh_offsets[i]);
+	refresh.owned = true; /* journal precedes even the panel-unlock command */
+	bool sent = display_panel_rate(120);
+	if (sent) {
+		/* 19.2-MHz TE counter / 2400 lines / 120 Hz, rounded to 67.
+		 * Height remains the firmware's long timeout; external TE is retained. */
+		wr(intf + 0x288, (refresh.sync & ~0x7ffffu) | 67);
+		display_hz = 120;
+		irq.period = 0; irq.last_tick = 0;
+	}
+	tell("lemonade-display: refresh switch requested=120 commands=%u sync=%#x height=%u external_te=%u\n",
+	    sent, rd(intf, 0x288), rd(intf, 0x28c), !!(rd(intf, 0x288) & (1u << 20)));
+	ml_set_interrupts_enabled(enabled);
+	if (os_atomic_load(&display_stopping, acquire)) return false;
+	if (!sent) { display_refresh_restore(); return false; }
+	/* Observe actual TE callbacks; a timer or a requested rate is not evidence. */
+	uint64_t first = 0, last = 0, first_count = 0, count = 0, period = 0;
+	uint64_t start = mach_absolute_time(), elapsed = 0;
+	do {
+		if (lemonade_display_vsync_snapshot(&last, &period, &count)) {
+			if (!first) { first = last; first_count = count; }
+			if (count - first_count >= 64) break;
+		}
+		delay(100);
+		absolutetime_to_nanoseconds(mach_absolute_time() - start, &elapsed);
+	} while (!os_atomic_load(&display_stopping, acquire) && elapsed < NSEC_PER_SEC);
+	uint64_t ns = 0;
+	if (first && last > first) absolutetime_to_nanoseconds(last - first, &ns);
+	uint64_t edges = count - first_count, mhz = ns ? edges * 1000000000000ull / ns : 0;
+	bool valid = edges >= 64 && mhz >= 118000 && mhz <= 122000 && !irq.unexpected;
+	tell("lemonade-display: refresh measured valid=%u edges=%llu elapsed_us=%llu millihz=%llu\n",
+	    valid, edges, ns / 1000, mhz);
+	if (!valid && !os_atomic_load(&display_stopping, acquire)) display_refresh_restore();
+	return valid && !os_atomic_load(&display_stopping, acquire);
+}
+
 static bool
 display_scale_configure(uint32_t pitch)
 {
@@ -1150,6 +1296,9 @@ static void
 display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual, bool scale)
 {
 	if (os_atomic_load(&display_stopping, acquire)) return;
+	uint32_t requested_hz = 60;
+	PE_parse_boot_argn("lemonade_display_hz", &requested_hz, sizeof(requested_hz));
+	if (requested_hz != 60 && (requested_hz != 120 || !manual || scale)) return;
 	uint32_t grid = 0;
 	PE_parse_boot_argn("lemonade_display_pattern", &grid, sizeof(grid));
 	if (grid > 3 || (grid && !scale)) return;
@@ -1236,11 +1385,26 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual,
 		if (manual) {
 			if (!display_manual_begin() || !display_manual_idle()) goto done;
 			if (scale && !display_scale_begin()) goto done;
+			if (requested_hz == 120 && !display_refresh_begin()) goto done;
 			first_frame = rd(mdp, INTF1_OFFSET + 0xac);
 		}
+		uint64_t animation_first = 0, animation_last = 0, animation_min = ~0ull, animation_max = 0;
+		uint32_t animation_changed = 0, previous_crc[2] = {0};
 		for (; completed < loops; completed++) {
 			unsigned n = completed & 1;
-			if (lemonade_display_present_begin(&window) != 1) break;
+			if (requested_hz == 120) {
+				/* Only the idle buffer is modified. A moving rectangle and a
+				 * binary frame number make every completed output distinguishable. */
+				uint32_t *pixels = (void *)display_map.buffers[n];
+				unsigned left = (completed * 4) % 1000;
+				for (unsigned y = 900; y < 1080; y++) for (unsigned x = 0; x < 1080; x++) {
+					bool bar = y < 1060 ? (x >= left && x < left + 80) : ((completed >> (x / 90)) & 1);
+					pixels[y * 1080 + x] = bar ? 0xff385868 : 0xff101010;
+				}
+				for (vm_offset_t line = display_map.buffers[n] + 900 * 4320; line < display_map.buffers[n] + 1080 * 4320; line += 64)
+					__asm__ volatile("dc civac, %0" : : "r"(line & ~63ul) : "memory");
+				__asm__ volatile("dsb sy" ::: "memory");
+			} else if (lemonade_display_present_begin(&window) != 1) break;
 			uint32_t before = rd(mdp, INTF1_OFFSET + 0xac);
 			if (!display_flip_buffer(n)) return;
 			if (!(manual ? display_manual_sample(sample, before) : display_misr_sample(sample)) ||
@@ -1255,7 +1419,21 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual,
 			if (manual && (completed < 2 || completed + 1 == loops))
 				tell("lemonade-display: manual transfer n=%u frame_delta=%u done=%#x MISR=%#x/%#x\n",
 				    completed + 1, rd(mdp, INTF1_OFFSET + 0xac) - before, rd(mdp, 0x14) & DISPLAY_PP_DONE, sample[0], sample[1]);
-			if (completed < 2) {
+			if (requested_hz == 120) {
+				uint64_t now, delta;
+				absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+				if (completed) {
+					delta = now - animation_last;
+					if (delta < animation_min) animation_min = delta;
+					if (delta > animation_max) animation_max = delta;
+					animation_changed += sample[0] != previous_crc[0] || sample[1] != previous_crc[1];
+				} else animation_first = now;
+				animation_last = now;
+				previous_crc[0] = sample[0]; previous_crc[1] = sample[1];
+				if (completed < 8 || !((completed + 1) % 120))
+					tell("lemonade-display: animation n=%u us=%llu frame=%u MISR=%#x/%#x\n",
+					    completed + 1, now / 1000, rd(mdp, INTF1_OFFSET + 0xac), sample[0], sample[1]);
+			} else if (completed < 2) {
 				if (scale) {
 					tell("lemonade-display: scaler interface buffer=%u actual=%#x expected=%#x status=%#x\n",
 					    n, rd(mdp, INTF1_OFFSET + 0x184), display_map.intf_reference[n], rd(mdp, INTF1_OFFSET + 0x180));
@@ -1270,12 +1448,19 @@ display_mapping_probe(vm_offset_t mdp, vm_offset_t mdss, bool flip, bool manual,
 			} else if (sample[0] != checksums[n][0] || sample[1] != checksums[n][1]) break;
 		}
 		if (os_atomic_load(&display_stopping, acquire)) return;
+		if (requested_hz == 120) {
+			uint64_t ns = animation_last - animation_first;
+			tell("lemonade-display: animation summary completed=%u changed=%u intervals=%u elapsed_us=%llu millifps=%llu min_us=%llu max_us=%llu\n",
+			    completed, animation_changed, completed ? completed - 1 : 0, ns / 1000,
+			    ns && completed ? (completed - 1) * 1000000000000ull / ns : 0, animation_min / 1000, animation_max / 1000);
+		}
 		tell("lemonade-display: flip completed=%u/%u frames=%u MISR=%#x/%#x fsr=%#x global=%#x underrun=%u\n",
 		    completed, loops, rd(mdp, INTF1_OFFSET + 0xac) - first_frame, sample[0], sample[1],
 		    rd(cb, 0x58), rd(smmu, 0x48), !!(rd(mdp, 0x14) & (1u << 26)));
 	}
 done:
 	if (os_atomic_load(&display_stopping, acquire)) return;
+	display_refresh_restore();
 	display_map_restore();
 	irq_stop(true);
 }
@@ -1316,6 +1501,15 @@ lemonade_display_init(void)
 		goto out;
 	}
 	report(mdp, "mdp", "interface_select", 0x4);
+	/* Audit the inherited command engine before experimental refresh changes. */
+	vm_offset_t dsi = ml_io_map(0x0ae94000, 0x1000);
+	if (dsi) {
+		static const uint32_t regs[] = {0, 4, 8, 0xc, 0x3c, 0x40, 0x44, 0x48, 0x4c,
+		    0x50, 0x58, 0x5c, 0x68, 0x84, 0xa8, 0xb4, 0xc0, 0x110, 0x11c, 0x120,
+		    0x15c, 0x1dc, 0x1e8, 0x1f4, 0x2a8};
+		for (unsigned i = 0; i < sizeof(regs) / sizeof(regs[0]); i++)
+			report(dsi, "dsi0", "state", regs[i]);
+	}
 	static const uint32_t ctl_regs[] = { 0, 4, 0x14, 0x18, 0x40, 0x44, 0xe8, 0xf4, 0xfc };
 	for (unsigned n = 0; n < 2; n++) {
 		char block[16];
