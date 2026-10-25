@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('ci_package', ROOT / 'tools/ci/package-lemonade.py')
@@ -91,6 +92,17 @@ class PackagingTests(unittest.TestCase):
             bad['assets'][0][key] = value
             with self.assertRaises(SystemExit):
                 publisher.verify_remote(bad, checksum)
+
+    def test_release_lookup_finds_drafts_without_a_published_tag(self):
+        publisher = package.module('ci_publish_draft_test', 'tools/ci/publish-release.py')
+        first = [{'id': i, 'tag_name': 'older-' + str(i)} for i in range(100)]
+        draft = {'id': 1234, 'tag_name': 'ci-target', 'draft': True}
+        with patch.object(publisher, 'gh', side_effect=[json.dumps(first), json.dumps([draft])]) as api:
+            self.assertEqual(publisher.find_release('owner/repo', 'ci-target'), draft)
+            self.assertEqual(api.call_args_list[1].args,
+                             ('api', 'repos/owner/repo/releases?per_page=100&page=2'))
+        with patch.object(publisher, 'gh', return_value='[]'):
+            self.assertIsNone(publisher.find_release('owner/repo', 'missing'))
 
 
 if __name__ == '__main__':

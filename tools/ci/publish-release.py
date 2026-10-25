@@ -15,6 +15,20 @@ def gh(*args):
     return subprocess.check_output(['gh', *args], text=True)
 
 
+def find_release(repository, tag):
+    # Draft tags need not exist as Git refs, so /releases/tags/<tag> can
+    # return 404 even after every asset has uploaded successfully.
+    page = 1
+    while True:
+        releases = json.loads(gh('api', f'repos/{repository}/releases?per_page=100&page={page}'))
+        for release in releases:
+            if release['tag_name'] == tag:
+                return release
+        if len(releases) < 100:
+            return None
+        page += 1
+
+
 def verify_remote(release, checksums):
     expected = {line.split()[1]: line.split()[0] for line in checksums.splitlines() if line.strip()}
     expected['SHA256SUMS'] = hashlib.sha256(checksums.encode()).hexdigest()
@@ -37,11 +51,8 @@ def main():
     checksums = (output / 'SHA256SUMS').read_text()
     assets = [line.split()[1] for line in checksums.splitlines() if line.strip()] + ['SHA256SUMS']
     tag = 'ci-lemonade-' + commit[:12]
-    endpoint = 'repos/' + os.environ['GH_REPO'] + '/releases/tags/' + tag
-    result = subprocess.run(['gh', 'api', endpoint], capture_output=True, text=True)
-    if result.returncode and '(HTTP 404)' not in result.stderr:
-        raise SystemExit('Cannot inspect release state; refusing to assume it is absent')
-    release = json.loads(result.stdout) if result.returncode == 0 else None
+    repository = os.environ['GH_REPO']
+    release = find_release(repository, tag)
     if release and not release['draft']:
         with tempfile.TemporaryDirectory() as temporary:
             gh('release', 'download', tag, '--pattern', 'SHA256SUMS', '--dir', temporary)
@@ -62,6 +73,10 @@ Build: {os.environ['RUN_URL']}
             source.flush()
             gh('release', 'create', tag, '--target', commit, '--draft', '--prerelease',
                '--title', 'OnePlus 9 CI ' + commit[:12], '--notes-file', source.name)
+        release = find_release(repository, tag)
+        if release is None:
+            raise SystemExit('Cannot locate the created draft; leaving it unpublished')
+    endpoint = f'repos/{repository}/releases/{release["id"]}'
     gh('release', 'upload', tag, *assets, '--clobber')
     verify_remote(json.loads(gh('api', endpoint)), checksums)
     gh('release', 'edit', tag, '--draft=false')
