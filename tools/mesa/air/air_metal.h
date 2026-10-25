@@ -585,6 +585,15 @@ int rwa_finish(struct rwa_device *device, char *why, size_t why_size);
 int rwa_batch_begin(struct rwa_device *device, char *why, size_t why_size);
 int rwa_batch_end(struct rwa_device *device, char *why, size_t why_size);
 
+/* Submit on the context-owning thread, then wait on a different thread without
+ * holding the context lock. A NULL completion means the batch already finished.
+ * wait consumes the completion even on failure. The device and encoded resources
+ * must outlive that wait. CPU readback and the synchronous end ABI stay unchanged. */
+struct rwa_completion;
+int rwa_batch_submit(struct rwa_device *device, struct rwa_completion **completion,
+                     char *why, size_t why_size);
+int rwa_completion_wait(struct rwa_completion *completion, char *why, size_t why_size);
+
 /*
  * ---------------------------------------------------------------------------------------
  * Drawing.

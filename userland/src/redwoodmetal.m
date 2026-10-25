@@ -111,6 +111,7 @@
  * userland/build.sh, which knows nothing of Mesa's tree, and the declarations are few.
  * tools/mesa/air/air_metal.h is the original and explains each call. */
 struct rwa_device;
+struct rwa_completion;
 struct rwa_buffer;
 struct rwa_texture;
 struct rwa_sampler;
@@ -569,6 +570,8 @@ static struct {
 	int (*finish)(struct rwa_device *, char *, size_t);
 	int (*batch_begin)(struct rwa_device *, char *, size_t);
 	int (*batch_end)(struct rwa_device *, char *, size_t);
+	int (*batch_submit)(struct rwa_device *, struct rwa_completion **, char *, size_t);
+	int (*completion_wait)(struct rwa_completion *, char *, size_t);
 	int (*buffer_fill)(struct rwa_buffer *, size_t, size_t, uint8_t, char *, size_t);
 	int (*buffer_copy)(struct rwa_buffer *, size_t, struct rwa_buffer *, size_t, size_t, char *, size_t);
 	int (*texture_copy)(struct rwa_texture *, unsigned, unsigned, const unsigned[3],
@@ -639,6 +642,8 @@ mesa_available(void)
 	*(void **)&mesa.finish = dlsym(mesa.handle, "rwa_finish");
 	*(void **)&mesa.batch_begin = dlsym(mesa.handle, "rwa_batch_begin");
 	*(void **)&mesa.batch_end = dlsym(mesa.handle, "rwa_batch_end");
+	*(void **)&mesa.batch_submit = dlsym(mesa.handle, "rwa_batch_submit");
+	*(void **)&mesa.completion_wait = dlsym(mesa.handle, "rwa_completion_wait");
 	*(void **)&mesa.buffer_fill = dlsym(mesa.handle, "rwa_buffer_fill");
 	*(void **)&mesa.buffer_copy = dlsym(mesa.handle, "rwa_buffer_copy");
 	*(void **)&mesa.texture_copy = dlsym(mesa.handle, "rwa_texture_copy");
@@ -1021,6 +1026,8 @@ struct gem_close { uint32_t handle, pad; };
 
 @interface RedwoodMetalCommandQueue : _MTLCommandQueue
 - (instancetype)initWithRedwoodDevice:(RedwoodMetalDevice *)device descriptor:(id)descriptor;
+- (dispatch_queue_t)redwoodFenceQueue;
+- (dispatch_queue_t)redwoodCallbackQueue;
 @end
 
 @interface RedwoodMetalCommandBuffer : _MTLCommandBuffer
@@ -3499,6 +3506,7 @@ redwood_clear_semaphore_debt(id commandBuffer)
 	 * lied to, and -setCompletionQueue: explains the third below. */
 	NSUInteger _gpuPriority, _backgroundGPUPriority;
 	dispatch_queue_t _completionQueue;   /* only used when Apple's own ivar is missing */
+	dispatch_queue_t _fenceQueue, _callbackQueue;
 }
 
 - (instancetype)initWithRedwoodDevice:(RedwoodMetalDevice *)device descriptor:(id)descriptor
@@ -3511,13 +3519,17 @@ redwood_clear_semaphore_debt(id commandBuffer)
 		return nil;
 	}
 	_owner = device;
+	dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+		DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+	_fenceQueue = dispatch_queue_create("org.redwood.metal.fences", attr);
+	_callbackQueue = dispatch_queue_create("org.redwood.metal.callbacks", attr);
 	/* Said at birth and once: this number is how many command buffers may exist at a
 	 * time before -commandBuffer blocks, and until this driver returned the slot it was
 	 * also how many this process could ever make. */
 	rw_print("this queue takes %lu command buffers at a time "
 	         "(maxCommandBufferCount), and each one waits on the queue's semaphore in "
 	         "-[_MTLCommandBuffer initWithQueue:...]; this driver gives the slot back at "
-	         "-commit%s\n", (unsigned long)[self maxCommandBufferCount],
+	         "GPU completion%s\n", (unsigned long)[self maxCommandBufferCount],
 	         redwood_queue_semaphore(self) != nil ? "" :
 	         ", EXCEPT that the semaphore was not found and it cannot");
 	return self;
@@ -3527,22 +3539,29 @@ redwood_clear_semaphore_debt(id commandBuffer)
 
 /* What the queue itself thinks, for a test that wants the number rather than the
  * inference: how many command buffers of this queue still hold one of those slots. */
-- (NSUInteger)redwoodOutstandingCommandBuffers { return _outstanding; }
-- (NSUInteger)redwoodCommandBuffersMade        { return _made; }
+- (NSUInteger)redwoodOutstandingCommandBuffers { @synchronized(self) { return _outstanding; } }
+- (NSUInteger)redwoodCommandBuffersMade        { @synchronized(self) { return _made; } }
 
 - (void)redwoodTookSlot
 {
-	_outstanding++;
-	_made++;
+	@synchronized(self) {
+		_outstanding++;
+		_made++;
+	}
 }
 
 - (void)redwoodReturnedSlot
 {
-	if (_outstanding > 0) {
-		_outstanding--;
+	@synchronized(self) {
+		if (_outstanding > 0) {
+			_outstanding--;
+		}
+		_returned++;
 	}
-	_returned++;
 }
+
+- (dispatch_queue_t)redwoodFenceQueue { return _fenceQueue; }
+- (dispatch_queue_t)redwoodCallbackQueue { return _callbackQueue; }
 
 - (id)commandBuffer
 {
@@ -3683,6 +3702,8 @@ redwood_clear_semaphore_debt(id commandBuffer)
 	 * -[_MTLCommandQueue dealloc], and releasing it twice would be worse than leaking
 	 * one dispatch queue in the Metal where that dealloc does not. */
 	[_completionQueue release];
+	[_fenceQueue release];
+	[_callbackQueue release];
 	[super dealloc];
 }
 
@@ -3732,6 +3753,8 @@ enum {
 	NSMutableArray *_work;
 	NSError *_error;
 	NSUInteger _status;
+	NSCondition *_state;
+	BOOL _submitted, _finished;
 	BOOL _owesSlot;                 /* this buffer holds one of the queue's slots */
 	NSMutableArray *_scheduled, *_completed;   /* handler blocks, copied to the heap */
 	NSUInteger _protectionOptions;  /* what the window server asked for; see -setProtectionOptions: */
@@ -3795,6 +3818,7 @@ enum {
 		return nil;
 	}
 	_queue = [queue retain];
+	_state = [[NSCondition alloc] init];
 	_work = [[NSMutableArray alloc] init];
 	/* The numbering this log is written in, said once per process and printed out of the
 	 * constants that answer -status: a log that does NOT carry this line was written before
@@ -3812,8 +3836,8 @@ enum {
 }
 
 /*
- * Give the queue's slot back, exactly once. Called at the end of -commit, where this
- * driver's work is already done, and at -dealloc for a buffer that was never committed --
+ * Give the queue's slot back, exactly once. Called after the GPU completion fence,
+ * and at -dealloc for a buffer that was never committed --
  * which is the case Apple's _needsCommandBufferSemaphoreSignal exists for and the one that
  * would otherwise lose a slot for the life of the process.
  */
@@ -3841,13 +3865,14 @@ enum {
 	[_scheduled release];
 	[_completed release];
 	[_queue release];
+	[_state release];
 	[super dealloc];
 }
 
 - (id)device       { return [_queue device]; }
 - (id)commandQueue { return _queue; }
-- (NSUInteger)status { return _status; }
-- (NSError *)error { return _error; }
+- (NSUInteger)status { [_state lock]; NSUInteger value = _status; [_state unlock]; return value; }
+- (NSError *)error { [_state lock]; id value = [[_error retain] autorelease]; [_state unlock]; return value; }
 - (BOOL)retainedReferences { return YES; }
 
 - (id)computeCommandEncoder
@@ -3906,42 +3931,86 @@ enum {
 
 - (void)enqueue { }
 
-/* Metal's own rule, kept: the recorded dispatches run here and not when they were encoded. */
+/* Encode and submit on the caller, so IOSurface fences exist before SwapEnd.
+ * GPU completion runs separately: the next frame may encode while this one runs. */
 - (void)commit
 {
-	char why[512] = { 0 };
-	pthread_once(&rw_metrics_once,rw_metrics_init);
-	uint64_t started=rw_metrics_active?rw_metrics_us():0,acquired=started,recorded=started;
-	if (getenv("REDWOOD_METAL_TRACE")) rw_print("commit work=%lu\n", (unsigned long)_work.count);
-	_status = RW_CB_COMMITTED;
-	struct rwa_device *device = [[_queue device] mesaDevice];
-	BOOL batched = mesa.batch_begin && mesa.batch_end;
-	if (batched && mesa.batch_begin(device, why, sizeof(why)) != 0) {
-		[self failWith:why];
-	} else {
-		if(rw_metrics_active)acquired=rw_metrics_us();
-		@try {
-			[self runRecordedWork];
-		} @catch (NSException *exception) {
-			(void)exception;
-			[self failWith:"command execution raised an Objective-C exception"];
-		} @finally {
-			if(rw_metrics_active)recorded=rw_metrics_us();
-			if (batched) {
-				int rc = mesa.batch_end(device, why, sizeof(why));
-				if (_status != RW_CB_ERROR) {
-					if (rc) [self failWith:why];
-					else _status = RW_CB_COMPLETED;
-				}
-			}
-		}
-	}
-	if(rw_metrics_active)rw_metrics_record(acquired-started,recorded-acquired,
-		rw_metrics_us()-recorded,_work.count);
-	/* Return the queue slot and release the context lock before callbacks can
-	 * create another command buffer, including after any failed command. */
-	[self redwoodReturnSlot];
-	[self redwoodDeliverHandlers];
+    [_state lock];
+    if (_status >= RW_CB_COMMITTED) { [_state unlock]; return; }
+    _status = RW_CB_COMMITTED;
+    [_state unlock];
+    char why[512] = { 0 };
+    struct rwa_completion *pending = NULL;
+    pthread_once(&rw_metrics_once,rw_metrics_init);
+    uint64_t started=rw_metrics_active?rw_metrics_us():0,acquired=started,recorded=started;
+    struct rwa_device *device = [[_queue device] mesaDevice];
+    BOOL batched = mesa.batch_begin && mesa.batch_end;
+    BOOL asynchronous = batched && mesa.batch_submit && mesa.completion_wait;
+    if (batched && mesa.batch_begin(device, why, sizeof(why)) != 0) {
+        [self failWith:why];
+    } else {
+        if(rw_metrics_active)acquired=rw_metrics_us();
+        @try {
+            [self runRecordedWork];
+        } @catch (NSException *exception) {
+            (void)exception;
+            [self failWith:"command execution raised an Objective-C exception"];
+        } @finally {
+            if(rw_metrics_active)recorded=rw_metrics_us();
+            if (batched) {
+                int rc = asynchronous ? mesa.batch_submit(device, &pending, why, sizeof(why)) :
+                    mesa.batch_end(device, why, sizeof(why));
+                if (rc && [self status] != RW_CB_ERROR) [self failWith:why];
+            } else if (mesa.finish(device, why, sizeof(why)) != 0) {
+                [self failWith:why];
+            }
+        }
+    }
+    [_state lock];
+    _submitted = YES;
+    if (_status != RW_CB_ERROR) _status = RW_CB_SCHEDULED;
+    NSArray *scheduled = _scheduled;
+    _scheduled = nil;
+    /* Enqueue scheduled callbacks before a finishing worker can enqueue completed
+     * callbacks. redwoodDeliver always queues, so it cannot reenter this lock. */
+    for (id handler in scheduled) [self redwoodDeliver:(void (^)(id))handler];
+    [_state broadcast];
+    [_state unlock];
+    [scheduled release];
+    if (pending) {
+        uint64_t waitTime=acquired-started, workTime=recorded-acquired;
+        NSUInteger commands=_work.count;
+        dispatch_async([_queue redwoodFenceQueue], ^{
+            @autoreleasepool {
+                char failure[512] = { 0 };
+                int rc = mesa.completion_wait(pending, failure, sizeof(failure));
+                if (rc) [self failWith:failure];
+                if(rw_metrics_active)rw_metrics_record(waitTime,workTime,
+                    rw_metrics_us()-recorded,commands);
+                [self redwoodFinish];
+            }
+        });
+    } else {
+        if(rw_metrics_active)rw_metrics_record(acquired-started,recorded-acquired,
+            rw_metrics_us()-recorded,_work.count);
+        [self redwoodFinish];
+    }
+}
+
+- (void)redwoodFinish
+{
+    [_state lock];
+    if (_status != RW_CB_ERROR) _status = RW_CB_COMPLETED;
+    /* Return the slot before waking a waiter or running callbacks that allocate
+     * another command buffer. Both error and successful paths arrive here. */
+    [self redwoodReturnSlot];
+    _finished = YES;
+    NSArray *completed = _completed;
+    _completed = nil;
+    for (id handler in completed) [self redwoodDeliver:(void (^)(id))handler];
+    [_state broadcast];
+    [_state unlock];
+    [completed release];
 }
 
 - (void)runRecordedWork
@@ -4002,15 +4071,10 @@ enum {
 					    work->size, why, sizeof(why));
 		if (rc != 0) {
 			rw_print("the dispatch failed: %s\n", why);
-			_error = [[NSError errorWithDomain:@"RedwoodMetal" code:2
-						  userInfo:@{ NSLocalizedDescriptionKey:
-							      [NSString stringWithUTF8String:why] }]
-				     retain];
-			_status = RW_CB_ERROR;
+			[self failWith:why];
 			return;
 		}
 	}
-	_status = RW_CB_SCHEDULED;   /* submitted; the fence below is what makes it completed */
 }
 
 - (BOOL)runBlit:(RedwoodMetalWork *)w why:(char *)why size:(size_t)size
@@ -4063,10 +4127,7 @@ enum {
 	}
 	}
 	if (!rc) return YES;
-	[_error release];
-	_error = [[NSError errorWithDomain:@"RedwoodMetal" code:3 userInfo:@{
-		NSLocalizedDescriptionKey: [NSString stringWithUTF8String:why]}] retain];
-	_status = RW_CB_ERROR;
+	[self failWith:why];
 	rw_print("blit failed: %s\n", why);
 	return NO;
 }
@@ -4240,120 +4301,62 @@ enum {
 
 - (void)failWith:(const char *)reason
 {
-	[_error release];
-	_error = [[NSError errorWithDomain:@"RedwoodMetal" code:4
-				  userInfo:@{ NSLocalizedDescriptionKey:
-					      [NSString stringWithUTF8String:reason] }] retain];
-	_status = RW_CB_ERROR;
+    [_state lock];
+    [_error release];
+    _error = [[NSError errorWithDomain:@"RedwoodMetal" code:4
+        userInfo:@{ NSLocalizedDescriptionKey: [NSString stringWithUTF8String:reason] }] retain];
+    _status = RW_CB_ERROR;
+    [_state unlock];
 }
 
-/* The fence is the whole point: a dispatch that the GPU does not finish must not read as a
- * result. air_run learned that the expensive way (docs/air.md section 5). */
+/* The worker pays the actual GPU fence before setting _finished. An earlier
+ * encoding error is not completion: partial work still owns its resources. */
 - (void)waitUntilCompleted
 {
-	char why[512] = { 0 };
-
-	if (_status == RW_CB_ERROR || _status == RW_CB_COMPLETED) {
-		return;
-	}
-	if (mesa.finish([[_queue device] mesaDevice], why, sizeof(why)) != 0) {
-		rw_print("THE GPU DID NOT FINISH: %s\n", why);
-		_error = [[NSError errorWithDomain:@"RedwoodMetal" code:3
-					  userInfo:@{ NSLocalizedDescriptionKey:
-						      [NSString stringWithUTF8String:why] }] retain];
-		_status = RW_CB_ERROR;
-		return;
-	}
-	_status = RW_CB_COMPLETED;   /* the fence has been paid, and only now */
+    [_state lock];
+    while (_status >= RW_CB_COMMITTED && !_finished) [_state wait];
+    [_state unlock];
 }
 
-- (void)waitUntilScheduled { }
+- (void)waitUntilScheduled
+{
+    [_state lock];
+    while (_status >= RW_CB_COMMITTED && !_submitted) [_state wait];
+    [_state unlock];
+}
 
-/*
- * HANDLERS, AND WHERE THEY RUN.
- *
- * Both of these used to call the block the moment it was added -- which is before the work
- * the block is about, on whichever thread encoded it. That was defensible while the only
- * caller was this port's own test; it is not once backboardd is the caller, and it is the
- * other half of why the system sends -[MTLCommandQueueSPI setCompletionQueue:]: a daemon
- * says WHERE its completion handlers may run precisely because it must not have them on its
- * own thread.
- *
- * So handlers are kept and delivered where the work happens: -commit. A scheduled handler
- * is delivered as soon as the recorded work has been submitted, a completed handler after
- * the GPU fence has been paid for. This implementation executes commit synchronously,
- * grouping its draws and transfers before one completion fence. A handler added after the fact is delivered at
- * once rather than dropped: Metal calls that undefined, and losing it would be the kind of
- * silence this driver is trying to stop having.
- */
+/* Never call a handler inline while holding a state or Mesa context lock.
+ * Preserve the caller's requested completion queue; use our serial callback
+ * queue when no queue was supplied. */
 - (void)redwoodDeliver:(void (^)(id))handler
 {
-	dispatch_queue_t queue = [_queue redwoodCompletionQueue];
-
-	if (queue != nil) {
-		/* dispatch_async copies the block, which retains both this buffer and the
-		 * handler it carries, so the buffer outlives its own completion. */
-		dispatch_async(queue, ^{ handler(self); });
-		return;
-	}
-	handler(self);
+    dispatch_queue_t queue = [_queue redwoodCompletionQueue];
+    if (!queue) queue = [_queue redwoodCallbackQueue];
+    dispatch_async(queue, ^{ handler(self); });
 }
 
 - (void)addScheduledHandler:(void (^)(id))handler
 {
-	if (handler == NULL) {
-		return;
-	}
-	/* scheduled or further, an error included (3, 4, 5): the work this handler is about has
-	 * already run, so it is delivered rather than kept */
-	if (_status >= RW_CB_SCHEDULED) {
-		[self redwoodDeliver:handler];
-		return;
-	}
-	if (_scheduled == nil) {
-		_scheduled = [[NSMutableArray alloc] init];
-	}
-	[_scheduled addObject:[[handler copy] autorelease]];
+    if (!handler) return;
+    [_state lock];
+    if (_submitted) [self redwoodDeliver:handler];
+    else {
+        if (!_scheduled) _scheduled = [[NSMutableArray alloc] init];
+        [_scheduled addObject:[[handler copy] autorelease]];
+    }
+    [_state unlock];
 }
 
 - (void)addCompletedHandler:(void (^)(id))handler
 {
-	if (handler == NULL) {
-		return;
-	}
-	if (_status >= RW_CB_SCHEDULED) {
-		[self redwoodDeliver:handler];
-		return;
-	}
-	if (_completed == nil) {
-		_completed = [[NSMutableArray alloc] init];
-	}
-	[_completed addObject:[[handler copy] autorelease]];
-}
-
-/* Called from the one place the work is done. The order is Metal's: scheduled first, then
- * the fence, then completed. */
-- (void)redwoodDeliverHandlers
-{
-	NSArray *scheduled = _scheduled;
-	NSArray *completed = _completed;
-
-	_scheduled = nil;
-	_completed = nil;
-	for (id handler in scheduled) {
-		[self redwoodDeliver:(void (^)(id))handler];
-	}
-	if ([completed count] > 0 && _status != RW_CB_ERROR) {
-		/* A completed handler is a promise about the GPU, so it is made true before it
-		 * is kept: -waitUntilCompleted is this driver's fence and sets the status the
-		 * handler will read. */
-		[self waitUntilCompleted];
-	}
-	for (id handler in completed) {
-		[self redwoodDeliver:(void (^)(id))handler];
-	}
-	[scheduled release];
-	[completed release];
+    if (!handler) return;
+    [_state lock];
+    if (_finished) [self redwoodDeliver:handler];
+    else {
+        if (!_completed) _completed = [[NSMutableArray alloc] init];
+        [_completed addObject:[[handler copy] autorelease]];
+    }
+    [_state unlock];
 }
 
 /* -commitWithDeadline: is an abstract entry of _MTLCommandBuffer, so inheriting it aborts

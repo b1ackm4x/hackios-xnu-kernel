@@ -3257,6 +3257,69 @@ rwa_batch_end(struct rwa_device *device, char *why, size_t why_size)
    return rc;
 }
 
+struct rwa_completion {
+   struct pipe_screen *screen;
+   struct pipe_fence_handle *fence;
+};
+
+int
+rwa_batch_submit(struct rwa_device *device, struct rwa_completion **completion,
+                 char *why, size_t why_size)
+{
+   RWA_API_GUARD();
+   if (!device || !completion || !device->batch_active ||
+       !pthread_equal(device->batch_owner, pthread_self())) {
+      say(why, why_size, "no command batch owned by this thread");
+      return -1;
+   }
+   *completion = NULL;
+   struct rwa_completion *pending = calloc(1, sizeof(*pending));
+   if (!pending)
+      return rwa_batch_end(device, why, why_size);
+
+   pending->screen = device->screen;
+   device->pipe->flush(device->pipe, &pending->fence, 0);
+   int rc = 0;
+   if (!pending->fence) {
+      if (device->batch_requires_fence) {
+         say(why, why_size, "the GPU driver gave no fence for the command buffer");
+         rc = -1;
+      }
+      free(pending);
+   } else {
+      /* Materialize any deferred driver submission while the context is locked.
+       * In particular, all IOSurface write fences must reach RedwoodGPU before
+       * commit returns and CoreAnimation hands the surface to the display. The
+       * zero-timeout probe does not wait for GPU execution. This context does
+       * not use Gallium's threaded-context wrapper. */
+      device->screen->fence_finish(device->screen, NULL, pending->fence, 0);
+      *completion = pending;
+   }
+   device->batch_active = false;
+   device->batch_requires_fence = false;
+   device->pipe->set_framebuffer_state(device->pipe, &(struct pipe_framebuffer_state){ 0 });
+   pthread_mutex_unlock(&rwa_api_mutex); /* balance batch_begin */
+   return rc;
+}
+
+int
+rwa_completion_wait(struct rwa_completion *completion, char *why, size_t why_size)
+{
+   if (!completion) return 0;
+   /* Only the submitted screen fence is used here, never the pipe context. Do
+    * not take rwa_api_mutex: the next frame must be able to encode while this
+    * frame executes. The caller retains the device and resources until return. */
+   bool done = completion->screen->fence_finish(completion->screen, NULL,
+                                               completion->fence, RWA_FENCE_TIMEOUT_NS);
+   completion->screen->fence_reference(completion->screen, &completion->fence, NULL);
+   free(completion);
+   if (!done) {
+      say(why, why_size, "the GPU did not finish the command buffer within two seconds");
+      return -1;
+   }
+   return 0;
+}
+
 /* What the shader calls a texture slot, in the words a Metal programmer wrote it in,
  * so that a refusal about a mismatch names both sides in one vocabulary.
  */

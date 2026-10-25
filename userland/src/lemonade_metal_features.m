@@ -26,6 +26,50 @@ static BOOL finish(id<MTLCommandBuffer> command)
     return command.status == MTLCommandBufferStatusCompleted;
 }
 
+/* A batch large enough to still be running at commit return. Completion must
+ * retain resources, wait for real GPU results, and deliver callbacks in order. */
+static void completionTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library)
+{
+    NSError *error=nil;
+    id<MTLFunction> function=[library newFunctionWithName:@"lemonade_compute"];
+    id<MTLComputePipelineState> pipeline=[device newComputePipelineStateWithFunction:function error:&error];
+    unsigned pending=0,bad=0;
+    for(unsigned round=0;round<4;round++) @autoreleasepool {
+        uint32_t count=524288;
+        id<MTLBuffer> output=[device newBufferWithLength:(NSUInteger)count*4 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> size=[device newBufferWithBytes:&count length:sizeof(count) options:MTLResourceStorageModeShared];
+        if(!pipeline||!output.contents||!size){bad++;[output release];[size release];continue;}
+        memset(output.contents,0,(size_t)count*4);
+        id<MTLCommandBuffer> command=[queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline];[encoder setBuffer:output offset:0 atIndex:0];[encoder setBuffer:size offset:0 atIndex:1];
+        for(unsigned pass=0;pass<8;pass++)[encoder dispatchThreadgroups:MTLSizeMake(count/64,1,1) threadsPerThreadgroup:MTLSizeMake(64,1,1)];
+        [encoder endEncoding];
+        dispatch_semaphore_t done=dispatch_semaphore_create(0);
+        __block unsigned stage=0,mismatches=0;
+        [command addScheduledHandler:^(id<MTLCommandBuffer> c){
+            if(c.status<MTLCommandBufferStatusScheduled)__sync_fetch_and_add(&mismatches,1);
+            __sync_add_and_fetch(&stage,1);
+        }];
+        [command addCompletedHandler:^(id<MTLCommandBuffer> c){
+            if(c.status!=MTLCommandBufferStatusCompleted||__sync_add_and_fetch(&stage,1)!=2)__sync_fetch_and_add(&mismatches,1);
+            const uint32_t *values=output.contents;
+            for(uint32_t i=0;i<count;i++)if(values[i]!=i*7+3)__sync_fetch_and_add(&mismatches,1);
+            dispatch_semaphore_signal(done);
+        }];
+        [size release]; /* the command's encoded binding must own this now */
+        [command commit];
+        pending+=command.status==MTLCommandBufferStatusScheduled;
+        [command waitUntilScheduled];[command waitUntilCompleted];
+        long timedOut=dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC));
+        bad+=timedOut!=0||command.status!=MTLCommandBufferStatusCompleted||mismatches!=0;
+        [output release];[done release];
+    }
+    result("async-commit-returns-before-gpu-completion",pending>0,0,4-pending);
+    result("async-ordered-callbacks-and-gpu-readback",!bad,0,bad);
+    [pipeline release];[function release];
+}
+
 /* Release the application's ownership after binding, before the first draw or
  * dispatch. A separate autorelease pool also exercises set*Bytes storage. */
 static void lifetimeTests(id<MTLDevice> device, id<MTLCommandQueue> queue, id<MTLLibrary> library)
@@ -857,6 +901,7 @@ int lemonade_metal_features(id<MTLDevice> device, const char *path)
             result(dynamic?"uniform-unsized-dynamic-index-127":"uniform-unsized-static-index-3",done&&uniformPipeline&&!different,command.status,different);
             [values release];[selected release];[fs release];[p release];[uniformPipeline release];
         }
+        completionTests(device,queue,library);
         lifetimeTests(device,queue,library);
         deviceOffsetTests(device,queue,library);
         printf("lemonade-metal: feature summary checks=%u failed=%u\n", checks, failures);
