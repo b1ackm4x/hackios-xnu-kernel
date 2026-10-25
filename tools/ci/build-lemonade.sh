@@ -9,6 +9,8 @@ python3 tools/ci/setup-toolchain.py
 bash xnu/apply.sh
 bash xnu-deps/setup.sh
 bash tools/mk-ath11k.sh
+# WLFW emits a generated header; a cold build has no BSD object directory yet.
+mkdir -p xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT
 bash tools/mk-wlfw.sh
 bash tools/lemonade-build-kernel.sh
 LOADER_USB_SERIAL=lemonade-ci bash xnuloader/build.sh

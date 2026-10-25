@@ -1,6 +1,6 @@
 # OnePlus 9 自动构建与下载
 
-`main` 每次更新都会运行主机测试、从固定 userland 提交编译，并在测试和打包成功后发布 `ci-lemonade-<commit>` 实验版。PR 运行相同测试和构建，产物保留 14 天，不发布 Release；也可以在 Actions 手动运行。
+`main` 每次更新都会运行主机测试、从固定 userland 提交编译，并在测试和打包成功后发布 `ci-lemonade-<commit>` 实验版。PR 运行相同测试和完整组包校验，不发布 Release；也可以在 Actions 手动运行。
 
 - [完整运行包](https://github.com/b1ackm4x/hackios-xnu-kernel/releases)
 - [构建记录](https://github.com/b1ackm4x/hackios-xnu-kernel/actions/workflows/lemonade-ci.yml)
@@ -32,7 +32,7 @@ python3 launch.py android
 
 每次 CI 重新编译：XNU 与 lemonade 驱动、ath11k/WLFW、通用 EFI 加载器、Mesa/GLES、Metal/AIR、init、Metal 启动助手、Safari 刷新策略库。系统镜像、其余 root 模板、Mu-Silicium UEFI/shim 和脱敏 DTB 从固定 Release 下载，逐个验证哈希；这部分是复用输入，并非每次从源码重建。root 模板的所有文件先核对清单，再替换本次新编译的库、固件驱动运行入口，重新生成 APFS 并读回验证。userland 提交变化时必须更新模板，防止新旧配套混用。
 
-大文件不进入 Git 历史。完整压缩包被切成不超过 1500 MiB 的分卷，以符合 GitHub Release 单文件小于 2 GiB 的限制。`manifest.json` 记录内核与 userland 提交、输入版本、文件大小、SHA-256 和构建链接。
+大文件直接发布到 Release，不进入 Git 历史，也不在 Actions artifact 存储中另存一份。完整压缩包被切成不超过 1500 MiB 的分卷，以符合 GitHub Release 单文件小于 2 GiB 的限制。`manifest.json` 记录内核与 userland 提交、输入版本、文件大小、SHA-256 和构建链接。
 
 ## 验证边界
 
