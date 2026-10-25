@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fresh-workspace build with hash-pinned, credential-free public runtime inputs.
+# Fresh-workspace component build. No system image or device files are consumed.
 set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
 # GitHub images also ship unrelated compilers/Python versions ahead of apt's
@@ -35,5 +35,4 @@ AIR=1 bash tools/mk-mesa.sh
 RUNTIME_ONLY=1 bash tools/lemonade-build-metal.sh
 bash tools/lemonade-build-gl.sh
 bash tools/lemonade-build-base-runtime.sh
-python3 tools/ci/fetch-runtime-inputs.py
 python3 tools/ci/package-lemonade.py

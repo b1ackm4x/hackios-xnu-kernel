@@ -49,11 +49,11 @@ def main():
         print('Preserved the previously published, complete release: ' + release['html_url'])
         return
     if release is None:
-        notes = f'''Complete experimental OnePlus 9 LE2110 / 8 GiB / AMB655X RAM runtime from {commit}.
+        notes = f'''Generic OnePlus 9 ARM64 kernel and driver components from {commit}.
 
-Includes the system image, clean runtime, GPU/Wi-Fi firmware, fresh kernel, GLES/Metal libraries and generic loader boot.img. No saved Wi-Fi credentials, connection history, accounts or per-phone binding. Uses temporary fastboot boot; no partition flashing.
+Includes a fresh XNU kernel, QCA6490 driver, GLES/Metal libraries, startup runtime, generic EFI loader, source snapshots and build receipts. No Apple system images, phone firmware, device DTB/UEFI, Wi-Fi credentials/history or user accounts are included.
 
-Download every .tar.gz.part-* asset, SHA256SUMS, README.md and manifest.json from this release. Verify, concatenate and extract as described in README.md. Requires rooted Android and an unlocked bootloader. CI builds have no per-binary hardware acceptance; start requires --experimental. Static system/root-template/UEFI inputs are hash-pinned and reused.
+Download the .tar.gz, SHA256SUMS, README.md and manifest.json. Verify and extract as described in README.md, then supply your own local system/device files. This is a component prerelease, not a standalone flashable ROM. CI compilation and host tests do not replace device acceptance.
 
 Build: {os.environ['RUN_URL']}
 '''

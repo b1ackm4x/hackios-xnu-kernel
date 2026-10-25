@@ -71,65 +71,13 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package.check_receipt(root, 'out')
 
-    def test_split_archive_roundtrip(self):
-        import tarfile
-        import io
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            writer = package.SplitWriter(root, 'runtime.tar.gz', limit=37)
-            data = bytes(range(256)) * 3
-            with tarfile.open(fileobj=writer, mode='w|gz') as archive:
-                info = tarfile.TarInfo('runtime/kernel')
-                info.size = len(data)
-                archive.addfile(info, io.BytesIO(data))
-            writer.close()
-            self.assertGreater(len(writer.paths), 1)
-            self.assertTrue(all(p.stat().st_size <= 37 for p in writer.paths))
-            joined = b''.join(p.read_bytes() for p in writer.paths)
-            with tarfile.open(fileobj=io.BytesIO(joined), mode='r:gz') as archive:
-                self.assertEqual(archive.extractfile('runtime/kernel').read(), data)
-
-    def test_launcher_rejects_ambiguous_usb(self):
-        self.assertEqual(package.launch.unique_target(['one']), 'one')
-        for devices, requested in (([], None), (['one', 'two'], 'one'), (['one'], 'two')):
-            with self.assertRaises(SystemExit):
-                package.launch.unique_target(devices, requested)
-
-    def test_launcher_ignores_wireless_adb_and_unauthorized_targets(self):
-        data = 'List of devices attached\nusb123 device usb:1-1 product:lemonade\n192.0.2.1:5555 device product:lemonade\nother unauthorized usb:1-2\n'
-        self.assertEqual(package.launch.adb_devices(data), ['usb123'])
-
-    def test_unaccepted_ci_build_requires_explicit_experimental_opt_in(self):
-        from unittest.mock import patch
-        with patch.object(package.launch, 'command', side_effect=AssertionError('Must not touch USB')):
-            with self.assertRaisesRegex(SystemExit, 'no device acceptance'):
-                package.launch.start({}, None, False)
-
-    def test_wrong_memory_layout_never_reboots_phone(self):
-        from unittest.mock import patch
-        def command(argv, timeout=30):
-            if argv == ['adb', 'devices', '-l']:
-                return 'List of devices attached\nfixture device usb:1-1 product:lemonade\n'
-            if argv == ['fastboot', 'devices']:
-                return ''
-            if 'getprop' in argv:
-                return {'ro.product.model': 'LE2110', 'ro.soc.model': 'SM8350', 'ro.boot.flash.locked': '0'}[argv[-1]]
-            if 'cat /proc/cmdline' in argv[-1]:
-                return 'msm_drm.dsi_display0=' + package.launch.PANEL
-            if 'sha256sum' in argv[-1]:
-                return '0' * 64 + '  /proc/device-tree/memory/reg'
-            raise AssertionError('Unexpected device mutation: ' + repr(argv))
-        with patch.object(package.launch, 'command', side_effect=command):
-            with self.assertRaisesRegex(SystemExit, 'memory layout'):
-                package.launch.start({}, None, True)
-
     def test_release_requires_every_uploaded_asset_and_matching_server_digest(self):
         import copy
         import hashlib
         publisher = package.module('ci_publish_test', 'tools/ci/publish-release.py')
-        checksum = 'a' * 64 + '  runtime.tar.gz.part-00\n'
+        checksum = 'a' * 64 + '  components.tar.gz\n'
         release = {'assets': [
-            {'name': 'runtime.tar.gz.part-00', 'state': 'uploaded', 'size': 10, 'digest': 'sha256:' + 'a' * 64},
+            {'name': 'components.tar.gz', 'state': 'uploaded', 'size': 10, 'digest': 'sha256:' + 'a' * 64},
             {'name': 'SHA256SUMS', 'state': 'uploaded', 'size': len(checksum),
              'digest': 'sha256:' + hashlib.sha256(checksum.encode()).hexdigest()},
         ]}
