@@ -26,6 +26,8 @@
 
 ## 重新取出项目
 
+本节是开发者的源码准备流程。普通用户入口见 [复现指南](LEMONADE-REPRODUCE.md)：编译和发布验收由维护者完成，用户只准备本机必要文件与指定 Apple 系统。目前 CI 仅交付组件实验版，普通用户本地准备与组包入口尚未接通。
+
 克隆公开源码无需登录；推送前通过 `gh auth login` 配置访问权限，不要把令牌放进远端 URL。
 
 ```sh
@@ -45,7 +47,7 @@ common/ugit config remote.pushDefault origin
 
 这只取回可维护的源代码。设备原始备份、原机固件、Apple 系统文件、SDK、私有验证日志与新增构建产物
 不写入 Git。公开的通用构建产物通过 GitHub Releases 下载，范围与校验方法见 [CI 说明](LEMONADE-CI.md)；
-本地系统与设备文件的准备和构建步骤见 [LEMONADE.md](LEMONADE.md)。
+维护者准备本地系统与设备文件、继续构建的记录见 [LEMONADE.md](LEMONADE.md)。它依赖已配置的开发环境，不是普通用户从零复现教程。
 
 ## 日常提交
 

@@ -1,5 +1,7 @@
 # OnePlus 9 日常 base · 默认 120 Hz
 
+本文记录维护者本机包的功能与验收证据。新用户请看 [复现指南](LEMONADE-REPRODUCE.md)：发布方负责实机验收，用户只准备本机必要文件与指定 Apple 系统。现有本机包及其验收记录不能直接用于另一台手机；普通用户准备工具与已验收公开运行版本尚未交付。
+
 `main` 已集成异步 Metal、双缓冲多层显示、退出排空和 Safari 刷新策略修复。双缓冲原生场景实测约 116–117 fps，详见 [原生多层显示修复](LEMONADE-NATIVE-BENCH.md)。
 
 驱动设计、问题清单和源码入口见 [图形与显示驱动](LEMONADE-DISPLAY.md)、
@@ -9,7 +11,7 @@
 双击包内 `Start.command` 即使用 120 Hz，不需要补充启动参数。旧的
 `2026.10.24-base.1` 目录、ZIP 和源码标签保持不变，可用于 60 Hz 回退。
 
-## 使用
+## 原绑定设备使用
 
 本机运行包：`out/releases/lemonade-2026.10.25-base.4/`，压缩包为同名 `.zip`。
 运行包和源码版本分开管理；本次源码整理不创建新的包或标签。原 base.1、base.2、base.3、base.4 包与既有标签均保留。
@@ -18,8 +20,8 @@
 
 默认参数包含 `lemonade_display_hz=120` 和 `lemonade_panel=655`，并启用 DPU 直接显示、
 生产者释放同步。`ca_vbl=0` 让 Core Animation 使用原生 CADisplayTimer；DPU 的 TE 同步和
-GPU fence 检查仍然启用。启动前校验设备身份、文件哈希、面板绑定、对应内核的 DMA
-保护测试，以及 120 Hz 与 GPU／触控／Wi-Fi 联合验收记录。面板切换后先测量 64 个 TE
+GPU fence 检查仍然启用。现有本机启动器在启动前校验设备身份、文件哈希、面板绑定、维护者已完成的对应内核 DMA
+保护测试，以及 120 Hz 与 GPU／触控／Wi-Fi 联合验收记录；不在每次启动时重跑验收。面板切换后先测量 64 个 TE
 周期，成功后才向 iOS 发布 120 Hz 模式。
 
 运行包包含 Adreno 660 GLES/Metal、SpringBoard、小组件所需服务、实体触控和 QCA6490

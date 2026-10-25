@@ -1,8 +1,10 @@
-# OnePlus 9 自动构建与下载
+# OnePlus 9 CI 组件下载与维护者发布流程
+
+普通用户请先阅读 [复现指南](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-REPRODUCE.md)。编译和实机验收由维护者在发布前完成；用户只准备自己的必要设备文件与指定 Apple 系统，本地工具负责校验、组装和启动。用户不需要运行验收程序。
 
 `main` 每次更新都会运行主机测试、从固定 userland 提交编译，并在全部成功后发布 `ci-lemonade-<commit>` 实验版。PR 运行相同测试、编译和组包校验，不发布 Release；也可以在 Actions 手动运行。
 
-当前公开交付的是 **通用内核与驱动组件包**。系统镜像、原机固件和设备启动文件由使用者在本地补齐；下载包不能直接刷机，也不包含一键启动所需的完整运行环境。
+当前公开交付的是 **供维护者集成的通用内核与驱动组件包**。系统镜像、原机固件和设备启动文件仍需在开发工作区准备；下载包不能直接启动手机。面向普通用户的预编译启动组件、本地准备工具和已验收公开运行版本尚未交付，不能把这份 CI 说明当作完整用户安装教程。
 
 - [通用内核与驱动包](https://github.com/b1ackm4x/hackios-xnu-kernel/releases)
 - [构建记录](https://github.com/b1ackm4x/hackios-xnu-kernel/actions/workflows/lemonade-ci.yml)
@@ -22,7 +24,7 @@
 
 这里记录的是一次实际运行结果，后续版本的提交、文件数量、大小和耗时以各自清单与 Actions 记录为准。
 
-## 下载与使用
+## 组件下载与校验
 
 选择 `OnePlus 9 CI ...` Release，下载同一版本的 `lemonade-ci-*.tar.gz`、`SHA256SUMS`、`README.md` 和 `manifest.json`。GitHub 自动生成的 Source code 只是源码快照。
 
@@ -47,9 +49,13 @@ tar -xzf lemonade-ci-*.tar.gz
 | `loader/loader.efi` | 使用通用 USB 标识 `lemonade-ci` 的 EFI 开发产物 |
 | `sources/`、`licenses/` | 配套源码、ath11k 源码和许可证 |
 
-除 `loader/` 外，产物目录结构与源码树相同。将所需文件导入对应源码树后，按 [设备准备与本地构建](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE.md) 准备自己设备的基线、脱敏 DTB、Mu-Silicium UEFI、GPU / Wi-Fi 固件和本地系统镜像，再按 [base 构建说明](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-BASE.md) 组包。
+## 维护者集成与发布责任
 
-本地设备工具使用设备专属 loader 身份，须由 `tools/lemonade-pack.py` 为目标手机重新生成；不能直接用包内通用 EFI 替换设备绑定的 loader。新内核仍需通过其自身的 DMA guard 与联合验收，才可走正式 base 启动器。不得复制旧验收记录来绕过检查。
+本节面向构建和验收发布版的维护者，不属于普通用户操作。除 `loader/` 外，产物目录结构与源码树相同。维护者将所需文件导入对应源码树后，按 [设备准备与本地构建](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE.md) 准备测试设备基线、脱敏 DTB、Mu-Silicium UEFI / BootShim、GPU / Wi-Fi 固件和本地系统镜像，再按 [base 构建说明](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-BASE.md) 组包。这些脚本依赖既有开发环境，并非从空目录开始的用户安装器。
+
+现有开发工具使用设备专属 loader 身份，由 `tools/lemonade-pack.py` 重新编译并打包；不能直接用包内通用 EFI 替换设备绑定的 loader。当前 base 启动器仍要求候选内核的 DMA guard 和对应镜像的联合验收记录；这是维护者候选流程的现状，**不是要求每位用户执行测试**。不得复制旧验收记录或修改标志来绕过检查。
+
+发布给普通用户前，维护者应完成确切版本的整机验收，提供预编译启动组件和本地准备工具，并让启动器认可已验收的发布组件及支持范围。用户工具只做本机兼容性、设备身份与文件完整性检查；GPU、DMA、显示和联网验收由发布方承担。CI 自动实验版不会因一次旧 base 验收而自动成为普通用户版本。具体交付缺口见 [复现指南](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-REPRODUCE.md)。
 
 每个 Release 的附件 `README.md`、包内说明和源码归档都是该次构建的快照。后续文档更新进入新的 CI 包；已发布版本的附件保持不变，避免破坏 `SHA256SUMS` 与包内清单。最新操作说明见[仓库中的本文](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-CI.md)。
 
@@ -57,7 +63,7 @@ tar -xzf lemonade-ci-*.tar.gz
 
 每次 CI 从源码编译 XNU 与 lemonade 驱动、ath11k/WLFW、通用 EFI 加载器、Mesa/GLES、Metal/AIR、init、Metal 启动助手和 Safari 刷新策略库。工具链与 SDK 下载后先核对固定 SHA-256。
 
-打包器只复制明确列出的构建产物，并检查内核、源码与构建收据匹配。它不读取作者手机或本地系统镜像，不打包 `local/`、APFS、启动镜像、原机固件、DTB、Wi-Fi 密码/连接历史、个人账户、密钥或设备日志。系统和设备文件由使用者在本地补齐。
+打包器只复制明确列出的构建产物，并检查内核、源码与构建收据匹配。它不读取作者手机或本地系统镜像，不打包 `local/`、APFS、启动镜像、原机固件、DTB、Wi-Fi 密码/连接历史、个人账户、密钥或设备日志。当前系统和设备文件由维护者在开发环境中准备；面向用户的本地准备工具还需接通。
 
 Wi-Fi 驱动已经编入内核；芯片运行固件与板级配置（例如 `amss.bin`、`m3.bin`、`board.bin`、`regdb.bin`）是另一类运行输入，按当前分发方案在本地准备。这些固件文件与家庭 Wi-Fi 的 SSID、密码及连接历史不是同一种数据。
 
@@ -67,7 +73,7 @@ Wi-Fi 驱动已经编入内核；芯片运行固件与板级配置（例如 `ams
 
 Linux 测试覆盖实际显示合成代码、fence/退出路径、触控/MHI 协议、网络与设备选择等；macOS 另运行 Metal 对象生命周期和异步完成测试。两组测试通过后才编译、打包和发布。
 
-CI 不操作手机，不能替代真机验收；每个包均明确记录 `hardware_verified: false`。目标是 OnePlus 9 lemonade，现有设备证据来自 LE2110 / 8 GB / AMB655X 面板，不代表其他型号、内存布局或面板已验证。
+CI 不操作手机，不能替代维护者的发布前真机验收；每个自动组件包均明确记录 `hardware_verified: false`。目标是 OnePlus 9 lemonade，现有设备证据来自 LE2110 / 8 GB / AMB655X 面板，不代表其他型号、内存布局或面板已验证。用户使用已经验收的配套发布版，不承担补做这些测试的任务。
 
 ## 构建资源与维护
 

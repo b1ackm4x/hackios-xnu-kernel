@@ -1,6 +1,6 @@
 # HackiOS · OnePlus 9
 
-[自动构建 / 通用内核与驱动包下载](docs/LEMONADE-CI.md) · [GitHub Actions](https://github.com/b1ackm4x/hackios-xnu-kernel/actions/workflows/lemonade-ci.yml)
+[普通用户复现指南](docs/LEMONADE-REPRODUCE.md) · [CI 组件包与维护者说明](docs/LEMONADE-CI.md) · [GitHub Actions](https://github.com/b1ackm4x/hackios-xnu-kernel/actions/workflows/lemonade-ci.yml)
 
 基于 [oosexgang/HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的一加 9（LE2110 / `lemonade`）适配，运行 XNU 与 iOS 16.5 用户空间。
 
@@ -29,9 +29,9 @@ Safari 原来将网页动画限制在 60 fps。base.4 关闭该默认策略并�
 
 ## 使用
 
-公开下载入口：[CI 通用内核与驱动包](https://github.com/b1ackm4x/hackios-xnu-kernel/releases)。
-`main` 更新后自动测试、编译并发布实验版；下载包包含内核、运行库、加载器和配套源码，
-系统镜像与设备文件须在本地补齐，不能直接刷机。下载、校验和组包步骤见 [CI 说明](docs/LEMONADE-CI.md)。
+普通用户请从 [复现指南](docs/LEMONADE-REPRODUCE.md) 开始。我们负责预编译组件与发布前实机验收；用户只需准备受支持的手机、允许采集本机必要文件、下载指定 Apple 系统，再由本地工具组包和启动。用户不需要编译或运行 GPU、DMA、联网验收程序。
+
+**目前尚未交付这套完整的普通用户准备工具和已验收公开运行版本。** [公开下载](https://github.com/b1ackm4x/hackios-xnu-kernel/releases) 现为 CI 通用组件实验版：`main` 更新后自动测试、编译和发布，包含内核、运行库、通用加载器和配套源码。它供维护者集成，不能直接启动手机；缺失步骤与当前工具限制在复现指南中逐项列明。[CI 说明](docs/LEMONADE-CI.md) 保留组件下载、校验与开发集成方法。
 
 本机已验收的完整运行包：`out/releases/lemonade-2026.10.25-base.4.zip`，与上述 CI 组件包分别维护。
 
@@ -41,6 +41,7 @@ Safari 原来将网页动画限制在 60 fps。base.4 关闭该默认策略并�
 
 - 完整 Metal 兼容、120 Hz 长时间稳定性与动态刷新率切换、睡眠唤醒、温控与电源管理，以及其余外设。
 - 原生设置首次输入 Wi-Fi 密码的完整流程尚未单独验收；天气小组件仍显示占位内容。
+- 普通用户准备工具：自动采集本机必要文件、下载指定 Apple 系统、用预编译组件组包，并认可维护者已验收的发布版本。
 - 双缓冲多层合成覆盖非平面 BGRA32；其他格式仍可能使用兼容显示路径。已有原生场景实测，新内核的完整运行包验收尚未完成。
 
 ## 代码布局
