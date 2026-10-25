@@ -1,10 +1,27 @@
 #!/bin/bash
 # Fresh-workspace build with hash-pinned, credential-free public runtime inputs.
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")/../.."
+# GitHub images also ship unrelated compilers/Python versions ahead of apt's
+# tools. Match the Ubuntu 24.04 toolchain validated by the cold local build.
+export PATH="/usr/bin:/bin:$PATH"
+report_failure() {
+    local status=$?
+    set +e
+    for log in xnu-deps/exporthdrs.log xnu-deps/setup.log local/lemonade/gpu-kernel-build-*.log xnu-deps/build/mesa/meson-setup.log xnu-deps/build/mesa/ninja.log; do
+        if [[ -f "$log" ]]; then
+            printf 'Build diagnostics: %s\n' "$log"
+            tail -n 100 "$log"
+        fi
+    done
+    exit "$status"
+}
+trap report_failure ERR
 : "${THEOS:?Set THEOS to a fresh build-toolchain directory}"
 export JOBS=${JOBS:-4}
 export LEMONADE_WIFI=1
+clang --version
+python3 --version
 python3 tools/ci/setup-toolchain.py
 bash xnu/apply.sh
 bash xnu-deps/setup.sh
