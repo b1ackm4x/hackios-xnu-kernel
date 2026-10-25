@@ -104,6 +104,55 @@ class PackagingTests(unittest.TestCase):
         with patch.object(publisher, 'gh', return_value='[]'):
             self.assertIsNone(publisher.find_release('owner/repo', 'missing'))
 
+    def test_publish_uses_creation_response_when_release_list_is_stale(self):
+        import contextlib
+        import hashlib
+        import io
+        import os
+        from urllib.parse import parse_qs, urlparse
+        publisher = package.module('ci_publish_flow_test', 'tools/ci/publish-release.py')
+        old_cwd = Path.cwd()
+        uploaded = []
+        calls = []
+        endpoint = 'repos/owner/repo/releases/77'
+        def fake_gh(*args, **kwargs):
+            calls.append(args)
+            if args == ('api', 'repos/owner/repo/releases?per_page=100&page=1'):
+                return '[]'  # Remains stale throughout this transaction.
+            if args[:4] == ('api', '--method', 'POST', 'repos/owner/repo/releases'):
+                self.assertTrue(json.loads(kwargs['input'])['draft'])
+                return json.dumps({'id': 77, 'draft': True, 'assets': []})
+            if args[:3] == ('api', '--method', 'POST') and args[3].startswith('https://uploads.github.com/'):
+                self.assertIn('/releases/77/assets?', args[3])
+                name = parse_qs(urlparse(args[3]).query)['name'][0]
+                data = Path(args[-1]).read_bytes()
+                uploaded.append({'name': name, 'size': len(data), 'state': 'uploaded',
+                                 'digest': 'sha256:' + hashlib.sha256(data).hexdigest()})
+                return json.dumps(uploaded[-1])
+            if args == ('api', endpoint):
+                return json.dumps({'assets': uploaded, 'draft': True})
+            if args == ('api', '--method', 'PATCH', endpoint, '-F', 'draft=false'):
+                return json.dumps({'assets': uploaded, 'draft': False,
+                                   'html_url': 'https://github.com/owner/repo/releases/tag/ci-test'})
+            self.fail('Unexpected release operation: ' + repr(args))
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                out = root / 'out/ci-release'
+                out.mkdir(parents=True)
+                (out / 'components.tar.gz').write_bytes(b'compiled fixture')
+                checksum = hashlib.sha256(b'compiled fixture').hexdigest() + '  components.tar.gz\n'
+                (out / 'SHA256SUMS').write_text(checksum)
+                with patch.object(publisher, 'ROOT', root), patch.object(publisher, 'gh', side_effect=fake_gh), \
+                     patch.object(publisher.subprocess, 'run'), patch.dict(os.environ, {
+                         'COMMIT': 'a' * 40, 'GH_REPO': 'owner/repo', 'RUN_URL': 'https://github.com/owner/repo/actions/runs/1'}), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    publisher.main()
+                self.assertEqual(len(uploaded), 2)
+                self.assertEqual(sum('per_page' in call[-1] for call in calls), 1)
+        finally:
+            os.chdir(old_cwd)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -7,12 +7,13 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def gh(*args):
-    return subprocess.check_output(['gh', *args], text=True)
+def gh(*args, **kwargs):
+    return subprocess.check_output(['gh', *args], text=True, **kwargs)
 
 
 def find_release(repository, tag):
@@ -68,21 +69,32 @@ Download the .tar.gz, SHA256SUMS, README.md and manifest.json. Verify and extrac
 
 Build: {os.environ['RUN_URL']}
 '''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.md') as source:
-            source.write(notes)
-            source.flush()
-            gh('release', 'create', tag, '--target', commit, '--draft', '--prerelease',
-               '--title', 'OnePlus 9 CI ' + commit[:12], '--notes-file', source.name)
-        release = find_release(repository, tag)
-        if release is None:
-            raise SystemExit('Cannot locate the created draft; leaving it unpublished')
+        # Use the POST response: listing immediately after creation may still
+        # return a cached page without the new draft.
+        release = json.loads(gh('api', '--method', 'POST', f'repos/{repository}/releases',
+                                '--input', '-', input=json.dumps({
+                                    'tag_name': tag, 'target_commitish': commit,
+                                    'draft': True, 'prerelease': True,
+                                    'name': 'OnePlus 9 CI ' + commit[:12], 'body': notes,
+                                })))
     endpoint = f'repos/{repository}/releases/{release["id"]}'
-    gh('release', 'upload', tag, *assets, '--clobber')
+    existing = {asset['name']: asset for asset in release['assets']}
+    for name in assets:
+        digest = 'sha256:' + hashlib.sha256(Path(name).read_bytes()).hexdigest()
+        previous = existing.get(name)
+        if previous and previous['state'] == 'uploaded' and previous.get('digest') == digest:
+            continue
+        if previous:
+            gh('api', '--method', 'DELETE', f'repos/{repository}/releases/assets/{previous["id"]}')
+        gh('api', '--method', 'POST',
+           f'https://uploads.github.com/repos/{repository}/releases/{release["id"]}/assets?name={quote(name, safe="")}',
+           '-H', 'Content-Type: application/octet-stream', '--input', name)
     verify_remote(json.loads(gh('api', endpoint)), checksums)
-    gh('release', 'edit', tag, '--draft=false')
-    published = json.loads(gh('api', endpoint))
+    # The mutation response confirms publication without rereading a cached GET.
+    published = json.loads(gh('api', '--method', 'PATCH', endpoint, '-F', 'draft=false'))
     if published['draft']:
         raise SystemExit('Release remains a draft')
+    verify_remote(published, checksums)
     print(published['html_url'])
 
 
