@@ -207,7 +207,8 @@ def main():
              for p in sorted(folder.rglob('*')) if p.is_file()}
     manifest = {
         'profile': 'lemonade-public-runtime-v1', 'kernel_commit': kernel, 'userland_commit': userland,
-        'target': 'OnePlus 9 LE2110 / lemonade / ARM64', 'build_host': platform.machine(),
+        'target': 'OnePlus 9 LE2110 / 8 GiB / AMB655X / lemonade / ARM64', 'build_host': platform.machine(),
+        'memory_reg_sha256': launch.MEMORY_REG_SHA256,
         'run_url': os.environ.get('LEMONADE_CI_RUN_URL', ''),
         'hardware_verified': False, 'bootable_image_included': True,
         'apple_system_included': True, 'device_firmware_included': True,

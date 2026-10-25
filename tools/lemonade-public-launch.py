@@ -13,6 +13,8 @@ import time
 HERE = Path(__file__).resolve().parent
 LOADER_SERIAL = 'lemonade-ci'
 PANEL = 'qcom,mdss_dsi_samsung_amb655x_dsc_cmd:'
+# Shared hardware profile, not a device identifier: /memory/reg in the clean DTB.
+MEMORY_REG_SHA256 = '8f23ffc54df402a2da37b2ec86f62300b8cfefa6fd203451244d8ab1105b74a6'
 BOOT_ARGUMENTS = ('sb_delay=8 bootcpu=7 cpus=4 cpufreq=1 ddr=0 gpu=1 gpu_log=0 adreno_speed=2 '
     'metal=1 metal_profile=1 camtl=1 lemonade_display=10 lemonade_display_hz=120 lemonade_panel=655 ca_vbl=0 fb_fences=1 '
     'touchscreen=1 buttons=0 wifi=0 lemonade_wifi=24 lemonade_runtime=1 lemonade_dma_verified=1 '
@@ -101,6 +103,9 @@ def start(manifest, requested, experimental):
     cmdline = command(['adb', '-s', target, 'shell', "su -c 'cat /proc/cmdline'"])
     if re.findall(r'(?:^|\s)msm_drm\.dsi_display0=([^\s]+)', cmdline) != [PANEL]:
         raise SystemExit('Requires the AMB655X panel and root access to verify its identity')
+    memory = command(['adb', '-s', target, 'shell', "su -c 'sha256sum /proc/device-tree/memory/reg'"])
+    if memory.split()[:1] != [MEMORY_REG_SHA256]:
+        raise SystemExit('Requires the matching 8 GiB memory layout; no reboot or boot image was sent.')
     print('Experimental build: GPU/Wi-Fi integration has not been accepted on this binary. RAM-only boot.', flush=True)
     command(['adb', '-s', target, 'reboot', 'bootloader'])
     wait_for(lambda: fastboot_devices() == [target], 60)

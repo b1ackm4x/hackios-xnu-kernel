@@ -22,7 +22,7 @@ python3 launch.py start --experimental
 python3 launch.py android
 ```
 
-需要 Python 3.11+、Android Platform Tools 的 `adb` 和 `fastboot`。当前启动器仅接受 **OnePlus 9 LE2110、SM8350、AMB655X 面板、已解锁 bootloader，并且 Android 有 root**。先启动 Android、允许 USB 调试，只连接一台目标手机。启动器会读取当前面板类型再进入 bootloader；不会保存或显示完整 Android 启动参数，也不绑定作者的手机序列号。其他 OnePlus 9 型号和面板没有通过此启动路径验证。
+需要 Python 3.11+、Android Platform Tools 的 `adb` 和 `fastboot`。当前启动器仅接受 **OnePlus 9 LE2110、8 GB 对应内存布局、SM8350、AMB655X 面板、已解锁 bootloader，并且 Android 有 root**。先启动 Android、允许 USB 调试，只连接一台目标手机。启动器会读取当前面板类型和内存布局，再进入 bootloader；不会保存或显示完整 Android 启动参数，也不绑定作者的手机序列号。其他 OnePlus 9 型号、12 GB 内存配置和面板没有通过此启动路径验证。
 
 这是 **RAM 临时启动包**：使用 `fastboot boot`，随后上传镜像到内存，没有 `fastboot flash`、格式化、分区安装或用户数据持久化。Wi-Fi 在系统设置内手动连接；启动时没有已保存的网络，重新启动后连接信息也不保留。桌面没有自动测试、自动手势或定时退出。
 

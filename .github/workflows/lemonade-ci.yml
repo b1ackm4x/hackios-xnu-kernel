@@ -107,24 +107,4 @@ jobs:
           GH_REPO: ${{ github.repository }}
           COMMIT: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          cd out/ci-release
-          sha256sum --check SHA256SUMS
-          tag="ci-lemonade-${COMMIT:0:12}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "This commit already has a release; preserving its original files."
-            exit 0
-          fi
-          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          Complete OnePlus 9 LE2110 experimental RAM runtime built from commit $COMMIT.
-
-          Includes the system image, clean runtime, GPU/Wi-Fi firmware, fresh kernel, GLES/Metal libraries and generic loader boot.img. No saved Wi-Fi credentials, connection history, accounts or per-phone binding. Uses temporary fastboot boot; no partition flashing.
-
-          Download every .tar.gz.part-* asset, README.md and SHA256SUMS. Verify, concatenate and extract as described in README.md. Requires rooted Android on an unlocked LE2110 with AMB655X panel. CI builds have no per-binary hardware acceptance; starting requires explicit --experimental opt-in. Static system/root-template/UEFI inputs are hash-pinned; they are not recompiled in each run.
-
-          Build: $RUN_URL
-          EOF
-          gh release create "$tag" lemonade-ci-*.tar.gz.part-* SHA256SUMS manifest.json README.md \
-            --target "$COMMIT" --prerelease --title "OnePlus 9 CI ${COMMIT:0:12}" \
-            --notes-file "$RUNNER_TEMP/release-notes.md"
+        run: python3 tools/ci/publish-release.py

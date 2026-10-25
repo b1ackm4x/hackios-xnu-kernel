@@ -105,6 +105,45 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'no device acceptance'):
                 package.launch.start({}, None, False)
 
+    def test_wrong_memory_layout_never_reboots_phone(self):
+        from unittest.mock import patch
+        def command(argv, timeout=30):
+            if argv == ['adb', 'devices', '-l']:
+                return 'List of devices attached\nfixture device usb:1-1 product:lemonade\n'
+            if argv == ['fastboot', 'devices']:
+                return ''
+            if 'getprop' in argv:
+                return {'ro.product.model': 'LE2110', 'ro.soc.model': 'SM8350', 'ro.boot.flash.locked': '0'}[argv[-1]]
+            if 'cat /proc/cmdline' in argv[-1]:
+                return 'msm_drm.dsi_display0=' + package.launch.PANEL
+            if 'sha256sum' in argv[-1]:
+                return '0' * 64 + '  /proc/device-tree/memory/reg'
+            raise AssertionError('Unexpected device mutation: ' + repr(argv))
+        with patch.object(package.launch, 'command', side_effect=command):
+            with self.assertRaisesRegex(SystemExit, 'memory layout'):
+                package.launch.start({}, None, True)
+
+    def test_release_requires_every_uploaded_asset_and_matching_server_digest(self):
+        import copy
+        import hashlib
+        publisher = package.module('ci_publish_test', 'tools/ci/publish-release.py')
+        checksum = 'a' * 64 + '  runtime.tar.gz.part-00\n'
+        release = {'assets': [
+            {'name': 'runtime.tar.gz.part-00', 'state': 'uploaded', 'size': 10, 'digest': 'sha256:' + 'a' * 64},
+            {'name': 'SHA256SUMS', 'state': 'uploaded', 'size': len(checksum),
+             'digest': 'sha256:' + hashlib.sha256(checksum.encode()).hexdigest()},
+        ]}
+        publisher.verify_remote(release, checksum)
+        bad = copy.deepcopy(release)
+        bad['assets'].pop()
+        with self.assertRaises(SystemExit):
+            publisher.verify_remote(bad, checksum)
+        for key, value in (('state', 'new'), ('digest', 'sha256:' + 'b' * 64), ('size', 0)):
+            bad = copy.deepcopy(release)
+            bad['assets'][0][key] = value
+            with self.assertRaises(SystemExit):
+                publisher.verify_remote(bad, checksum)
+
 
 if __name__ == '__main__':
     unittest.main()
