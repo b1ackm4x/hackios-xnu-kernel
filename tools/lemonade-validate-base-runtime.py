@@ -8,7 +8,7 @@ import argparse,hashlib,importlib.util,json,os,re,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--version',default='2026.10.25-base.1')
+parser.add_argument('--version',default='2026.10.25-base.4')
 options=parser.parse_args()
 if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}',options.version):parser.error('Invalid release version')
 PKG=ROOT/'out/releases'/('lemonade-'+options.version)
@@ -70,7 +70,12 @@ checks={
  'wifi_dma_stopped':'endpoint DMA stopped before unmap' in text and 'endpoint bus master clear verified' in text,
 }
 checks.update(direct.check_refresh(text))
+if m.get('display_return_drain'):
+ checks['display_drained_before_gpu_stop']=direct.check_return_drain(raw.decode(errors='replace'))
+if m.get('gpu_return_call_drain'):
+ checks['gpu_calls_drained_and_userspace_exit_clean']=direct.check_gpu_return(raw.decode(errors='replace'))
 proof={'passed':all(checks.values()),'checks':checks,'kernel_sha256':m['files']['kernel']['sha256'],'root_sha256':m['files']['root.apfs']['sha256'],'elapsed_seconds':round(time.monotonic()-started,3),'direct_completed':int(summary[0][0]) if summary else 0,'log_sha256':hashlib.sha256(raw).hexdigest(),'live_logs':[{'path':str(p.relative_to(ROOT)),'sha256':launch.digest(p)} for p in live],'result':result,'native_settings_password_entry_verified':False}
+proof['userspace_exit_sigsegv']=raw.count(b'exited due to SIGSEGV')
 (OUT/'clean-runtime-evidence.json').write_text(json.dumps(proof,indent=2)+'\n')
 print(json.dumps(proof,indent=2),flush=True)
 raise SystemExit(0 if proof['passed'] else 1)

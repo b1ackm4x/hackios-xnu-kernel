@@ -90,7 +90,7 @@ def main():
         tree['bin/rwtouch']=normal['bin/rwtouch']
         jobs=(ROOT/'common/devices/lemonade-metal-system.rc.jobs').read_bytes().replace(b'/redwood/bin/metal_props show\n',b'')
         tree['etc/base-validation.jobs']=(0o100644,0,0,jobs)
-        job={'Label':'com.lemonade.base-graphics-validation','RunAtLoad':True,
+        job={'Label':'com.lemonade.base-graphics-validation','RunAtLoad':True,'ProcessType':'Interactive',
              'ProgramArguments':['/redwood/sbin/init','/redwood/etc/base-validation.jobs'],
              'StandardOutPath':'/dev/console','StandardErrorPath':'/dev/console'}
         tree['LaunchDaemons/com.lemonade.base-graphics-validation.plist']=(0o100644,0,0,plistlib.dumps(job))
@@ -133,6 +133,8 @@ def main():
                 'wifi':'station','network_test':True,'dma_guard':guard,
                 'wifi_firmware':{'firmware':manifest['wifi_firmware'],'network_private':True,'network_reconnect_test':True},
                 'display':'direct','display_fences':True,'gpu_enabled':True,'touch':'on','performance_metrics':True,
+                'display_return_drain':manifest.get('display_return_drain',False),
+                'gpu_return_call_drain':manifest.get('gpu_return_call_drain',False),
                 'display_hz_requested':120,
                 'base_root_sha256':manifest['files']['root.apfs']['sha256'],'validation_root_sha256':build.digest(image),
                 'validation_added_paths':changed,'live_logs':[],'network_identity_redacted':True}
@@ -167,7 +169,7 @@ def main():
         (evidence/'combined-wifi-evidence.json').write_text(json.dumps(w,indent=2)+'\n')
         text=joined.decode(errors='replace')
         metal_checks={name: f'lemonade-metal: {name} summary checks={count} failed=0' in text
-                      for name,count in (('feature',101),('MPS',2),('CA',4))}
+                      for name,count in (('feature',103),('MPS',2),('CA',4))}
         acceptance={'passed':d['passed'] and w['passed'] and all(metal_checks.values()) and
                     'init: runtime setup complete; failures=0' in text and '=== 36 checks' not in text,
                     'kernel_sha256':record['kernel_sha256'],'base_root_sha256':record['base_root_sha256'],

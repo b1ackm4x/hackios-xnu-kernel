@@ -51,6 +51,35 @@ class DirectEvidence(unittest.TestCase):
         self.assertTrue(result['passed'], result)
         self.assertEqual(result['completed_direct_frames'], 120)
 
+    def test_gpu_shutdown_requires_prior_successful_display_drain(self):
+        drain='MiniIOMobileFramebuffer: return drain completed=1 queued=0 reading=0\n'
+        stop='adreno: the run is about to end: the GPU is given back\n'
+        r,raw=fixture();r['display_return_drain']=True
+        self.assertTrue(self.check(r,raw+b'\n'+(drain+stop).encode())['passed'])
+        self.assertTrue(self.check(r,raw+b'\n'+(drain.replace('reading=0','reading=0 displaying=0')+stop).encode())['passed'])
+        for text in (stop+drain, stop, drain, drain.replace('completed=1','completed=0')+stop,
+                     drain.replace('queued=0','queued=1')+stop, drain.replace('reading=0','reading=1')+stop,
+                     drain.replace('reading=0','reading=0 displaying=1')+stop,
+                     drain+stop+'RedwoodGPU: display return drain timed out'):
+            with self.subTest(text=text):
+                self.assertFalse(self.check(r,raw+b'\n'+text.encode())['checks']['display_drained_before_gpu_stop'])
+
+    def test_gpu_return_admission_drain_and_process_exit_are_required(self):
+        calls='RedwoodGPU: return calls drained=1 active=0 parked=1\n'
+        drain='MiniIOMobileFramebuffer: return drain completed=1 queued=0 reading=0\n'
+        stop='adreno: the run is about to end: the GPU is given back\n'
+        r,raw=fixture();r['gpu_return_call_drain']=True
+        self.assertTrue(self.check(r,raw+b'\n'+(calls+drain+stop).encode())['passed'])
+        self.assertTrue(self.check(r,raw+b'\n'+(calls+drain.replace('reading=0','reading=0 displaying=0')+stop).encode())['passed'])
+        for text in (drain+stop, drain+calls+stop, calls+stop+drain,
+                     calls.replace('active=0','active=1')+drain+stop,
+                     calls+drain.replace('reading=0','reading=0 displaying=1')+stop,
+                     calls+drain+stop+'MiniIOMobileFramebuffer: composite scanout failed',
+                     calls+drain+stop+'exited due to SIGSEGV',
+                     calls+drain+stop+'redwood: signal 11 at 0x18'):
+            with self.subTest(text=text):
+                self.assertFalse(self.check(r,raw+b'\n'+text.encode())['checks']['gpu_calls_drained_and_userspace_exit_clean'])
+
     def test_missing_intermediate_frame_cannot_pass_as_timed_return(self):
         r, raw = fixture()
         raw = b'\n'.join(line for line in raw.splitlines() if not line.startswith((b'tl: q 70 ', b'tl: v 70 ', b'tl: r 70 ', b'tl: wr 70 ')))

@@ -16,16 +16,22 @@ CC=(xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding -fno-stack-protec
 xnu-clang -arch arm64 -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" -Os \
     -Wall -Wextra -Werror -framework CoreFoundation -framework IOKit \
     -o "$OUT/metal-enable" tools/lemonade-metal-enable.c
+xnu-clang -arch arm64 -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" -O1 -fobjc-arc \
+    -Wall -Wextra -Werror -dynamiclib -install_name /redwood/lib/libredwood-safari-refresh.dylib \
+    -framework Foundation -framework WebKit -framework IOKit -lobjc \
+    -o "$OUT/libredwood-safari-refresh.dylib" userland/src/lemonade_safari_refresh.m
+"$THEOS/toolchain/linux/iphone/bin/ldid" -S "$OUT/libredwood-safari-refresh.dylib"
 python3 - <<'PY'
 import hashlib,json,struct
 from pathlib import Path
 out=Path('out/lemonade-base-runtime')
 sources=['userland/src/init.c','userland/libmini/mini.c','userland/libmini/mini.h',
-         'userland/libmini/start.S','tools/lemonade-metal-enable.c','tools/lemonade-build-base-runtime.sh']
+         'userland/libmini/start.S','tools/lemonade-metal-enable.c','tools/lemonade-build-base-runtime.sh',
+         'userland/src/lemonade_safari_refresh.m']
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 artifacts={}
-for name in ('init','metal-enable'):
- p=out/name;b=p.read_bytes();assert struct.unpack_from('<4I',b)==(0xfeedfacf,0x100000c,0,2)
+for name in ('init','metal-enable','libredwood-safari-refresh.dylib'):
+ p=out/name;b=p.read_bytes();assert struct.unpack_from('<4I',b)==(0xfeedfacf,0x100000c,0,6 if name.endswith('.dylib') else 2)
  artifacts[name]={'sha256':digest(p),'bytes':len(b)}
 for marker in (b'64 MB of anonymous memory',b'read a 300 KB file',b'run a program through dyld',b'300 files in one directory'):
  assert marker not in (out/'init').read_bytes(),marker

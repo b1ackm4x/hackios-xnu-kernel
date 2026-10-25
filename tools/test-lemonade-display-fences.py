@@ -53,7 +53,8 @@ using IOReturn = uint32_t;
 using AbsoluteTime = uint64_t;
 constexpr IOReturn kIOReturnSuccess = 0, kIOReturnBadArgument = 0xe00002c2,
     kIOReturnNotOpen = 0xe00002cd, kIOReturnBusy = 0xe00002d5,
-    kIOReturnTimeout = 0xe00002d6, kIOReturnAborted = 0xe00002eb;
+    kIOReturnTimeout = 0xe00002d6, kIOReturnAborted = 0xe00002eb,
+    kIOReturnNotReady = 0xe00002d8;
 struct IOLock { bool held = false; };
 static uint64_t now, lastDeadline;
 static unsigned sleeps, wakes, drops, kept, shown, copies, cancelled, unregistered;
@@ -102,13 +103,16 @@ public:
     MiniIOSurface *fSwapSurfaces[SWAP_QUEUE][SWAP_LAYERS] = {};
     unsigned fSwapFirst = 0, fSwapsWaiting = 0;
     uint32_t fReadingSwapID = 0;
-    bool fReadingSwap = false;
+    bool fReadingSwap = false, fStopping = false;
+    bool fScanoutPending = false;
+    uint32_t fScanoutSwapID = 0;
     uint32_t fFenceGeneration = 0, fStatSwapsLate = 0, fStatHeld = 0, fStatLost = 0;
     uint64_t fSwapTime = 0;
     bool swapPending(uint32_t, uint32_t);
     IOReturn waitSwap(uint32_t, uint32_t, uint32_t, const bool *);
     void finishSwap();
-    void present(const uint8_t *);
+    IOReturn present(const uint8_t *);
+    bool stopForReturn();
     void presenter();
     bool show(const uint8_t *, MiniIOSurface **);
 };
@@ -143,11 +147,11 @@ bool IOMobileFramebuffer::show(const uint8_t *swap, MiniIOSurface **surfaces) {
     shown++;
     return showSafe;
 }
-static void queue(IOMobileFramebuffer &f, unsigned id, unsigned sid = 1) {
+static IOReturn queue(IOMobileFramebuffer &f, unsigned id, unsigned sid = 1) {
     uint8_t swap[SWAP_SIZE] = {};
     memcpy(swap + SWAP_ID, &id, sizeof(id));
     memcpy(swap + SWAP_SURFACE(0), &sid, sizeof(sid));
-    f.present(swap);
+    return f.present(swap);
 }
 static void runPresenter(IOMobileFramebuffer &f) {
     try { f.presenter(); assert(false); } catch (const EndPresenter &) {}
@@ -195,6 +199,14 @@ int main() {
     assert(f.waitSwap(0,0x80000002u,0,&open)==kIOReturnSuccess);
     puts("PASS wrapped IDs, wrapped queue and drain include every outstanding frame");
 
+    f.fScanoutPending=true; f.fScanoutSwapID=19;
+    expectBusy(f,19);
+    assert(f.waitSwap(18,0x80000000u,0,&open)==kIOReturnSuccess);
+    onSleep=[&] {f.fScanoutPending=false;return 0;};
+    assert(f.waitSwap(19,0,9,&open)==kIOReturnSuccess);
+    onSleep=nullptr;
+    puts("PASS a copied frame remains pending until its owned display buffer finishes scanning");
+
     queue(f,22);
     unsigned oldSleeps=sleeps;
     onSleep=[&] { runPresenter(f); return 0; };
@@ -228,6 +240,46 @@ int main() {
     runPresenter(f);
     assert(copies==drops);
     puts("PASS interruption and actual clientClose wake waits without releasing active sources");
+
+    {
+        IOLock drainLock; IOMobileFramebuffer draining{}; draining.fSwapLock=&drainLock;
+        queue(draining,51); queue(draining,52);
+        unsigned oldCopies=copies;
+        onSleep=[&] {
+            assert(queue(draining,53)==kIOReturnNotReady && copies==oldCopies);
+            runPresenter(draining); return 0;
+        };
+        assert(draining.stopForReturn() && draining.fStopping && !drainLock.held);
+        assert(!draining.fReadingSwap && !draining.fSwapsWaiting && copies==drops);
+        assert(queue(draining,54)==kIOReturnNotReady && copies==oldCopies);
+        onSleep=nullptr;
+    }
+    puts("PASS shutdown rejects new frames and waits for actual presentation and source release");
+    {
+        IOLock drainLock; IOMobileFramebuffer draining{}; draining.fSwapLock=&drainLock;
+        queue(draining,61); queue(draining,62);
+        unsigned oldCopies=copies;
+        bool insideStop=false;
+        onSleep=[&] {
+            if(insideStop) {runPresenter(draining);return 0;}
+            insideStop=true;
+            assert(draining.stopForReturn()); return 0;
+        };
+        assert(queue(draining,63)==kIOReturnNotReady && copies==oldCopies && copies==drops);
+        assert(!drainLock.held); onSleep=nullptr;
+    }
+    puts("PASS producer already blocked on a full queue wakes into shutdown without adding a frame");
+    {
+        IOLock drainLock; IOMobileFramebuffer draining{}; draining.fSwapLock=&drainLock;
+        queue(draining,71); unsigned oldDrops=drops; uint64_t began=now;
+        assert(!draining.stopForReturn() && now-began==2000ull*1000000);
+        assert(draining.fSwapsWaiting==1 && drops==oldDrops && surface[1].refs==1);
+        expectBusy(draining,71);
+        assert(queue(draining,72)==kIOReturnNotReady);
+        runPresenter(draining);
+        assert(draining.stopForReturn() && copies==drops);
+    }
+    puts("PASS bounded shutdown timeout keeps pending surfaces and never fabricates completion");
     showSafe=false;
     queue(f,25);
     unsigned oldDrops=drops, oldKept=kept;
@@ -235,6 +287,7 @@ int main() {
     assert(f.fReadingSwap && f.fReadingSwapID==25 && surface[1].refs==1);
     assert(drops==oldDrops && kept==oldKept);
     expectBusy(f,25);
+    assert(!f.stopForReturn() && f.fReadingSwap && surface[1].refs==1 && drops==oldDrops);
     puts("PASS failed hardware completion retains the actual source and withholds producer release");
     return 0;
 }
@@ -244,7 +297,7 @@ int main() {
 def main():
     source = (ROOT / 'xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp').read_text()
     names = ['swapWord', *(f'IOMobileFramebuffer::{n}' for n in
-             ('swapPending', 'waitSwap', 'finishSwap', 'present', 'presenter')),
+             ('swapPending', 'waitSwap', 'finishSwap', 'stopForReturn', 'present', 'presenter')),
              'IOMobileFramebufferUserClient::clientClose']
     gpu = (ROOT / 'xnu/files/iokit/Kernel/RedwoodGPU.cpp').read_text()
     generated = PRELUDE + '\n' + method(gpu, 'MiniIOSurfaceDrawn') + '\n' + '\n'.join(method(source, n) for n in names) + TESTS

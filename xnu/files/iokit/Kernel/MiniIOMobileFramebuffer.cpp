@@ -155,6 +155,7 @@ static TUNABLE(uint32_t, gDiff, "fb_diff", 0);
  * panel is worked out from the four of the picture around where it falls (bilinear).
  */
 static TUNABLE(uint32_t, gFilter, "fb_filter", 1);
+/* Keep a same-kernel A/B control while validating the unscaled compositor. */
 static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
 /*
@@ -240,6 +241,12 @@ public:
 	uint32_t        fPanelWidth, fPanelHeight, fRowBytes;
 	uint32_t        fWidth, fHeight;        /* the display as user space sees it */
 	MiniIOSurface * fDefaultSurface;
+	MiniIOSurface * fCompositeSurface;      /* owned until return; reused only after DPU completion */
+	MiniIOSurface * fCompositeSpare;        /* next CPU target while the other buffer is scanned */
+	MiniIOSurface * fScanoutSurface;        /* protected by fSwapLock; both buffers live until return */
+	uint32_t        fScanoutSwapID;
+	uint64_t        fScanoutReady;
+	bool            fScanoutStarted, fScanoutPending, fScanoutFailed;
 	uint32_t        fSwapID;
 	uint32_t        fSwapsShown;
 	uint32_t        fLayersShown;           /* which layers the last swap had a surface in */
@@ -260,6 +267,7 @@ public:
 	unsigned        fSwapFirst, fSwapsWaiting;
 	uint32_t        fReadingSwapID;         /* dequeuing a swap does not finish reading its surfaces */
 	bool            fReadingSwap;
+	bool            fStopping;             /* no new frames while draining for GPU shutdown */
 	uint32_t        fFenceGeneration;       /* wait event: all waiters recheck their own condition */
 	/*
 	 * ... and not whenever the GPU happens to be done, but on a beat of the refresh rate
@@ -307,7 +315,8 @@ public:
 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
 	void publishModes(void);
 	MiniIOSurface * defaultSurface(void);
-	void present(const uint8_t * swap);
+	IOReturn present(const uint8_t * swap);
+	bool stopForReturn(void);
 	bool swapPending(uint32_t id, uint32_t mode); /* fSwapLock held */
 	IOReturn waitSwap(uint32_t id, uint32_t flags, uint32_t timeoutMS, const bool * closed);
 	void finishSwap(void);
@@ -315,7 +324,12 @@ public:
 	void presenter(void);
 	static void presenterMain(void * self, wait_result_t result);
 	void reportFrameTimes(void);
-	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst);
+	void drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst, MiniIOSurface * target = NULL, bool over = false);
+	int composite(const uint8_t * swap, MiniIOSurface ** surfaces);
+	bool queueComposite(MiniIOSurface * surface, uint32_t swapID);
+	bool waitScanout(void);
+	void scanout(void);
+	static void scanoutMain(void * self, wait_result_t result);
 	void drawRows(const struct RowJob * job, int32_t y0, int32_t y1, uint32_t * blendRow);
 	static void helperMain(void * self, wait_result_t result);
 	/* the scaling shared out (fb_threads): fThreads drawers, the presenter and fThreads - 1 helpers */
@@ -330,6 +344,14 @@ public:
 
 OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
 static IOMobileFramebuffer * gRegisteredFramebuffer;
+
+/* Thread context, before RedwoodGPUStop takes the GPU lock. Existing frames
+ * still need that lock and a live GPU to finish their producer fences. */
+extern "C" bool
+MiniIOMobileFramebufferStop(void)
+{
+	return !gRegisteredFramebuffer || gRegisteredFramebuffer->stopForReturn();
+}
 
 /* Called in thread context after a measured panel transition, never from the
  * panic/return transaction. The early framebuffer remains 60 Hz until then. */
@@ -438,6 +460,11 @@ IOMobileFramebuffer::start(IOService * provider)
 	}
 	thread_set_thread_name(thread, "frames to the panel");
 	thread_deallocate(thread);
+	if (kernel_thread_start(&IOMobileFramebuffer::scanoutMain, this, &thread) == KERN_SUCCESS) {
+		thread_set_thread_name(thread, "composited frames to the panel");
+		thread_deallocate(thread);
+		fScanoutStarted = true;
+	} else IOLog("MiniIOMobileFramebuffer: no scanout worker; keeping synchronous composition\n");
 	fThreads = gThreads >= 1 && gThreads <= 8 ? gThreads : 1;
 	fHelperLock = IOLockAlloc();
 	for (unsigned i = 0; i + 1 < fThreads; i++) {
@@ -470,8 +497,9 @@ IOMobileFramebuffer::start(IOService * provider)
 			}
 		}
 	}
-	fColumn = IONewZero(uint32_t, fPanelWidth);
-	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
+	uint32_t columns = fWidth > fPanelWidth ? fWidth : fPanelWidth;
+	fColumn = IONewZero(uint32_t, columns);
+	fColumnWeight = IONewZero(uint16_t, columns);
 	fDiff = gDiff != 0;
 	fDiffLeft = fDiffTop = ~0u;
 	IOLog("MiniIOMobileFramebuffer: display %ux%u on a panel of %ux%u (%u bytes per row)\n", fWidth, fHeight,
@@ -603,6 +631,39 @@ blend(uint32_t a, uint32_t b, uint32_t w)
 	return rb | ga;
 }
 
+/* Premultiplied BGRA source-over, rounded to the nearest 8-bit channel. */
+static inline uint32_t
+source_over(uint32_t source, uint32_t destination)
+{
+	uint32_t alpha = source >> 24;
+	if (alpha == 255) return source;
+	if (alpha == 0) return destination;
+	uint32_t inverse = 255 - alpha, result = 0;
+	for (unsigned shift = 0; shift < 32; shift += 8) {
+		uint32_t channel = ((source >> shift) & 255) + (((destination >> shift) & 255) * inverse + 127) / 255;
+		result |= (channel > 255 ? 255 : channel) << shift;
+	}
+	return result;
+}
+
+/* Unscaled layers need no interpolation. Detect opaque/transparent blocks so
+ * large solid UI regions use copies or no stores at all. Mixed blocks retain
+ * the same premultiplied source-over arithmetic, including fractional alpha. */
+static void
+source_over_row(uint32_t *out, const uint32_t *in, uint32_t count)
+{
+	uint32_t i = 0;
+	for (; count - i >= 8; i += 8) {
+		uint32_t all = ~0u, any = 0;
+		for (unsigned j = 0; j < 8; j++) { all &= in[i+j]; any |= in[i+j]; }
+		if ((all >> 24) == 255) memcpy(out+i, in+i, 8*sizeof(uint32_t));
+		else if (any >> 24) {
+			for (unsigned j = 0; j < 8; j++) out[i+j] = source_over(in[i+j], out[i+j]);
+		}
+	}
+	for (; i < count; i++) out[i] = source_over(in[i], out[i]);
+}
+
 /*
  * Where the middle of the `i`th of `out` pixels falls among `in` of them, in 256ths of a pixel,
  * kept within the first and the last.
@@ -623,8 +684,10 @@ sample_at(int64_t i, int64_t in, int64_t out)
 struct RowJob {
 	const uint8_t * pixels;
 	uint32_t        stride;
-	int32_t         sx, sy, sw, sh, px0, py0, px1, py1, cx0, cx1;
-	bool            filter, unscaled;
+	int32_t         sx, sy, sw, sh, px0, py0, px1, py1, cx0, cx1, row0, row1;
+	bool            filter, unscaled, over;
+	uint8_t *       output;
+	uint32_t        outputStride, outputHeight;
 };
 
 void
@@ -640,17 +703,22 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 		const uint32_t * from;
 		uint32_t * to;
 
-		if (y < 0 || (uint32_t) y >= fPanelHeight) {
+		if (y < 0 || (uint32_t) y >= job->outputHeight) {
 			continue;
 		}
-		to = (uint32_t *) (fBase + (size_t) y * fRowBytes);
-		if (job->unscaled) {
+		to = (uint32_t *) (job->output + (size_t) y * job->outputStride);
+		if (job->unscaled && job->over && !fDiff) {
+			from = (const uint32_t *)(pixels + (size_t)(sy + y - py0) * stride) + sx;
+			source_over_row(to + px0, from, (uint32_t)sw);
+			continue;
+		}
+		if (job->unscaled && !job->over) {
 			/* not scaled at all */
 			memcpy(to + px0, pixels + (size_t) (sy + y - py0) * stride + (size_t) sx * 4, (size_t) sw * 4);
 			continue;
 		}
 		if (filter) {
-			int64_t at = sample_at(y - py0, sh, py1 - py0);
+			int64_t at = sample_at((int64_t) y - py0, sh, py1 - py0);
 			uint32_t row = (uint32_t) (at >> 8), weight = (uint32_t) (at & 255);
 			const uint32_t * upper = (const uint32_t *) (pixels + (size_t) (sy + row) * stride) + sx;
 
@@ -670,7 +738,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 				from = blendRow;
 			}
 		} else {
-			from = (const uint32_t *) (pixels + (size_t) (sy + (int64_t) (y - py0) * sh / (py1 - py0)) * stride);
+			from = (const uint32_t *) (pixels + (size_t) (sy + ((int64_t) y - py0) * sh / (py1 - py0)) * stride);
 		}
 		if (fDiff) {
 			for (int32_t x = cx0; x < cx1; x++) {
@@ -694,11 +762,13 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
 				uint32_t c = column[i], w = weights[i], a = from[c];
 
-				out[i] = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
+				uint32_t pixel = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
+				out[i] = job->over ? source_over(pixel, out[i]) : pixel;
 			}
 		} else {
 			for (int32_t x = cx0; x < cx1; x++) {
-				to[x] = from[fColumn[x]];
+				uint32_t pixel = from[fColumn[x]];
+				to[x] = job->over ? source_over(pixel, to[x]) : pixel;
 			}
 		}
 	}
@@ -733,9 +803,9 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
 		job = fb->fHelperJob;
 		IOLockUnlock(fb->fHelperLock);
 		/* share index + 1 of fThreads (the presenter takes share 0) */
-		rows = job->py1 - job->py0;
-		y0 = job->py0 + (int32_t) ((int64_t) rows * (index + 1) / fb->fThreads);
-		y1 = job->py0 + (int32_t) ((int64_t) rows * (index + 2) / fb->fThreads);
+		rows = job->row1 - job->row0;
+		y0 = job->row0 + (int32_t) ((int64_t) rows * (index + 1) / fb->fThreads);
+		y1 = job->row0 + (int32_t) ((int64_t) rows * (index + 2) / fb->fThreads);
 		blend = fb->fHelperBlend[index];
 		fb->drawRows(job, y0, y1, blend);
 		IOLockLock(fb->fHelperLock);
@@ -753,13 +823,15 @@ IOMobileFramebuffer::helperMain(void * self, wait_result_t result __unused)
  * step, bilinear (or nearest neighbour: fb_filter=0).
  */
 void
-IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst)
+IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int32_t * dst, MiniIOSurface * target, bool over)
 {
 	int32_t sx = src[0], sy = src[1], sw = src[2], sh = src[3];
 	int32_t dx = dst[0], dy = dst[1], dw = dst[2], dh = dst[3];
 	int32_t px0, py0, px1, py1, cx0, cx1;
 	bool filter = gFilter != 0;
 	RowJob job;
+	uint32_t outputWidth = target ? target->info.width : fPanelWidth;
+	uint32_t outputHeight = target ? target->info.height : fPanelHeight;
 
 	if (sw <= 0 || sh <= 0) {
 		sx = sy = 0;
@@ -771,17 +843,25 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 		dw = (int32_t) fWidth;
 		dh = (int32_t) fHeight;
 	}
-	if (sx < 0 || sy < 0 || (uint32_t) (sx + sw) > s->info.width || (uint32_t) (sy + sh) > s->info.height) {
+	if (sx < 0 || sy < 0 || (uint64_t) sx + (uint32_t) sw > s->info.width || (uint64_t) sy + (uint32_t) sh > s->info.height) {
 		return;
 	}
 	/* the rectangle on the panel */
-	px0 = (int32_t) ((int64_t) dx * fPanelWidth / fWidth);
-	py0 = (int32_t) ((int64_t) dy * fPanelHeight / fHeight);
-	px1 = (int32_t) ((int64_t) (dx + dw) * fPanelWidth / fWidth);
-	py1 = (int32_t) ((int64_t) (dy + dh) * fPanelHeight / fHeight);
-	if (px1 <= px0 || py1 <= py0) {
-		return;
-	}
+	int64_t bounds[4] = { (int64_t) dx * outputWidth / fWidth,
+	    (int64_t) dy * outputHeight / fHeight,
+	    ((int64_t) dx + dw) * outputWidth / fWidth,
+	    ((int64_t) dy + dh) * outputHeight / fHeight };
+	for (unsigned n = 0; n < 4; n++)
+		if (bounds[n] < -0x80000000LL || bounds[n] > 0x7fffffffLL) return;
+	px0 = (int32_t) bounds[0]; py0 = (int32_t) bounds[1];
+	px1 = (int32_t) bounds[2]; py1 = (int32_t) bounds[3];
+	if (px1 <= px0 || py1 <= py0 || (int64_t) px1 - px0 > 0x7fffffffLL ||
+	    (int64_t) py1 - py0 > 0x7fffffffLL) return;
+	cx0 = px0 < 0 ? 0 : px0;
+	cx1 = px1 > (int32_t) outputWidth ? (int32_t) outputWidth : px1;
+	int32_t row0 = py0 < 0 ? 0 : py0;
+	int32_t row1 = py1 > (int32_t) outputHeight ? (int32_t) outputHeight : py1;
+	if (cx0 >= cx1 || row0 >= row1) return;
 	/* (blending, a row of the picture mixed from two: room for it, for every one who draws rows) */
 	if (filter && fBlendRowSize < (uint32_t) sw) {
 		if (fBlendRow != NULL) {
@@ -807,18 +887,21 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	}
 	filter = filter && fBlendRow != NULL;
 	/* which pixel of a source row each pixel of a panel row takes: worked out once, not 2.6 million times */
-	cx0 = px0 < 0 ? 0 : px0;
-	cx1 = (uint32_t) px1 > fPanelWidth ? (int32_t) fPanelWidth : px1;
 	for (int32_t x = cx0; x < cx1; x++) {
 		if (filter) {
-			int64_t at = sample_at(x - px0, sw, px1 - px0);
+			int64_t at = sample_at((int64_t) x - px0, sw, px1 - px0);
 
 			fColumn[x] = (uint32_t) (at >> 8);              /* (in the blended row: from sx on) */
 			fColumnWeight[x] = (uint16_t) (fColumn[x] + 1 < (uint32_t) sw ? at & 255 : 0);
 		} else {
-			fColumn[x] = (uint32_t) (sx + (int64_t) (x - px0) * sw / (px1 - px0));
+			fColumn[x] = (uint32_t) (sx + ((int64_t) x - px0) * sw / (px1 - px0));
 		}
 	}
+	job.output = target ? target->pixels() : fBase;
+	job.outputStride = target ? target->info.bytesPerRow : fRowBytes;
+	job.outputHeight = outputHeight;
+	job.over = over;
+	job.row0 = row0; job.row1 = row1;
 	job.pixels = s->pixels();
 	job.stride = s->info.bytesPerRow;
 	job.sx = sx;
@@ -832,9 +915,9 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	job.cx0 = cx0;
 	job.cx1 = cx1;
 	job.filter = filter;
-	job.unscaled = px1 - px0 == sw && py1 - py0 == sh && px0 >= 0 && (uint32_t) px1 <= fPanelWidth;
+	job.unscaled = px1 - px0 == sw && py1 - py0 == sh && px0 >= 0 && (uint32_t) px1 <= outputWidth;
 	if (fThreads <= 1 || fDiff || fHelpersStarted + 1 < fThreads) {
-		drawRows(&job, py0, py1, fBlendRow);
+		drawRows(&job, row0, row1, fBlendRow);
 		return;
 	}
 	/* shared out: the helpers take their rows, this thread the first share, then waits for them */
@@ -844,12 +927,157 @@ IOMobileFramebuffer::drawLayer(MiniIOSurface * s, const int32_t * src, const int
 	fHelperGeneration++;
 	IOLockWakeup(fHelperLock, &fHelperGeneration, false);
 	IOLockUnlock(fHelperLock);
-	drawRows(&job, py0, py0 + (int32_t) ((int64_t) (py1 - py0) / fThreads), fBlendRow);
+	drawRows(&job, row0, row0 + (row1 - row0) / (int32_t) fThreads, fBlendRow);
 	IOLockLock(fHelperLock);
 	while (fHelpersBusy != 0) {
 		IOLockSleep(fHelperLock, &fHelpersBusy, THREAD_UNINT);
 	}
 	IOLockUnlock(fHelperLock);
+}
+
+/* Compose compatible layers in logical display coordinates, then use the same
+ * measured DPU path as a single surface. No firmware framebuffer or 60 Hz switch.
+ * show() has already waited for every producer fence and retains all sources. */
+int
+IOMobileFramebuffer::composite(const uint8_t * swap, MiniIOSurface ** surfaces)
+{
+	if (fWidth != 1125 || fHeight != 2436 || !fColumn || !fColumnWeight) return 0;
+	unsigned layers = 0;
+	for (unsigned n = 0; n < SWAP_LAYERS; n++) {
+		MiniIOSurface * s = surfaces[n];
+		if (!swapWord(swap, SWAP_SURFACE(n))) continue;
+		if (!s || s->info.planeCount || s->info.bytesPerElement != 4 ||
+		    s->info.pixelFormat != FOURCC('B','G','R','A') || !s->info.width || !s->info.height ||
+		    (uint64_t) s->info.width * 4 > s->info.bytesPerRow || s->info.offset > s->info.allocSize ||
+		    (uint64_t) s->info.bytesPerRow * s->info.height > s->info.allocSize - s->info.offset) return 0;
+		layers++;
+	}
+	if (!layers) return 0;
+	/* The previous enqueue waited for the older transfer before starting the
+	 * newer one. Its other buffer is therefore free for this CPU composition. */
+	if (fScanoutStarted) {
+		MiniIOSurface *spare = fCompositeSpare;
+		fCompositeSpare = fCompositeSurface;
+		fCompositeSurface = spare;
+	}
+	if (!fCompositeSurface) fCompositeSurface = MiniIOSurfaceCreateSimple(fWidth, fHeight, FOURCC('B','G','R','A'));
+	if (!fCompositeSurface) return -1;
+	/* The full bottom layer overwrites every destination pixel. Clearing it
+	 * first needlessly writes another 11 MB and can miss the next TE. */
+	bool covered = false;
+	if (surfaces[0] && swapWord(swap, SWAP_SURFACE(0))) {
+		int32_t src[4], dst[4];
+		memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
+		memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
+		if (src[2] <= 0 || src[3] <= 0) {
+			src[0] = src[1] = 0; src[2] = surfaces[0]->info.width; src[3] = surfaces[0]->info.height;
+		}
+		if (dst[2] <= 0 || dst[3] <= 0) {
+			dst[0] = dst[1] = 0; dst[2] = fWidth; dst[3] = fHeight;
+		}
+		covered = src[0] >= 0 && src[1] >= 0 && src[2] > 0 && src[3] > 0 &&
+		    (uint64_t) src[0] + (uint32_t) src[2] <= surfaces[0]->info.width &&
+		    (uint64_t) src[1] + (uint32_t) src[3] <= surfaces[0]->info.height &&
+		    dst[0] == 0 && dst[1] == 0 && dst[2] == (int32_t) fWidth && dst[3] == (int32_t) fHeight;
+	}
+	/* Clear uncovered regions every frame, including after an overlay disappears. */
+	for (uint32_t y = 0; !covered && y < fHeight; y++) {
+		uint32_t * row = (uint32_t *) (fCompositeSurface->pixels() + (size_t) y * fCompositeSurface->info.bytesPerRow);
+		for (uint32_t x = 0; x < fWidth; x++) row[x] = 0xff000000;
+	}
+	for (unsigned n = 0; n < SWAP_LAYERS; n++) {
+		MiniIOSurface * s = surfaces[n];
+		if (!s || !swapWord(swap, SWAP_SURFACE(n))) continue;
+		int32_t src[4], dst[4];
+		memcpy(src, swap + SWAP_SOURCE(n), sizeof(src));
+		memcpy(dst, swap + SWAP_DEST(n), sizeof(dst));
+		drawLayer(s, src, dst, fCompositeSurface, n != 0);
+	}
+	if (!fGraphics) {
+		fGraphics = true;
+		PE_initialize_console(NULL, kPEGraphicsMode);
+	}
+	return fScanoutStarted ? (queueComposite(fCompositeSurface, swapWord(swap, SWAP_ID)) ? 1 : -1) :
+	    lemonade_display_direct_present(fCompositeSurface->pixels(),
+	    fCompositeSurface->info.allocSize - fCompositeSurface->info.offset,
+	    fCompositeSurface->info.bytesPerRow, fCompositeSurface->sid, swapWord(swap, SWAP_ID));
+}
+
+/* Serialize access to the DPU without serializing CPU composition with DMA.
+ * SwapWait and shutdown still include the actual in-flight hardware frame. */
+bool
+IOMobileFramebuffer::waitScanout(void)
+{
+	AbsoluteTime deadline;
+	clock_interval_to_deadline(SWAP_WAIT_MS, kMillisecondScale, &deadline);
+	IOLockLock(fSwapLock);
+	while (fScanoutPending && !fScanoutFailed) {
+		if (mach_absolute_time() >= deadline) break;
+		IOLockSleepDeadline(fSwapLock, &fFenceGeneration, deadline, THREAD_UNINT);
+	}
+	bool done = !fScanoutPending && !fScanoutFailed;
+	IOLockUnlock(fSwapLock);
+	return done;
+}
+
+bool
+IOMobileFramebuffer::queueComposite(MiniIOSurface * surface, uint32_t swapID)
+{
+	uint64_t ready = mach_absolute_time();
+	if (!waitScanout()) return false;
+	IOLockLock(fSwapLock);
+	fScanoutSurface = surface;
+	fScanoutSwapID = swapID;
+	fScanoutReady = ready;
+	fScanoutPending = true;
+	IOLockWakeup(fSwapLock, &fScanoutPending, true);
+	IOLockUnlock(fSwapLock);
+	return true;
+}
+
+void
+IOMobileFramebuffer::scanoutMain(void * self, wait_result_t result __unused)
+{
+	((IOMobileFramebuffer *) self)->scanout();
+}
+
+void
+IOMobileFramebuffer::scanout(void)
+{
+	for (;;) {
+		IOLockLock(fSwapLock);
+		while (!fScanoutPending || fScanoutFailed)
+			IOLockSleep(fSwapLock, &fScanoutPending, THREAD_UNINT);
+		MiniIOSurface *surface = fScanoutSurface;
+		uint32_t swapID = fScanoutSwapID;
+		uint64_t ready = fScanoutReady;
+		IOLockUnlock(fSwapLock);
+		uint64_t began = mach_absolute_time();
+		int result = lemonade_display_direct_present(surface->pixels(),
+		    surface->info.allocSize - surface->info.offset, surface->info.bytesPerRow, surface->sid, swapID);
+		uint64_t done = mach_absolute_time();
+		if (result == 1) {
+			if (gTouchLat) redwood_tl("tl: v %u ready %llu shown %llu done %llu\n",
+			    swapID, micros(ready), micros(began), micros(done));
+			/* Capture only after physical DMA completion, before this owned
+			 * buffer can be returned to the CPU compositor. */
+			record(surface);
+		} else {
+			IOLog("MiniIOMobileFramebuffer: composite scanout failed swap=%u result=%d; buffer and fence retained\n", swapID, result);
+		}
+		IOLockLock(fSwapLock);
+		if (result == 1) {
+			fScanoutPending = false;
+			/* Either this worker or finishSwap is last. Emit retirement
+			 * only after both the source holds and hardware read are done. */
+			if (gFences && gTouchLat && !(fReadingSwap && fReadingSwapID == swapID))
+				redwood_tl("tl: r %u at %llu\n", swapID, micros(mach_absolute_time()));
+		}
+		else fScanoutFailed = true;
+		fFenceGeneration++;
+		IOLockWakeup(fSwapLock, &fFenceGeneration, false);
+		IOLockUnlock(fSwapLock);
+	}
 }
 
 /*
@@ -900,6 +1128,7 @@ IOMobileFramebuffer::reportFrameTimes(void)
 bool
 IOMobileFramebuffer::swapPending(uint32_t id, uint32_t mode)
 {
+	if (fScanoutPending && (mode == 2 || fScanoutSwapID == id)) return true;
 	if (fReadingSwap && (mode == 2 || fReadingSwapID == id)) return true;
 	for (unsigned i = 0; i < fSwapsWaiting; i++) {
 		unsigned slot = (fSwapFirst + i) % SWAP_QUEUE;
@@ -944,15 +1173,37 @@ void
 IOMobileFramebuffer::finishSwap(void)
 {
 	IOLockLock(fSwapLock);
-	if (gFences && gTouchLat) redwood_tl("tl: r %u at %llu\n", fReadingSwapID, micros(mach_absolute_time()));
+	if (gFences && gTouchLat && !(fScanoutPending && fScanoutSwapID == fReadingSwapID))
+		redwood_tl("tl: r %u at %llu\n", fReadingSwapID, micros(mach_absolute_time()));
 	fReadingSwap = false;
 	fFenceGeneration++;
 	IOLockWakeup(fSwapLock, &fFenceGeneration, false);
 	IOLockUnlock(fSwapLock);
 }
 
+bool
+IOMobileFramebuffer::stopForReturn(void)
+{
+	AbsoluteTime deadline;
+	clock_interval_to_deadline(2000, kMillisecondScale, &deadline);
+	IOLockLock(fSwapLock);
+	fStopping = true;
+	IOLockWakeup(fSwapLock, &fSwapsWaiting, false);
+	while (fSwapsWaiting || fReadingSwap || fScanoutPending) {
+		if (mach_absolute_time() >= deadline) break;
+		IOLockSleepDeadline(fSwapLock, &fFenceGeneration, deadline, THREAD_UNINT);
+	}
+	bool drained = !fSwapsWaiting && !fReadingSwap && !fScanoutPending;
+	redwood_tl("MiniIOMobileFramebuffer: return drain completed=%u queued=%u reading=%u displaying=%u\n",
+	    drained, fSwapsWaiting, fReadingSwap, fScanoutPending);
+	IOLockUnlock(fSwapLock);
+	/* On timeout retain every source and its pending fence; never manufacture
+	 * retirement just to let shutdown proceed. The final kernel return owns them. */
+	return drained;
+}
+
 /* SwapEnd: the swap is handed to the thread that puts frames on the panel, as soon as that has no other waiting. */
-void
+IOReturn
 IOMobileFramebuffer::present(const uint8_t * swap)
 {
 	AbsoluteTime deadline;
@@ -967,17 +1218,19 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 		redwood_tl("tl: s %u at %llu\n", swapWord(swap, SWAP_ID), micros(now));
 	}
 	IOLockLock(fSwapLock);
+	if (fStopping) { IOLockUnlock(fSwapLock); return kIOReturnNotReady; }
 	fStatSwapsLate += fSwapTime != 0 && now - fSwapTime > period && now - fSwapTime < pause;
 	fSwapTime = now;
 	fStatHeld += fSwapsWaiting >= swapQueue();
-	while (fSwapsWaiting >= swapQueue()) {
+	while (!fStopping && fSwapsWaiting >= swapQueue()) {
 		if (IOLockSleepDeadline(fSwapLock, &fSwapsWaiting, deadline, THREAD_UNINT) == THREAD_TIMED_OUT &&
-		    fSwapsWaiting >= swapQueue()) {
+		    !fStopping && fSwapsWaiting >= swapQueue()) {
 			fStatLost++;                    /* (the GPU has stopped answering: the frame before is waiting for it) */
 			IOLockUnlock(fSwapLock);
-			return;
+			return kIOReturnTimeout;
 		}
 	}
+	if (fStopping) { IOLockUnlock(fSwapLock); return kIOReturnNotReady; }
 	unsigned slot = (fSwapFirst + fSwapsWaiting) % SWAP_QUEUE;
 
 	memcpy(fSwap[slot], swap, SWAP_SIZE);
@@ -990,6 +1243,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 	if (gFences && gTouchLat) redwood_tl("tl: q %u at %llu\n", swapWord(swap, SWAP_ID), micros(mach_absolute_time()));
 	IOLockWakeup(fSwapLock, fSwap, true);
 	IOLockUnlock(fSwapLock);
+	return kIOReturnSuccess;
 }
 
 void
@@ -1043,6 +1297,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	int hardwarePresent = 0;
 	bool direct = lemonade_display_direct_requested(), gpuReady = true;
 	int directPresent = 0;
+	bool asynchronousComposite = false;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
@@ -1116,6 +1371,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			eligible &= swapWord(swap, SWAP_SURFACE(n)) == 0;
 			blank &= swapWord(swap, SWAP_SURFACE(n)) == 0;
 		}
+		/* Single-surface and blank transfers use the same DPU registers as
+		 * the worker. Finish its last composite before changing the path. */
+		if ((eligible || blank) && !waitScanout()) { IOLockUnlock(fLock); return false; }
 		if (eligible) {
 			if (!fGraphics) {
 				fGraphics = true;
@@ -1124,7 +1382,15 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 			directPresent = lemonade_display_direct_present(s->pixels(), s->info.allocSize - s->info.offset,
 			    s->info.bytesPerRow, s->sid, swapWord(swap, SWAP_ID));
 		} else if (blank) directPresent = lemonade_display_direct_blank(swapWord(swap, SWAP_ID));
-		else directPresent = lemonade_display_direct_fallback();
+		else {
+			directPresent = composite(swap, surfaces);
+			asynchronousComposite = directPresent == 1 && fScanoutStarted;
+			if (directPresent == 1 && !asynchronousComposite) recorded = fCompositeSurface;
+			if (!directPresent) {
+				if (!waitScanout()) { IOLockUnlock(fLock); return false; }
+				directPresent = lemonade_display_direct_fallback();
+			}
+		}
 		if (directPresent < 0) { IOLockUnlock(fLock); return false; }
 		if (!directPresent) {
 			hardwarePresent = lemonade_display_present_begin(&hardwareWindow);
@@ -1180,7 +1446,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 				PE_initialize_console(NULL, kPEGraphicsMode);
 			}
 			if (directPresent != 1) drawLayer(s, src, dst);
-			if (layer == 0) {
+			if (layer == 0 && recorded == NULL && !asynchronousComposite) {
 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
 			}
 		}
@@ -1191,7 +1457,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		record(recorded);
 	}
 	fSwapsShown++;
-	if (gTouchLat) {
+	if (gTouchLat && !asynchronousComposite) {
 		redwood_tl("tl: v %u ready %llu shown %llu done %llu\n", swapWord(swap, SWAP_ID), micros(ready), micros(shown),
 		    micros(drawn));
 	}
@@ -1532,8 +1798,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
 			return kIOReturnBadArgument;
 		}
-		fOwner->present((const uint8_t *) args->structureInput);
-		return kIOReturnSuccess;
+		return fOwner->present((const uint8_t *) args->structureInput);
 
 	case kFBMethodSwapWait:
 		if (gFences && args->scalarInputCount < 3) return kIOReturnBadArgument;

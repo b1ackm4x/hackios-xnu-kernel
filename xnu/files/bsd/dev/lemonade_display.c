@@ -1237,6 +1237,22 @@ display_direct_unmap(void)
 	return !os_atomic_load(&display_stopping, acquire);
 }
 
+/* A compatibility frame restores the firmware's 60-Hz CPU path. Reacquiring
+ * direct scanout must also reacquire the requested panel rate; otherwise one
+ * temporary multilayer frame leaves every later Settings frame at 60 Hz. */
+static bool
+display_direct_resume(uint32_t pitch)
+{
+	if (display_map.direct_active) return true;
+	if (!display_direct_begin(pitch)) return false;
+	if (desktop_refresh_requested && display_hz != 120) {
+		if (!display_refresh_begin()) return false;
+		MiniIOMobileFramebufferRefreshChanged();
+		tell("lemonade-display: direct refresh recovered active_hz=%u\n", display_hz);
+	}
+	return !os_atomic_load(&display_stopping, acquire);
+}
+
 int
 lemonade_display_direct_present(const void *pixels, uint32_t available, uint32_t pitch, uint32_t sid, uint32_t swap)
 {
@@ -1246,7 +1262,7 @@ lemonade_display_direct_present(const void *pixels, uint32_t available, uint32_t
 	if (!address || (address & 4095) || (pitch != 4544 && pitch != 4608) || available < bytes ||
 	    address + bytes < address) return lemonade_display_direct_fallback();
 	uint64_t began = mach_absolute_time();
-	if (!display_map.direct_active && !display_direct_begin(pitch)) goto failed;
+	if (!display_direct_resume(pitch)) goto failed;
 	vm_offset_t mdp = display_map.mdp;
 	if (direct_pages || rd(mdp, INTF1_OFFSET + 0x2b4) != 1) goto failed;
 	unsigned size = (bytes + 4095) & ~4095u;

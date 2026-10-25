@@ -184,6 +184,11 @@ def main():
             p not in {'etc/rc.jobs', 'share/pattern.bin', *('LaunchDaemons/' + n + '.plist' for n in REMOVED_JOBS)}}
     tree['sbin/init'] = (0o100755, 0, 0, (runtime_dir / 'init').read_bytes())
     tree['bin/metal-enable'] = (0o100755, 0, 0, (runtime_dir / 'metal-enable').read_bytes())
+    tree['lib/libredwood-safari-refresh.dylib'] = (0o100755, 0, 0,
+        (runtime_dir / 'libredwood-safari-refresh.dylib').read_bytes())
+    mode, uid, gid, injection = tree['etc/inject.conf']
+    tree['etc/inject.conf'] = (mode, uid, gid,
+        injection.rstrip() + b'\n/redwood/lib/libredwood-safari-refresh.dylib MobileSafari\n')
     tree['etc/rc'] = (0o100644, 0, 0, b'/redwood/bin/metal-enable\nexec /sbin/launchd.ios\n')
     tree['etc/motd'] = (0o100644, 0, 0, ('OnePlus 9 base ' + args.version + '\n').encode())
     tree['lib/RedwoodMetal.bundle'] = (0o40755, 0, 0, b'')
@@ -229,6 +234,8 @@ def main():
 
 现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、默认 120 Hz DPU 直接显示、实体触控、QCA6490 Wi-Fi 与系统网络服务。
 
+本版本包含异步 Metal 提交、原生 Core Animation 帧时钟，以及双缓冲 BGRA 多层合成：下一帧合成与上一帧显示传输重叠，完成通知和退出排空仍等待真实硬件完成。Safari 在首次使用时关闭“优先 60 fps”的网页策略，之后可在 Safari 设置中改回；只在驱动实测 120 Hz 的 RAM 环境启用。具体真机验证结果记录在 manifest.json；应用实际帧率取决于负载。
+
 ## 使用
 
 Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接入并允许 USB 调试，双击 `Start.command`。首次上传系统到内存约两分钟，随后直接进入桌面。返回原 Android 双击 `Return-to-Android.command`。
@@ -247,6 +254,10 @@ Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副�
     manifest = {'profile': 'lemonade-base-v1', 'version': args.version, 'device': 'OnePlus 9 LE2110',
         'hardware_serial_sha256': baseline['hardware_serial_sha256'], 'boot_arguments': launch.BASE_ARGUMENTS,
         'default_display_hz': 120, 'refresh_panel': panel,
+        'display_return_drain': True,
+        'direct_refresh_recovery': True,
+        'direct_multilayer_composite': True, 'gpu_return_call_drain': True,
+        'direct_multilayer_pipeline': True,
         'automatic_tests': False, 'automatic_gestures': False, 'boot_self_tests': False,
         'debug_recording': False, 'timed_exit': False, 'credentials_included': False,
         'partition_writes': False, 'persistent_user_data': False,

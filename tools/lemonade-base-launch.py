@@ -11,9 +11,12 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-BASE_VERSION = '2026.10.25-base.1'
-BASE_ARGUMENTS = ('sb_delay=8 bootcpu=7 cpus=4 cpufreq=1 ddr=0 gpu=1 gpu_log=0 '
-    'metal=1 metal_profile=1 camtl=1 lemonade_display=10 lemonade_display_hz=120 lemonade_panel=655 ca_vbl=1 fb_fences=1 '
+BASE_VERSION = '2026.10.25-base.4'
+# Keep the iPhone X userland's native 120 Hz CADisplayTimer. Forced driver
+# notifications lose frames after asynchronous Metal submission; DPU TE and
+# producer fences still gate physical presentation (LEMONADE-BASE-120HZ.md).
+BASE_ARGUMENTS = ('sb_delay=8 bootcpu=7 cpus=4 cpufreq=1 ddr=0 gpu=1 gpu_log=0 adreno_speed=2 '
+    'metal=1 metal_profile=1 camtl=1 lemonade_display=10 lemonade_display_hz=120 lemonade_panel=655 ca_vbl=0 fb_fences=1 '
     'touchscreen=1 buttons=0 wifi=0 lemonade_wifi=24 lemonade_runtime=1 lemonade_dma_verified=1 '
     'adsp=0 ufs=0 ufs_native=0 ufs_write=0 var_store=0').split()
 

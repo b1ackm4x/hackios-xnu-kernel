@@ -19,6 +19,29 @@ spec.loader.exec_module(fences)
 NUMBER = r'(0x[0-9a-f]+|\d+)'
 
 
+def completed_drain(text):
+    # Older synchronous logs have no displaying field. New pipelines must
+    # prove that their separately owned scanout buffer has retired as well.
+    drain = re.search(r'MiniIOMobileFramebuffer: return drain completed=1 queued=0 reading=0(?: displaying=(\d+))?(?=\r?$)', text, re.M)
+    return drain if drain and drain.group(1) in (None, '0') else None
+
+
+def check_return_drain(text):
+    drain = completed_drain(text)
+    stop = text.find('adreno: the run is about to end: the GPU is given back')
+    return bool(drain and drain.start() < stop and 'return drain timed out' not in text)
+
+
+def check_gpu_return(text):
+    calls = re.search(r'RedwoodGPU: return calls drained=1 active=0 parked=\d+', text)
+    drained = completed_drain(text)
+    display = drained.start() if drained else -1
+    stop = text.find('adreno: the run is about to end: the GPU is given back')
+    return bool(calls and calls.start() < display < stop and
+                'return calls timed out' not in text and 'composite scanout failed' not in text and
+                not re.search(r'exited due to SIGSEGV|redwood: signal\s+11\b', text))
+
+
 def check_refresh(text):
     """Verify the real default mode and its restoration; no FPS claim at idle."""
     measured = list(dict.fromkeys(re.findall(
@@ -116,6 +139,10 @@ def check(record, raw, live=()):
     if 'lemonade_display_hz=120' in args:
         checks.update(check_refresh(text))
         checks['refresh_120_booted'] = 'lemonade_display_hz=120' in actual_args and 'lemonade_panel=655' in actual_args
+    if record.get('display_return_drain'):
+        checks['display_drained_before_gpu_stop'] = check_return_drain(final_text)
+    if record.get('gpu_return_call_drain'):
+        checks['gpu_calls_drained_and_userspace_exit_clean'] = check_gpu_return(final_text)
     return {'passed': all(checks.values()), 'checks': checks, 'completed_direct_frames': completed,
             'cpu_fallback_frames': int(irq[0][2]) if len(irq) == 1 else None,
             'fallback_transitions': int(summary[0][1]) if len(summary) == 1 else None,
