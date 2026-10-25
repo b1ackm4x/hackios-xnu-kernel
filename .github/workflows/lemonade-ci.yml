@@ -1,0 +1,126 @@
+name: OnePlus 9 build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lemonade-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-tests:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned userland
+        run: python3 tools/ci/checkout-userland.py
+      - name: Install sanitizer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libclang-rt-18-dev
+      - name: Test production display, exit and transport code
+        run: |
+          set -euo pipefail
+          for suite in display-composite display-pipeline display-fences display-resume display-stop gpu-return dma-pool refresh base usb wifi check-direct check-display check-fences check-ios-refresh check-refresh network verify-android; do
+            python3 "tools/test-lemonade-${suite}.py"
+          done
+          python3 tools/test-lemonade-ci.py
+          clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-touch.c -o /tmp/touch-test
+          /tmp/touch-test
+          clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-mhi.c -o /tmp/mhi-test
+          /tmp/mhi-test
+
+  metal-tests:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned userland
+        run: python3 tools/ci/checkout-userland.py
+      - name: Test Metal ownership and asynchronous completion
+        run: |
+          python3 tools/test-lemonade-metal-lifetime.py
+          python3 tools/test-lemonade-metal-completion.py
+
+  build:
+    needs: [linux-tests, metal-tests]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      THEOS: ${{ runner.temp }}/lemonade-theos
+      JOBS: '4'
+      LEMONADE_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang lld llvm gawk flex bison m4 autoconf automake libtool libxml2-dev libssl-dev libncurses-dev zlib1g-dev libzstd-dev python3-venv python3-dev python3-setuptools python3-numpy meson ninja-build curl xz-utils patch
+      - name: Fetch pinned userland
+        run: python3 tools/ci/checkout-userland.py
+      - name: Compile and assemble complete RAM runtime
+        run: bash tools/ci/build-lemonade.sh
+      - name: Store downloadable build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lemonade-build
+          path: out/ci-release/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    needs: build
+    if: github.repository == 'b1ackm4x/hackios-xnu-kernel' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: lemonade-build
+          path: release
+      - name: Publish commit-specific prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum --check SHA256SUMS
+          tag="ci-lemonade-${COMMIT:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "This commit already has a release; preserving its original files."
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Complete OnePlus 9 LE2110 experimental RAM runtime built from commit $COMMIT.
+
+          Includes the system image, clean runtime, GPU/Wi-Fi firmware, fresh kernel, GLES/Metal libraries and generic loader boot.img. No saved Wi-Fi credentials, connection history, accounts or per-phone binding. Uses temporary fastboot boot; no partition flashing.
+
+          Download every .tar.gz.part-* asset, README.md and SHA256SUMS. Verify, concatenate and extract as described in README.md. Requires rooted Android on an unlocked LE2110 with AMB655X panel. CI builds have no per-binary hardware acceptance; starting requires explicit --experimental opt-in. Static system/root-template/UEFI inputs are hash-pinned; they are not recompiled in each run.
+
+          Build: $RUN_URL
+          EOF
+          gh release create "$tag" lemonade-ci-*.tar.gz.part-* SHA256SUMS manifest.json README.md \
+            --target "$COMMIT" --prerelease --title "OnePlus 9 CI ${COMMIT:0:12}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

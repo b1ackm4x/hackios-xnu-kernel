@@ -1,5 +1,7 @@
 # HackiOS · OnePlus 9
 
+[自动构建 / 完整 RAM 运行包下载](docs/LEMONADE-CI.md) · [GitHub Actions](https://github.com/b1ackm4x/hackios-xnu-kernel/actions/workflows/lemonade-ci.yml)
+
 基于 [oosexgang/HackiOS](https://github.com/oosexgang/hackios-xnu-kernel) 的一加 9（LE2110 / `lemonade`）适配，运行 XNU 与 iOS 16.5 用户空间。
 
 ## 当前进度

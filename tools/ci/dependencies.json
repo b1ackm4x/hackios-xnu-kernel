@@ -1,0 +1,14 @@
+{
+  "iOSToolchain-aarch64.tar.xz": {
+    "url": "https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-aarch64.tar.xz",
+    "sha256": "9051e9d531de5e511f0fab40d925d625bc6efe7ed9dce821d179c09de9bc690b"
+  },
+  "iPhoneOS16.5.sdk.tar.xz": {
+    "url": "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz",
+    "sha256": "5e0fd3f01266cce4ce012d4a99b38eb56578fca40d09edc81cd83dee958202fb"
+  },
+  "MacOSX13.3.sdk.tar.xz": {
+    "url": "https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz",
+    "sha256": "518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be"
+  }
+}
