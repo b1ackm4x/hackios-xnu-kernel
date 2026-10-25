@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     env:
-      THEOS: ${{ runner.temp }}/lemonade-theos
+      THEOS: /tmp/lemonade-theos
       JOBS: '4'
       LEMONADE_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     env:
-      THEOS: ${{ runner.temp }}/lemonade-theos
+      THEOS: /tmp/lemonade-theos
       JOBS: '4'
       LEMONADE_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
