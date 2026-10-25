@@ -19,6 +19,18 @@ spec.loader.exec_module(base)
 
 
 class BasePolicy(unittest.TestCase):
+    def test_battery_acceptance_requires_distinct_valid_samples_and_service(self):
+        validator=base.module('validate_base_battery','lemonade-validate-base.py')
+        header='LemonadeBattery: external gauge power source registered, 100%\n'
+        row='lemonade-battery: sample={} SOC=100% V=8700 mV I=-15 mA T=3500/100C valid=1ff failures=0 external=1 status=e0 charge_state=4\n'
+        samples=''.join(row.format(i) for i in (1,3,6))
+        self.assertTrue(validator.battery_evidence(header+samples)['passed'])
+        for text in (samples, header+row.format(1)*10, header+samples.replace('valid=1ff','valid=7f'),
+                     header+samples.replace('failures=0','failures=1'),
+                     header+samples.replace('charge_state=4','charge_state=0'),
+                     header+samples+'lemonade-battery: telemetry stale; withdrawing capacity'):
+            with self.subTest(text=text):self.assertFalse(validator.battery_evidence(text)['passed'])
+
     def test_validator_waits_for_loader_reenumeration(self):
         validator=base.module('validate_base','lemonade-validate-base.py')
         with patch.object(validator.launch,'fastboot_target',side_effect=[None,'target','target']), \
@@ -36,6 +48,7 @@ class BasePolicy(unittest.TestCase):
             path=folder/name;path.write_bytes(name.encode())
             files[name]={'bytes':path.stat().st_size,'sha256':base.digest(path)}
         manifest={'profile':'lemonade-base-v1','boot_arguments':base.launch.BASE_ARGUMENTS,
+                  'battery_telemetry_supported':base.launch.BATTERY_TELEMETRY,
                   'hardware_serial_sha256':'a'*64,'default_display_hz':120,
                   'refresh_panel':{'profile':'amb655x-60-120-v1','hardware_serial_sha256':'a'*64,
                                    'selected_panel':'qcom,mdss_dsi_samsung_amb655x_dsc_cmd:'},
@@ -88,6 +101,15 @@ class BasePolicy(unittest.TestCase):
                 (folder/'manifest.json').write_text(json.dumps(manifest))
                 with self.subTest(key=key),self.assertRaises(SystemExit):base.launch.verify(folder)
 
+    def test_battery_protocol_must_match_before_any_device_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory)
+            for protocol in (None,'bq28z610-uefi-cache-v1'):
+                manifest=self.package(folder);manifest['battery_telemetry_supported']=protocol
+                (folder/'manifest.json').write_text(json.dumps(manifest))
+                with patch.object(base.launch,'command',side_effect=AssertionError('Must not contact a device')):
+                    with self.assertRaisesRegex(SystemExit,'电池与充电状态协议'):base.launch.verify(folder)
+
     def tree(self):
         tree = {p: (0o100755, 0, 0, b'program') for p in ('bin/metal-enable', 'sbin/init')}
         tree['etc/rc'] = (0o100644, 0, 0, b'/redwood/bin/metal-enable\nexec /sbin/launchd.ios\n')
@@ -119,7 +141,8 @@ class BasePolicy(unittest.TestCase):
     def test_default_is_unbounded_ram_runtime(self):
         args=base.launch.BASE_ARGUMENTS
         for word in ('lemonade_runtime=1','lemonade_wifi=24','gpu=1','touchscreen=1','fb_fences=1',
-                     'lemonade_display_hz=120','lemonade_panel=655','ufs_write=0','var_store=0'):
+                     'lemonade_display_hz=120','lemonade_panel=655','lemonade_battery=1','bootcpu=7',
+                     'ufs_write=0','var_store=0'):
             self.assertIn(word,args)
         self.assertFalse(any(w.startswith(('loader_return_after=','touch_lat=','cpuload=','rec_','adreno_watch=')) for w in args))
         self.assertEqual(len(args),len({w.split('=')[0] for w in args}))

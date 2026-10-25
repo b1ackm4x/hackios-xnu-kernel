@@ -10,6 +10,7 @@
  *   - exits boot services, turns the MMU off and jumps to the kernel entry
  */
 #include "efi.h"
+#include "lemonade_battery.h"
 #include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
 
 /* ------------------------------------------------------------------------ */
@@ -1077,6 +1078,22 @@ compose_live_log(const struct kernel_live *live, uint64_t slide)
 static void print(const char *fmt, ...);
 static void flush_log(void);
 static void put_char(char c);
+
+static struct lemonade_battery_cache *lemonade_battery_shared;
+static int lemonade_battery_enabled;
+static int lemonade_battery_paused;
+static uint64_t battery_ticks(void) { return READ_SYSREG(CNTVCT_EL0); }
+static uint64_t battery_frequency(void) { return READ_SYSREG(CNTFRQ_EL0); }
+static void battery_publish(const void *data, size_t size)
+{
+	clean_dcache((uint64_t)(uintptr_t)data, (uint64_t)(uintptr_t)data + size);
+}
+static void lemonade_battery_begin(void)
+{
+	static const struct lemonade_battery_ops ops = { battery_ticks, battery_frequency, battery_publish, print };
+	if (PLAT != &platform_lemonade) return;
+	lemonade_battery_shared = lemonade_battery_start(BS, &ops);
+}
 
 /* A voltage-only fallback is deliberately conservative; the real QG SOC wins whenever available. */
 static int
@@ -2379,6 +2396,10 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 			charger_poll();
 			last_battery = READ_SYSREG(CNTVCT_EL0);
 		}
+		if (lemonade_battery_enabled && !lemonade_battery_paused && seconds_since(last_battery) >= 5 && hc_list_is_uefis()) {
+			lemonade_battery_poll();
+			last_battery = READ_SYSREG(CNTVCT_EL0);
+		}
 		if (arrived && live != NULL) {
 			if (live->heartbeat != last_beat) {
 				last_beat = live->heartbeat;
@@ -2885,6 +2906,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
 	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
+	int lemonade_battery_requested = 0;
+	lemonade_battery_enabled = 0;
+	lemonade_battery_paused = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (bsd/dev/redwood_torch.c) */
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/redwood_camera.c) */
@@ -2902,6 +2926,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[9] == 0 || c[9] == ' ');
+		lemonade_battery_requested |= starts_with(c, "lemonade_battery=1") &&
+		    (c == pi.cmdline || c[-1] == ' ') && (c[18] == 0 || c[18] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
 		camera_requested |= starts_with(c, "cam=5") && (c == pi.cmdline || c[-1] == ' ') && (c[5] == 0 || c[5] == ' ');
 		gamut_p3 |= starts_with(c, "gamut=p3") && (c == pi.cmdline || c[-1] == ' ');
@@ -2917,6 +2943,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	if (battery_requested) {
 		charger_start();
+	}
+	if (lemonade_battery_requested && PLAT == &platform_lemonade) {
+		if (kernel_mpidr == this_mpidr || checkpoint == CHECKPOINT_SELFTEST) {
+			print("lemonade-battery: telemetry requires a resident firmware core\n");
+			return 0;
+		}
+		lemonade_battery_begin();
+		lemonade_battery_enabled = 1;
 	}
 	if (ufs_requested >= 2) {
 		hc_init();              /* (ufs_native=: UEFI's transfer list kept, before anything reads) */
@@ -3053,6 +3087,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		for (int shift = 60; shift >= 0 && n < BOOT_LINE_LENGTH - 1; shift -= 4) {
 			ba->commandLine[n++] = hex[(address >> shift) & 0xf];
 		}
+		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
+	}
+	if (lemonade_battery_enabled) {
+		static const char prefix[] = "lemonade_battery_pa=0x";
+		static const char hex[] = "0123456789abcdef";
+		uint64_t address = (uint64_t)(uintptr_t)lemonade_battery_shared;
+		for (const char *c = prefix; *c && n < BOOT_LINE_LENGTH - 1; c++) ba->commandLine[n++] = *c;
+		for (int shift = 60; shift >= 0 && n < BOOT_LINE_LENGTH - 1; shift -= 4)
+			ba->commandLine[n++] = hex[(address >> shift) & 0xf];
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
 	for (const char *c = pi.cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
@@ -3342,6 +3385,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		if (kernel_mpidr != this_mpidr) {
 			int64_t status = run_on_other_cpu(kernel_mpidr, entry_va + slide, ba_pa, kernel_live, slide, kernel_budget);
+			lemonade_battery_stop();
+			lemonade_battery_enabled = 0;
 
 			wdt_set_ms(WDT_BITE_MS);
 			if (status != 0) {
@@ -3805,6 +3850,24 @@ fb_command(char *cmd)
 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
 			print_memory_map();
 			fb_reply("OKAY", "");
+		} else if (str_eq(cmd, "oem battery pause") || str_eq(cmd, "oem battery resume")) {
+			/* RAM-only fault injection: leave the last sample untouched so the
+			 * consumer's real expiry path runs. No charger or gauge writes. */
+			if (PLAT != &platform_lemonade || !busy || !lemonade_battery_enabled) {
+				fb_reply("FAIL", "no active lemonade telemetry session");
+			} else {
+				lemonade_battery_paused = str_eq(cmd, "oem battery pause");
+				print("lemonade-battery: sampling %s\n", lemonade_battery_paused ? "paused" : "resumed");
+				fb_reply("OKAY", "RAM-only telemetry sampling state changed");
+			}
+		} else if (str_eq(cmd, "oem battery")) {
+			if (PLAT != &platform_lemonade) {
+				fb_reply("FAIL", "battery telemetry is not supported on this platform");
+			} else {
+				if (!busy) { lemonade_battery_begin(); lemonade_battery_stop(); }
+				else lemonade_battery_status();
+				fb_reply("OKAY", "telemetry status is in the RAM log");
+			}
 		} else if (starts_with(cmd, "oem log")) {
 			if (busy) {
 				compose_live_log(running_live, running_slide);

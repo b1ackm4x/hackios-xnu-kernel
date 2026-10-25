@@ -54,6 +54,23 @@ def wait_for_loader(manifest, seconds=60):
     raise SystemExit('Exact RAM loader did not enumerate after boot; no System payload sent')
 
 
+def battery_evidence(text):
+    rows = set(re.findall(r'lemonade-battery: sample=(\d+) SOC=\d+% V=\d+ mV I=-?\d+ mA '
+        r'T=-?\d+/100C valid=([0-9a-f]+) failures=(\d+) external=(-?\d+) '
+        r'status=[0-9a-f]+ charge_state=(\d+)', text))
+    samples = {int(row[0]) for row in rows}
+    registered = 'LemonadeBattery: external gauge power source registered,' in text
+    # Require real SOC, voltage, temperature, presence and charge status; logs
+    # repeated in multiple ring snapshots do not count as new measurements.
+    valid = all(int(flags, 16) & 0x18b == 0x18b and int(errors) == 0 and
+                int(external) in (0, 1) and int(state) in (1, 2, 3, 4)
+                for _, flags, errors, external, state in rows)
+    stale = 'lemonade-battery: telemetry stale' in text
+    return {'passed': len(samples) >= 3 and registered and valid and not stale,
+            'distinct_logged_samples': len(samples), 'power_source_registered': registered,
+            'stale_observed': stale}
+
+
 def main():
     os.umask(0o077)
     parser=argparse.ArgumentParser(description=__doc__)
@@ -170,15 +187,17 @@ def main():
         text=joined.decode(errors='replace')
         metal_checks={name: f'lemonade-metal: {name} summary checks={count} failed=0' in text
                       for name,count in (('feature',103),('MPS',2),('CA',4))}
-        acceptance={'passed':d['passed'] and w['passed'] and all(metal_checks.values()) and
+        battery=battery_evidence(text)
+        acceptance={'passed':d['passed'] and w['passed'] and all(metal_checks.values()) and battery['passed'] and
                     'init: runtime setup complete; failures=0' in text and '=== 36 checks' not in text,
                     'kernel_sha256':record['kernel_sha256'],'base_root_sha256':record['base_root_sha256'],
-                    'metal_checks':metal_checks,'direct_passed':d['passed'],'wifi_passed':w['passed'],
+                    'metal_checks':metal_checks,'direct_passed':d['passed'],'wifi_passed':w['passed'], 'battery':battery,
                     'manifest_path':str(path.with_suffix('.manifest.json').relative_to(ROOT)),
                     'manifest_sha256':build.digest(path.with_suffix('.manifest.json'))}
         (evidence/'combined-acceptance.json').write_text(json.dumps(acceptance,indent=2)+'\n')
         print(json.dumps({'log':str(path),'direct_passed':d['passed'],'direct_frames':d['completed_direct_frames'],
                           'wifi_passed':w['passed'],'networking_verified':w['networking_verified'],
+                          'battery_passed':battery['passed'],
                           'runtime_setup_complete':'init: runtime setup complete; failures=0' in text,
                           'runtime_boot_self_tests_absent':'=== 36 checks' not in text},indent=2),flush=True)
         if not acceptance['passed']:

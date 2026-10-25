@@ -134,7 +134,7 @@ def verified_graphics_overlay(system=False, widgets=False):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "panel", "boot", "log", "memmap", "selftest", "run", "ramdisk", "screenshot", "recording", "reboot"))
+    parser.add_argument("action", choices=("status", "panel", "boot", "log", "memmap", "battery", "selftest", "run", "ramdisk", "screenshot", "recording", "reboot"))
     parser.add_argument("--checkpoint", type=int, default=0, help="XNU bring-up checkpoint; 0 runs normally")
     parser.add_argument("--seconds", type=int, help="XNU timed return, 1..300 seconds; up to 900 for performance + physical touch; default 8 or 300 with --profile")
     parser.add_argument("--userland", action="store_true", help="include root.apfs; upload system.apfs with ramdisk first")
@@ -146,6 +146,8 @@ def main():
     parser.add_argument("--boot-cpu", type=int, choices=range(8), help="physical boot core, 0..7; 7 is the SM8350 prime core")
     parser.add_argument("--cpus", type=int, choices=range(1, 9), help="maximum XNU core count; a resident loader core is excluded")
     parser.add_argument("--metrics", action="store_true", help="capture per-frame timing, input and CPU load for performance analysis")
+    parser.add_argument('--battery', action='store_true', help='external-gauge telemetry; requires built kernel and explicit nonzero boot CPU')
+    parser.add_argument('--battery-sampling', choices=('pause', 'resume'), help='RAM-only expiry test during an active battery session; only with action battery')
     parser.add_argument("--gpu-trace", action="store_true", help="log every GPU submission; diagnostic only, can exhaust the device log")
     parser.add_argument('--network-test', action='store_true', help='explicit RAM-only association/DHCP/traffic acceptance with a private current-network overlay')
     parser.add_argument('--metal-test', action='store_true', help='verified RAM-only Metal pixel and IOSurface diagnostic overlay')
@@ -183,7 +185,12 @@ def main():
             setattr(args, key, value)
         args.gpu = args.userland = True
     args.kernel = args.kernel or "prebuilt"
+    if args.battery_sampling and args.action != 'battery':
+        parser.error('--battery-sampling requires action battery')
     args.cpu_policy = args.cpu_policy or "firmware"
+    if args.battery and (args.action != 'run' or args.kernel != 'built' or
+            args.boot_cpu not in range(1, 8) or args.checkpoint or args.gpu_step):
+        parser.error('--battery requires run --kernel built --boot-cpu 1..7 without a checkpoint or GPU step')
     if args.seconds is None:
         args.seconds = 300 if args.profile else (60 if args.display_flips == 1000 else 30 if args.display in ('map', 'flip', 'manual', 'scale') else 8)
     if (args.boot_cpu is not None or args.cpus is not None) and (args.action != "run" or args.kernel != "built"):
@@ -440,6 +447,8 @@ def main():
                 raise SystemExit("Refusing: kernel has no verified SM8350 CPU policy support")
             if args.touch and kernel_manifest.get("touch_driver_supported") != "lemonade-s6sy792-v1":
                 raise SystemExit("Refusing: kernel has no lemonade S6SY792 touch support")
+            if args.battery and kernel_manifest.get('battery_telemetry_supported') != 'bq28z610-uefi-cache-v2':
+                raise SystemExit('Refusing: kernel has no lemonade external-gauge telemetry support')
             if args.wifi and args.wifi not in kernel_manifest.get("wifi_modes_supported", []):
                 raise SystemExit("Refusing: kernel has no requested lemonade Wi-Fi mode")
             if args.display and args.display not in kernel_manifest.get('display_modes_supported', []):
@@ -471,6 +480,9 @@ def main():
                 cmdline += f" {key}={value}"
         if args.metrics:
             cmdline += " touch_lat=2 cpuload=500"
+        if args.battery:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_battery='))
+            cmdline += ' lemonade_battery=1'
         if args.metal_system:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith(('metal=', 'camtl=', 'metal_profile=')))
             cmdline += ' metal=1 metal_profile=' + str(args.metal_profile or 0)
@@ -576,6 +588,7 @@ def main():
         record["profile"] = args.profile
         record["touch"] = args.touch
         record["wifi"] = args.wifi
+        record['battery'] = args.battery
         record['network_test'] = args.network_test
         record['metal_test'] = args.metal_test
         record['metal_system'] = args.metal_system
@@ -620,6 +633,8 @@ def main():
             raise SystemExit("Refusing: selftest checksum differs from its build manifest")
         fb(serial, "stage", str(payload), timeout=60)
     operation = ["oem", args.action]
+    if args.action == 'battery' and args.battery_sampling:
+        operation.append(args.battery_sampling)
     if args.action == "run":
         operation.append(str(args.checkpoint))
     r = fb(serial, *operation, timeout=30)
@@ -666,9 +681,9 @@ def main():
                 time.sleep(2)
         result = r.stdout + r.stderr
         print(result)
-    if args.action == "memmap":
+    if args.action in ("memmap", "battery"):
         fb(serial, "oem", "log", timeout=30)
-    if args.action in ("log", "memmap", "selftest", "run"):
+    if args.action in ("log", "memmap", "battery", "selftest", "run"):
         label = args.action if args.action != "run" else f"run-cp{args.checkpoint}"
         dest = ROOT / "local/lemonade" / f"{int(time.time())}-{label}.log"
         try:

@@ -97,6 +97,46 @@ class DeviceSafety(unittest.TestCase):
             self.run_action("boot")
         self.assertFalse(any("-s" in c for c in self.calls))
 
+    def test_battery_requires_resident_loader_and_supported_kernel(self):
+        for extra in ((), ('--kernel', 'built'), ('--kernel', 'built', '--boot-cpu', '0'),
+                      ('--kernel', 'built', '--boot-cpu', '7', '--checkpoint', '4')):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--battery', *extra)
+        self.assertEqual(self.calls, [])
+        self.fastboot, self.product = self.loader + '\tfastboot\n', 'xnuloader'
+        data = b'battery kernel fixture'
+        (self.root / 'out/lemonade-kernel').write_bytes(data)
+        manifest = {'device': 'lemonade', 'stage': 'xnu-kernel', 'sha256': hashlib.sha256(data).hexdigest()}
+        path = self.root / 'out/lemonade-kernel.manifest.json'
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(SystemExit, 'external-gauge telemetry'):
+            self.run_action('run', '--kernel', 'built', '--boot-cpu', '7', '--battery')
+        self.assertFalse(any('stage' in c for c in self.calls))
+        manifest['battery_telemetry_supported'] = 'bq28z610-uefi-cache-v2'
+        path.write_text(json.dumps(manifest))
+        self.result = 'returned 0 0'
+        self.run_action('run', '--kernel', 'built', '--boot-cpu', '7', '--battery', '--seconds', '20')
+        payload_command = next(c for c in self.calls if c[0] == 'python3' and 'mkpayload.py' in c[1])
+        cmdline = payload_command[payload_command.index('--cmdline') + 1]
+        self.assertIn('lemonade_battery=1', cmdline.split())
+        self.assertIn('bootcpu=7', cmdline.split())
+
+    def test_battery_probe_uses_only_the_exact_loader_and_collects_log(self):
+        self.fastboot, self.product = self.loader + '\tfastboot\n', 'xnuloader'
+        self.run_action('battery')
+        self.assertIn(['fastboot', '-s', self.loader, 'oem', 'battery'], self.calls)
+        self.assertIn(['fastboot', '-s', self.loader, 'oem', 'log'], self.calls)
+        self.assertEqual(next((self.root / 'local/lemonade').glob('*-battery.log')).read_bytes(), self.log)
+
+    def test_battery_sampling_fault_injection_is_scoped(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_action('reboot', '--battery-sampling', 'pause')
+        self.assertEqual(self.calls, [])
+        self.fastboot, self.product = self.loader + '\tfastboot\n', 'xnuloader'
+        for state in ('pause', 'resume'):
+            self.run_action('battery', '--battery-sampling', state)
+            self.assertIn(['fastboot', '-s', self.loader, 'oem', 'battery', state], self.calls)
+
     def test_metal_requires_verified_gpu_userland_before_device_access(self):
         for option in (('--metal-test',), ('--metal-system', 'apps'), ('--metal-system', 'desktop')):
             for extra in ((), ('--kernel', 'built'), ('--kernel', 'built', '--gpu'),

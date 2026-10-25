@@ -63,6 +63,7 @@ manifest = {
     "kernel_bytes": kernel_size, "ramdisk_bytes": ramdisk_size,
     "loader_usb_serial": usb_serial, "uefi_sha256": hashlib.sha256(fd).hexdigest(),
     "loader_sha256": hashlib.sha256(entries["loader.efi"]).hexdigest(),
+    "battery_telemetry_supported": "bq28z610-uefi-cache-v2",
     "dtb_sha256": hashlib.sha256(boot_dtb).hexdigest(),
     "kernel_source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
     "uefi_source_commit": (ROOT / "uefi/BASE").read_text().strip(),

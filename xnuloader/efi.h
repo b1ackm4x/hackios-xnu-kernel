@@ -142,6 +142,25 @@ typedef struct {
 	efi_status (EFIAPI *is_power_ok)(uint32_t type, void *info);
 } efi_charger_ex;
 
+/* Qualcomm I2C revision 1.0, checked against lemonade's I2CDxe table.
+ * Public ABI: edk2-porting/edk2-msm, EFII2C.h at e1952621f419f8db60ed28271264e1b5184c571d.
+ * Status is a 32-bit I2C_STATUS (zero succeeds), not EFI_STATUS.
+ */
+#define QCOM_I2C_PROTOCOL_GUID { 0xb27ae8b1, 0x3e10, 0x4d07, { 0xab, 0x5c, 0xeb, 0x9a, 0x6d, 0xc6, 0xfa, 0x8f } }
+typedef struct {
+	uint32_t frequency_khz, address, mode, max_clock_stretch_us, core_configuration1, core_configuration2;
+} efi_qcom_i2c_config;
+typedef struct {
+	uint64_t revision;
+	uint32_t (EFIAPI *open)(uint32_t instance, void **handle);
+	uint32_t (EFIAPI *read)(void *handle, const efi_qcom_i2c_config *config, uint16_t offset,
+	    uint16_t offset_length, uint8_t *buffer, uint16_t length, uint32_t *read, uint32_t timeout_ms);
+	uint32_t (EFIAPI *write)(void *handle, const efi_qcom_i2c_config *config, uint16_t offset,
+	    uint16_t offset_length, const uint8_t *buffer, uint16_t length, uint32_t *written, uint32_t timeout_ms);
+	void *transfer;
+	uint32_t (EFIAPI *close)(void *handle);
+} efi_qcom_i2c;
+
 /*
  * The first public entries of Xiaomi's Qualcomm charger protocol.  Its GUID,
  * revision and function layout are taken from the QcomChargerDxeLA.efi and

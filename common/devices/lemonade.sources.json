@@ -48,6 +48,9 @@
     "safari_refresh": "initialize the native prefer-60 preference once for the measured 120 Hz RAM desktop; honor later user changes",
     "temporary_profiling_and_ab_switches": false,
     "validation_document": "docs/LEMONADE-NATIVE-BENCH.md",
-    "new_full_runtime_package_verified": false
+    "new_full_runtime_package_verified": false,
+    "battery_telemetry": "BQ28Z610 telemetry and ChargerEx presence, cache v2, native IOPMPowerSource; enabled by default in new base builds",
+    "battery_validation_document": "docs/LEMONADE-BATTERY.md",
+    "charger_control": false
   }
 }

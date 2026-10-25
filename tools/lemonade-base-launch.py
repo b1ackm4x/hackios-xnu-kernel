@@ -12,13 +12,14 @@ import time
 
 HERE = Path(__file__).resolve().parent
 BASE_VERSION = '2026.10.25-base.4'
+BATTERY_TELEMETRY = 'bq28z610-uefi-cache-v2'
 # Keep the iPhone X userland's native 120 Hz CADisplayTimer. Forced driver
 # notifications lose frames after asynchronous Metal submission; DPU TE and
 # producer fences still gate physical presentation (LEMONADE-BASE-120HZ.md).
 BASE_ARGUMENTS = ('sb_delay=8 bootcpu=7 cpus=4 cpufreq=1 ddr=0 gpu=1 gpu_log=0 adreno_speed=2 '
     'metal=1 metal_profile=1 camtl=1 lemonade_display=10 lemonade_display_hz=120 lemonade_panel=655 ca_vbl=0 fb_fences=1 '
     'touchscreen=1 buttons=0 wifi=0 lemonade_wifi=24 lemonade_runtime=1 lemonade_dma_verified=1 '
-    'adsp=0 ufs=0 ufs_native=0 ufs_write=0 var_store=0').split()
+    'adsp=0 lemonade_battery=1 ufs=0 ufs_native=0 ufs_write=0 var_store=0').split()
 
 
 def digest(path):
@@ -39,6 +40,8 @@ def verify(folder=HERE):
         raise SystemExit('不是 OnePlus 9 base 发布包')
     if manifest.get('boot_arguments') != BASE_ARGUMENTS:
         raise SystemExit('启动配置与此 RAM base 不匹配')
+    if manifest.get('battery_telemetry_supported') != BATTERY_TELEMETRY:
+        raise SystemExit('此 base 缺少匹配的电池与充电状态协议')
     panel = manifest.get('refresh_panel', {})
     if (manifest.get('default_display_hz') != 120 or
             panel.get('profile') != 'amb655x-60-120-v1' or

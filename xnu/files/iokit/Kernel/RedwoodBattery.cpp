@@ -27,6 +27,8 @@
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
+#include <libkern/c++/OSString.h>
+#include "../../bsd/sys/lemonade_battery.h"
 
 /* The same as struct redwood_battery_state in bsd/sys/redwood_input.h, which is not seen from here. */
 struct redwood_battery_state {
@@ -42,6 +44,7 @@ struct redwood_battery_state {
 };
 
 extern "C" void RedwoodBatteryReport(const void * state, unsigned size);
+extern "C" void LemonadeBatteryReport(const void * state, unsigned size, int fresh);
 
 class RedwoodBattery : public IOPMPowerSource
 {
@@ -49,11 +52,13 @@ class RedwoodBattery : public IOPMPowerSource
 
 public:
 	void report(const struct redwood_battery_state * b);
+	void reportLemonade(const struct lemonade_battery_sample * b);
 
 private:
 	void number(const char * key, long long value);
 	void flag(const char * key, bool value);
 	void object(const char * key, OSObject * value);
+	void forget(const char * key);
 };
 
 OSDefineMetaClassAndStructors(RedwoodBattery, IOPMPowerSource);
@@ -93,6 +98,107 @@ RedwoodBattery::object(const char * key, OSObject * value)
 		setPSProperty(symbol, value);
 	}
 	OSSafeReleaseNULL(symbol);
+}
+
+/* updateStatus copies present dictionary entries; deletion must also remove
+ * the IORegistry entry so a previously valid optional value cannot linger. */
+void
+RedwoodBattery::forget(const char * key)
+{
+	if (properties->getObject(key) != NULL || getProperty(key) != NULL) {
+		properties->removeObject(key);
+		removeProperty(key);
+		settingsChangedSinceUpdate = true;
+	}
+}
+
+void
+RedwoodBattery::reportLemonade(const struct lemonade_battery_sample * b)
+{
+	static const char * const telemetry[] = {
+		"CurrentCapacity", "MaxCapacity", "Voltage", "Amperage", "Temperature",
+		"AppleRawCurrentCapacity", "AppleRawMaxCapacity", "NominalChargeCapacity",
+		"CycleCount", "ExternalConnected", "AppleRawExternalConnected", "IsCharging", "FullyCharged",
+		"LemonadeBatteryStatus", "LemonadeChargeState"
+	};
+	flag("LemonadeTelemetryValid", b != NULL);
+	number("LemonadeValidFields", b ? b->valid : 0);
+	/* This is telemetry only: no charge-capability or charge-termination claim. */
+	forget("ExternalChargeCapable");
+	if (b == NULL) {
+		for (unsigned i = 0; i < sizeof(telemetry) / sizeof(telemetry[0]); i++) forget(telemetry[i]);
+		updateStatus();
+		return;
+	}
+	OSString *source = OSString::withCString("BQ28Z610 / resident UEFI I2C");
+	object("LemonadeTelemetrySource", source);
+	OSSafeReleaseNULL(source);
+	setBatteryInstalled(true);
+	setCurrentCapacity((b->percent_hundredths + 50) / 100);
+	setMaxCapacity(100);
+	setVoltage(b->voltage_uv / 1000);
+	number("Temperature", b->temperature_hundredths);
+	if (b->valid & LEMONADE_BATTERY_CURRENT) setAmperage(b->current_ua / 1000);
+	else forget("Amperage");
+	if (b->valid & LEMONADE_BATTERY_CHARGE) number("AppleRawCurrentCapacity", b->charge_uah / 1000);
+	else forget("AppleRawCurrentCapacity");
+	if (b->valid & LEMONADE_BATTERY_FULL) {
+		number("AppleRawMaxCapacity", b->full_uah / 1000);
+		number("NominalChargeCapacity", b->full_uah / 1000);
+	} else {
+		forget("AppleRawMaxCapacity");
+		forget("NominalChargeCapacity");
+	}
+	if (b->valid & LEMONADE_BATTERY_CYCLES) setCycleCount(b->cycles);
+	else forget("CycleCount");
+	if (b->valid & LEMONADE_BATTERY_EXTERNAL) {
+		setExternalConnected(b->external != 0);
+		flag("AppleRawExternalConnected", b->external != 0);
+	} else {
+		forget("ExternalConnected");
+		forget("AppleRawExternalConnected");
+	}
+	int state = lemonade_battery_charge_state(b);
+	number("LemonadeChargeState", state);
+	if (state != LEMONADE_CHARGE_UNKNOWN) setIsCharging(state == LEMONADE_CHARGE_CHARGING);
+	else forget("IsCharging");
+	if (b->valid & LEMONADE_BATTERY_STATUS) {
+		number("LemonadeBatteryStatus", b->battery_status);
+		flag("FullyCharged", (b->battery_status & LEMONADE_BQ_FULL) != 0);
+	} else {
+		forget("LemonadeBatteryStatus");
+		forget("FullyCharged");
+	}
+	updateStatus();
+}
+
+/* Serialized by the OnePlus battery thread, which cannot run on Redwood. */
+void
+LemonadeBatteryReport(const void * state, unsigned size, int fresh)
+{
+	const struct lemonade_battery_sample * b = (const struct lemonade_battery_sample *)state;
+	if (fresh && (b == NULL || size != sizeof(*b) || !lemonade_battery_sample_valid(b))) return;
+	if (!fresh) {
+		if (battery != NULL) battery->reportLemonade(NULL);
+		return;
+	}
+	if (battery == NULL) {
+		IOService *platform = IOService::getPlatform();
+		RedwoodBattery *made = OSTypeAlloc(RedwoodBattery);
+		if (platform == NULL || made == NULL || !made->init()) {
+			OSSafeReleaseNULL(made);
+			return;
+		}
+		made->reportLemonade(b);
+		if (!made->attach(platform)) { made->release(); return; }
+		made->setName("LemonadeBattery");
+		if (!made->start(platform)) { made->detach(platform); made->release(); return; }
+		made->registerService();
+		battery = made;
+		IOLog("LemonadeBattery: external gauge power source registered, %d%%\n", (b->percent_hundredths + 50) / 100);
+	} else {
+		battery->reportLemonade(b);
+	}
 }
 
 /*

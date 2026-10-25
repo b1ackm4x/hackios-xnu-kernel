@@ -41,6 +41,9 @@ jobs:
           /tmp/touch-test
           clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-mhi.c -o /tmp/mhi-test
           /tmp/mhi-test
+          clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined tools/test-lemonade-battery.c xnuloader/lemonade_battery.c -o /tmp/battery-test
+          /tmp/battery-test
+          python3 tools/test-lemonade-battery-service.py
 
   metal-tests:
     runs-on: macos-14

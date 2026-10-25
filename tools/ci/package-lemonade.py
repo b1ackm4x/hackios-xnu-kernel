@@ -54,6 +54,8 @@ def check_outputs(root):
     if (kernel['sha256'] != digest(root / 'out/lemonade-kernel') or
             kernel.get('wifi_driver_profile') != 'qca6490-hw10-v1'):
         raise ValueError('Missing or mismatched QCA6490-enabled kernel')
+    if kernel.get('battery_telemetry_supported') != 'bq28z610-uefi-cache-v2':
+        raise ValueError('Missing base battery and charge-state protocol')
     for name, expected in json.loads((root / 'out/lemonade-build-inputs.json').read_text()).items():
         if digest(checked_file(root, 'xnu/files/' + name)) != expected:
             raise ValueError('Kernel source differs from build: ' + name)

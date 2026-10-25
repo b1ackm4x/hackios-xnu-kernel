@@ -171,6 +171,8 @@ def main():
     kernel = json.loads((ROOT / 'out/lemonade-kernel.manifest.json').read_text())
     if kernel.get('display_refresh_supported') != 'amb655x-measured-desktop-v1':
         raise SystemExit('Kernel lacks the measured 120 Hz desktop path')
+    if kernel.get('battery_telemetry_supported') != launch.BATTERY_TELEMETRY:
+        raise SystemExit('Kernel lacks the base battery and charge-state protocol')
     if digest(ROOT / 'out/lemonade-kernel') != kernel['sha256']:
         raise SystemExit('Kernel differs from its manifest')
     inputs = json.loads((ROOT / 'out/lemonade-build-inputs.json').read_text())
@@ -219,6 +221,8 @@ def main():
     validate_tree(tree)
     pack_tree(tree, destination / 'root.apfs')
     boot = json.loads((ROOT / 'out/lemonade-boot.manifest.json').read_text())
+    if boot.get('battery_telemetry_supported') != launch.BATTERY_TELEMETRY:
+        raise SystemExit('Rebuild the loader for the base battery and charge-state protocol')
     if (digest(ROOT / 'out/lemonade-boot.img') != boot['sha256'] or
             boot.get('dtb_sha256') != panel['dtb_sha256']):
         raise SystemExit('Loader boot image differs from its manifest or verified panel DTB')
@@ -232,7 +236,7 @@ def main():
         (destination / name).chmod(0o700)
     readme = f'''# OnePlus 9 Base {args.version}
 
-现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、默认 120 Hz DPU 直接显示、实体触控、QCA6490 Wi-Fi 与系统网络服务。
+现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、默认 120 Hz DPU 直接显示、实体触控、QCA6490 Wi-Fi、系统网络服务，以及真实电量和充电状态显示。
 
 本版本包含异步 Metal 提交、原生 Core Animation 帧时钟，以及双缓冲 BGRA 多层合成：下一帧合成与上一帧显示传输重叠，完成通知和退出排空仍等待真实硬件完成。Safari 在首次使用时关闭“优先 60 fps”的网页策略，之后可在 Safari 设置中改回；只在驱动实测 120 Hz 的 RAM 环境启用。具体真机验证结果记录在 manifest.json；应用实际帧率取决于负载。
 
@@ -248,12 +252,16 @@ Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接�
 
 Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副本覆盖关联、地址获取、DNS、HTTP 和断线重连。正式包不包含该联网程序或网络配置；原生设置中首次输入密码的完整流程尚未单独验收。
 
+电池数据每 5 秒从原厂电量计读取，交由 iOS 原生电源服务显示；仅采集状态，不操作充电启停或快充。单独实测已确认真实电量及接电满电显示；物理 USB 拔插后日志通道重连失败，拔插状态切换和未满电充电图标尚未完成验收。采样中断时内核会撤回过期读数，但 powerd 仍可能保留最后值。
+
 原作者为 hackios 项目的 oosexgang；本包是 b1ackm4x 的 OnePlus 9 适配版本。它包含本机系统与固件材料，仅留在本机使用，不作为可公开转发的固件下载包。源代码分别维护在 hackios-xnu-kernel 与 hackios-xnu-userland 公开仓库。
 '''
     (destination / 'README.md').write_text(readme)
     manifest = {'profile': 'lemonade-base-v1', 'version': args.version, 'device': 'OnePlus 9 LE2110',
         'hardware_serial_sha256': baseline['hardware_serial_sha256'], 'boot_arguments': launch.BASE_ARGUMENTS,
         'default_display_hz': 120, 'refresh_panel': panel,
+        'battery_telemetry_supported': launch.BATTERY_TELEMETRY,
+        'charger_control': False,
         'display_return_drain': True,
         'direct_refresh_recovery': True,
         'direct_multilayer_composite': True, 'gpu_return_call_drain': True,
