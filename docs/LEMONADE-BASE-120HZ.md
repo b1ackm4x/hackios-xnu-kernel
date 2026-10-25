@@ -2,6 +2,9 @@
 
 `main` 已集成异步 Metal、双缓冲多层显示、退出排空和 Safari 刷新策略修复。双缓冲原生场景实测约 116–117 fps，详见 [原生多层显示修复](LEMONADE-NATIVE-BENCH.md)。
 
+驱动设计、问题清单和源码入口见 [图形与显示驱动](LEMONADE-DISPLAY.md)、
+[面板切换](LEMONADE-120HZ.md) 与 [Wi-Fi 驱动](WIFI-LEMONADE.md)。
+
 最近完成整套运行包验收的是 `2026.10.25-base.4`，它解除 Safari 默认的 60 fps 网页限制，包含 base.3 的多层合成与退出修复，但尚未包含后来加入的双缓冲流水线。GPU 为 379 MHz；该版本的 UFO Test 尚未稳定达到 120 fps。
 双击包内 `Start.command` 即使用 120 Hz，不需要补充启动参数。旧的
 `2026.10.24-base.1` 目录、ZIP 和源码标签保持不变，可用于 60 Hz 回退。

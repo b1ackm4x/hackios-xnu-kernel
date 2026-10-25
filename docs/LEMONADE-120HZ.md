@@ -1,8 +1,29 @@
 # AMB655X 实验性 120 Hz
 
-本文保留第一阶段驱动验收记录。后续已完成系统模式发布、UIKit 和 Core Animation 真机
-验证，当前使用方法见 [iOS 120 Hz](LEMONADE-IOS-120HZ.md)；下文的入口限制和待办描述
-仅对应第一阶段。
+本文说明物理面板切换的实现，并保留第一阶段驱动验收记录。后续已完成系统模式发布、
+UIKit 和 Core Animation 真机验证，当前使用方法见 [默认 120 Hz base](LEMONADE-BASE-120HZ.md)，
+系统接口见 [iOS 120 Hz](LEMONADE-IOS-120HZ.md)，合成与同步见
+[图形与显示驱动](LEMONADE-DISPLAY.md)。下文第一阶段的入口限制和待办不代表当前主线状态。
+
+## 设计与修复要点（2026-10-25 汇总）
+
+物理高刷、系统公布的模式、应用请求及实际显示完成分别验证。驱动只在已核对的 AMB655X
+命令模式链路上使用原厂切换命令，沿用固件的 PLL、PHY 和 DSC；没有把 `fb_hz=120`
+或应用请求值当作面板切换成功。
+
+| 环节 | 实现与修复 |
+| --- | --- |
+| 面板切换 | 在传输空闲后发送原厂解锁、120 Hz 和重新锁定序列；调整 TE 行计数分频，先记录恢复状态，失败及退出均尝试恢复 60 Hz |
+| 物理确认 | 观察至少 64 个 TE 周期且频率在验收范围内，才把活动模式发布为 120 Hz；传输仍独立检查 PP0、行状态和帧计数 |
+| 系统帧时钟 | IOMobileFramebuffer 发布已确认模式；当前 base 使用原生 CADisplayTimer，保留硬件 TE 与 GPU/DPU fence；具体接口和历史对照见 iOS 120 Hz 文档 |
+| 多层与回退 | 兼容 BGRA 图层合成后沿用 direct 路径；从 GOP 兼容路径重新进入时重新切换并测量，修复回退后继续按 120 Hz 参数运行而物理模式已变为 60 Hz 的问题 |
+| 实际吞吐 | 双缓冲使 CPU 合成与 DPU 传输重叠，解决原生多层约 60.5 fps 的瓶颈；Safari 的优先 60 fps 原生偏好另行处理，不能用面板模式代替应用帧率 |
+
+物理切换和恢复位于 [lemonade_display.c](../xnu/files/bsd/dev/lemonade_display.c)，
+模式发布、队列和合成位于 [MiniIOMobileFramebuffer.cpp](../xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp)。
+这是固定 120 Hz；自适应刷新、完整休眠唤醒和长期功耗尚未完成。
+
+## 第一阶段概况（历史，2026-10-24）
 
 2026-10-24：`codex/lemonade-120hz` 在 LE2110 真机完成 XNU 显示后端的 120 Hz 移动图形
 验证。原 `2026.10.24-base.1` 发布目录、压缩包与源码标签保持不变；普通启动仍使用 60 Hz。

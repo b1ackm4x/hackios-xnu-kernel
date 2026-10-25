@@ -1,9 +1,87 @@
-# OnePlus 9 图形与显示验收
+# OnePlus 9 图形与显示驱动
 
-2026-10-24 的增量实现和实机结果。本页记录实际已通过的范围；不把 Metal 设备枚举、
-平均帧率或帧缓冲截图当作完整兼容、无撕裂或 120 Hz 的证明。
+截至 2026-10-25，`main` 已集成 Metal 异步完成、DPU 直接显示、最多四层 BGRA 合成、
+双缓冲流水线、固定 120 Hz 和退出排空修复。本页先说明当前实现，再保留早期实验与失败记录。
+源码配套关系见 [仓库说明](REPOSITORY.md)；实际运行包与联合验收见
+[默认 120 Hz base](LEMONADE-BASE-120HZ.md)，最新双缓冲设备测试见
+[原生多层显示修复](LEMONADE-NATIVE-BENCH.md)。
 
-## Metal 绘制与复制
+## 当前设计：渲染、合成、传输各自确认完成
+
+保留 iOS 的 1125×2436 逻辑布局，由 Adreno 660 执行 GLES 或已支持的 Metal 命令。
+显示后端单独负责把 IOSurface 送到 1080×2400 面板。GPU 和 DPU 的地址空间、完成信号
+及缓冲区所有权分别管理；提交成功、GPU 完成与面板传输完成是三个不同状态。
+
+```mermaid
+flowchart LR
+  App[UIKit / CoreAnimation / CAMetalLayer] --> Metal[Metal / AIR / Mesa]
+  Metal --> GPU[Adreno 660]
+  GPU --> Fence[IOSurface 与 GPU fence]
+  Fence --> Single[兼容的单层：直接使用源表面]
+  Fence --> Multi[兼容的多层：CPU 合成到两个自有表面]
+  Single --> DPU[DPU SMMU 映射与 QSEED 缩放]
+  Multi --> DPU
+  DPU --> Panel[DSC / DSI / AMB655X]
+  Panel --> Done[PP0 完成、行状态与帧计数核验]
+  Done --> Release[撤销映射、同步 TLB、释放或复用]
+```
+
+- **Metal 提交与等待分开。** `commit` 在调用线程编码并落实 GPU 提交，使 IOSurface 的
+  写入 fence 在 CoreAnimation 交出表面前已经登记。AIR 的 `rwa_batch_submit()` 在 context
+  锁内 flush，并用零超时 fence 查询落实延迟提交；`rwa_completion_wait()` 在锁外等待
+  screen fence，下一帧因此可以继续编码。串行完成队列、状态条件锁和回调顺序共同保证
+  `waitUntilCompleted`、完成通知及队列名额回收不提前发生；资源持有覆盖提交和完成处理。
+- **单层直接送显。** 对已支持的全屏 BGRA 布局，等待 GPU fence 后，把同一 IOSurface 的
+  非连续物理页临时映射进 DPU SMMU，使用 QSEED 缩放。每帧要求 PP0 完成、传输处于空闲、
+  硬件帧计数符合预期且无 fault/underrun，随后撤销映射并同步 TLB，才释放生产者。
+  该路径消除了 CPU 全屏缩放复制；某些渲染路径仍含 Mesa 私有纹理到 IOSurface 的 GPU blit。
+- **多层采用 CPU 合成和 DPU 传输并行。** 最多四个非平面 BGRA32 图层先等待各自 GPU
+  fence，再按预乘透明度、裁切和缩放合成为一个 1125×2436 表面。两个内核自有表面交替使用：
+  DPU 扫描 A 时，CPU 可以准备 B。源图层在 CPU 最后一次读取后释放，自有表面则保留到
+  DPU 完成及可选源图采集之后。`SwapWait` 和退出排空同时检查源读取与正在传输的帧。
+  这不是 DPU 原生多 plane 合成，也不是多层零拷贝。
+- **回退和退出保持同一所有权规则。** 单层、空白帧及 GOP 兼容路径切换先等待已有传输。
+  不支持的布局可恢复 GOP 并使用 CPU 路径；重新进入 direct 时重新切换、测量并发布 120 Hz。
+  无法确认显示完成时保留缓冲区和未完成 fence。退出先阻止新的用户 GPU 调用并排空已有调用，
+  再排空显示，最后关闭 GPU；终止会话中后来抵达的调用等待本次 RAM 内核返回。
+- **物理刷新与应用调度分开。** 面板使用原厂 60/120 Hz 命令，实际测量 64 个 TE 周期后
+  才向 iOS 发布模式。当前 base 使用 `ca_vbl=0` 的原生 CADisplayTimer，GPU fence 和 DPU
+  的 TE/完成检查仍启用。Safari 的原生“优先 60 fps”策略单独修正，不改写 RAF 或帧率报告。
+
+## 已合入的修复与源码入口
+
+| 问题或限制 | 修复思路 | 实现入口与证据 |
+| --- | --- | --- |
+| Metal 色块、圆角裂缝、复制及小组件绘制错误 | 补齐光栅/复制状态；修正 AIR 类型、半精度 varying、语义链接、导数 helper invocation、Stencil8 和 device buffer 偏移 | [Metal 实现][metal-source]、[AIR 后端][air-source]；下文保留 Apple 原生对照、像素回读及失败到通过的记录 |
+| draw 重复上传整个常量 ring buffer | 从专门化 NIR 推导实际读取范围；动态索引仍保留完整范围 | [AIR 后端][air-source]；同一工作负载上传量由约 120–200 MB 降到约 40–43 KB，静态/动态索引回归通过 |
+| 延迟提交访问已释放资源，或把“已提交”当“已完成” | 编码阶段持有资源；异步等待真实 fence；完成状态、回调和名额回收按实际完成处理 | [Metal 实现][metal-source]、`rwa_batch_submit()` / `rwa_completion_wait()`；主机阻塞 fence、状态顺序和生命周期检查通过 |
+| DPU 缩放错位、错误完成位和映射提前退休 | 使用本机 QSEED preload 水平 5/垂直 3；只等实际主 PP0；确认传输后才撤销映射、恢复 GOP | [DPU 驱动](../xnu/files/bsd/dev/lemonade_display.c)；历史 1,000 次切换、MISR 和中断恢复记录见下文 |
+| 第二层触发 GOP 回退并恢复到 60 Hz | 增加最多四层预乘 BGRA 合成；direct 恢复时重新测量高刷模式 | [Framebuffer](../xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp)、[DPU 驱动](../xnu/files/bsd/dev/lemonade_display.c)；base.3 两层/四层/单层实际像素及完成检查通过 |
+| 多层原生程序在请求 120 fps 时约 60.5 fps | CPU 合成与 DPU 等待拆成双缓冲流水线；完整底层省去重复清屏，透明/不透明像素使用快速路径 | [Framebuffer](../xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp) 的 `composite()`、`queueComposite()`、`scanout()`；同程序设备实测约 116–117 fps |
+| 退出时 GPU 已停、Mesa 继续申请 BO 导致 SIGSEGV | 关闭用户调用入口，依次排空调用与显示，再停 GPU；超时保留仍在使用的资源 | [GPU 驱动](../xnu/files/iokit/Kernel/RedwoodGPU.cpp)、Framebuffer；base.3 三次定时、三次主动退出正常返回 |
+| 120 Hz 面板下 Safari 仍请求 60 fps | 仅在匹配的 RAM 高刷会话中初始化 Safari 原生偏好，之后尊重用户更改 | [Safari 修正][safari-source]；base.4 策略及实际帧率见 [运行包记录](LEMONADE-BASE-120HZ.md) |
+
+[metal-source]: https://github.com/b1ackm4x/hackios-xnu-userland/blob/dc773d94ce482d9b544accd62d82a5d1f8457e44/userland/src/redwoodmetal.m
+[air-source]: https://github.com/b1ackm4x/hackios-xnu-userland/blob/dc773d94ce482d9b544accd62d82a5d1f8457e44/tools/mesa/air/air_metal.c
+[safari-source]: https://github.com/b1ackm4x/hackios-xnu-userland/blob/dc773d94ce482d9b544accd62d82a5d1f8457e44/userland/src/lemonade_safari_refresh.m
+
+## 当前验收范围
+
+最新双缓冲设备候选完成轻/重负载 **116.46 / 116.61 fps**，P95 间隔 **8.66 / 9.21 ms**，
+三段共 4,379 帧、零 Metal 错误；设置滚动完整窗口约 119.44–120.04 fps。
+整理后的 `main` 重新通过生产实现的主机回归和 ARM64 构建，但尚未在新内核上重做完整
+DMA 防护、GPU/显示/Wi-Fi 联合及干净运行包验收。最近完成这套验收的包仍是 **base.4**，
+它尚未包含双缓冲流水线。每组数字的内核、root 和工作负载以对应验收页为准。
+
+完整 Metal 兼容、任意格式/几何、DPU 原生多层合成、睡眠唤醒、自适应刷新及长期温控仍未完成。
+浏览器无观察器的 base.4 UFO 场景实际 DPU 平均约 105.27 fps，不能用页面 120 fps 标签
+替代硬件完成率，也不能把原生程序的 116–117 fps 外推到所有应用。源表面截图和 MISR
+均不属于面板光学测量。
+
+## 历史：Metal 绘制与复制（2026-10-24）
+
+以下各节保留当时的实现、参数、失败及验收范围；“当前”“默认”“尚未”等表述均对应
+各节记录时点。后来的默认配置与已完成项以上面的当前设计和链接文档为准。
 
 在 LE2110 / SM8350 / Adreno 660 上，以 Apple 编译器生成的 iOS AIR 执行真实 GPU 工作，
 使用像素与缓冲区回读检查结果。原有的 GLES `FD660` 和共享 IOSurface 检查继续通过。
@@ -79,7 +157,7 @@
 `--metal-system apps` 和 `--metal-system desktop` 是另行验收的系统发现/合成路径，
 不能用进程内测试替代它们的验收。
 
-## 硬件刷新同步
+## 历史：60 Hz 硬件刷新同步
 
 `lemonade_display.c` 仅在 SM8350 匹配且显式选择时启用。实机读回的是 DPU 7.0，
 两个 540×2400 mixer、两路 VIG 读取同一个 1080×2400 / stride 4320 的固件 GOP，
@@ -452,7 +530,7 @@ python3 tools/lemonade-usb.py run --profile performance --metal-test --display s
 重新构建和归档系统镜像，运行 300 秒。结束后恢复普通 `lemonade-metal-system.rc.jobs`
 并重新构建；专用归档中保留该轮实际 jobs，避免把两种工作负载误认成相同测试。
 
-## 尚未达到的边界
+## 历史：2026-10-24 当时的验收边界
 
 系统所有应用的 Metal 兼容、深度 MSAA resolve、完整 texture view、heaps/events 和全部私有 SPI
 尚未全面验收。单层全屏 IOSurface 的 DPU 直接显示、指定缩放几何和完成后释放已取得文末的
@@ -485,7 +563,7 @@ Metal 对照全部一致；本轮 90 秒记录 5,351 次 TE、634 次呈现，�
 五个活动分区哈希均与原备份一致。root 可用，默认外网路由经 wlan0，三次受控 ping 成功。
 该记录早于后续 DPU 中断退出失败；不能用它声称失败后已经恢复 Android。
 
-## 实验性桌面 IOSurface 直接显示：有限范围已验收
+## 历史：首版单层桌面 IOSurface 直接显示
 
 新增显式 `--display direct --display-fences`，对应 `lemonade_display=10 fb_fences=1`。
 仅接受单层、全屏 1125×2436 BGRA，行距为 4544 或桌面实际使用的 4608 字节。
@@ -555,7 +633,7 @@ python3 tools/lemonade-usb.py recording
 精确内核、20 个编译输入、两种测试镜像、源录制、主机检查和上述真机证据保存在私有归档
 `kernel-desktop-direct-verified-20261024`，不上传系统镜像或设备日志。
 
-### 页表查询优化候选：尚未真机运行
+### 历史：页表查询优化候选当时未运行
 
 内核 `d770edd114f73f2c0f1d2896ab5cff20681c1d98703f9566465bc12ae09cf129`
 缓存本次运行中固定、wired 页表页的物理地址，避免每次查找显示叶项时重复遍历 CPU pmap。
@@ -568,5 +646,5 @@ AddressSanitizer/UndefinedBehaviorSanitizer；内核构建成功。此结果不�
 
 09:21 的 Android 检查再次确认 USB 身份、启动完成、原槽/锁状态和五个活动分区哈希。
 随后请求重启至 bootloader，但 60 秒内未出现匹配的 fastboot 接口；工具没有发出 RAM boot，
-该候选尚未在设备执行。当前等待手动重启恢复连接，不能沿用此前的 Android 检查声称手机
-此时仍在 Android。验收仍以此前 `66fc98e0…` 内核及其已归档证据为准。
+该候选在该记录时点尚未在设备执行，正在等待手动重启恢复连接，不能沿用此前的 Android 检查声称手机
+当时仍在 Android。该阶段验收仍以此前 `66fc98e0…` 内核及其已归档证据为准。

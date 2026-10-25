@@ -1,20 +1,22 @@
 # OnePlus 9 / HackiOS bring-up
 
-现阶段运行包的组成、去除测试负载的启动流程及验收状态见 [日常运行 base](LEMONADE-BASE.md)。
+当前状态（2026-10-25）：两个仓库统一使用 `main`，已集成 Adreno 660 GLES/Metal、
+DPU 直接显示与双缓冲多层合成、固定 120 Hz、S6SY792 实体触控和 QCA6490 Wi-Fi。
+这是本地 LE2110 的 RAM 移植工作记录，尚未完成整机外设、电源管理与长期日用验收。
 
-2026-10-24 图形增量见 [Metal 与硬件刷新实机验收](LEMONADE-DISPLAY.md)：包含光栅/复制兼容修复、TE 硬件通知、DPU 独立双缓冲与命令模式各 1,000 次实机切换、中途退出恢复、CPU 复制的生产者 release fence 及当前性能边界。
+| 阅读目的 | 对应文档 |
+| --- | --- |
+| 驱动如何分工、修复了什么、源码在哪里 | [图形与显示驱动](LEMONADE-DISPLAY.md)、[Wi-Fi 驱动](WIFI-LEMONADE.md)、本文末尾的实体触控章节 |
+| 面板如何切换并确认 120 Hz | [AMB655X 硬件切换](LEMONADE-120HZ.md)、[iOS 模式与帧时钟](LEMONADE-IOS-120HZ.md) |
+| 当前运行包、默认配置与联合验收 | [默认 120 Hz base](LEMONADE-BASE-120HZ.md)；早期 60 Hz 包见 [旧 base](LEMONADE-BASE.md) |
+| 多层程序约 60.5 fps 的原因及修复结果 | [原生多层显示修复](LEMONADE-NATIVE-BENCH.md) |
+| 两个源码仓库、配套提交与分支约定 | [仓库说明](REPOSITORY.md) |
 
-当前阶段状态（2026-10-24）：DPU 独立双缓冲与命令模式各 1,000 次切换、定时中断恢复
-已经通过。CPU 复制的生产者 release fence 在系统 Metal/GLES 桌面完成真实队列顺序检查。
-最新设备缓冲区偏移修复通过 Apple M4 原生 Metal 与一加 9 FD660 的 101 项特性测试；
-系统 Metal 另通过 2 项 MPS、4 项 CA。隔离的 `--metal-widgets` 镜像实际画出天气无数据
-提示和日历日期/无日程状态，解决原先小组件空白及 RenderBox 7,408 字节偏移被拒绝的问题。
-08:23 返回 Android 后，身份、槽位和五个启动分区哈希仍与原备份一致。
-桌面直接送屏、缩放、长帧和完整 Metal/显示兼容仍需继续验收。
-
-这是本地一加 9 LE2110 的移植工作记录，不是已经验证可用的 ROM。
-
-2026-10-24 更新：QCA6490 Wi-Fi 已在 iOS RAM 环境通过 WPA2 关联、DHCP 分配 IPv4、DNS、六次真实 HTTP 请求、主动断开重连和正常退出；已恢复原 Android 并核对五个启动分区哈希。具体证据与未验证范围见 [Wi-Fi 实测记录](WIFI-LEMONADE.md)。本次 Wi-Fi 验收未与 GPU/触控同时运行。
+最新双缓冲设备候选的原生 Metal 场景约 116–117 fps。最近完成整包验收的 **base.4**
+已通过显示、Metal、Wi-Fi 联合检查，但尚未包含这次双缓冲流水线；整理后的 `main`
+已通过主机回归与构建，不能沿用旧包记录宣称新内核完成整包验收。
+Wi-Fi 的实际关联、DHCP、DNS、HTTP 和主动断开重连均有设备证据；长期稳定性、其他认证
+方式、睡眠唤醒及所有应用稳定 120 fps 仍未确认。下文保留初期 bring-up 的日期与原始边界。
 
 ## 固定源码基线
 
@@ -43,7 +45,7 @@
 
 已备份 A/B 两槽的 `boot`、`vendor_boot`、`dtbo`、`vbmeta`、`vbmeta_system`、`vbmeta_vendor`、`xbl`、`xbl_config`，加上 FDT 共 17 个文件 / 871,221,015 字节。每个文件均与手机端 SHA-256 对照；清单为 `local/lemonade/sha256.json`。这不是 userdata 或完整整机备份。
 
-## 本次实现
+## 初期启动移植实现
 
 - `common/devices/lemonade.conf`：SM8350 的早期启动参数，Android boot header v3。
 - `xnuloader/loader.c`：lemonade platform；只有原 redwood 路径允许持久化日志，lemonade 日志留在 RAM/USB。
@@ -110,7 +112,7 @@ Mu submodule 的工作树在容器内初始化，部分 `.git` 指向 `/work`；
 
 不要使用 `common/run.sh redwood` 或直接执行上游 `xl enter` 来启动这台手机。上游 POCO 的触控、GPU、Wi-Fi、音频、UFS native、CPU 调频和 watchdog 不能因为都属于高通就当作已经适配。
 
-## 当前验证边界
+## 初期验证边界（2026-10-23）
 
 2026-10-23 USB 真机验证已完成：
 
@@ -267,51 +269,56 @@ python3 tools/lemonade-verify-android.py
 此配置展开为已适配内核、`bootcpu=7 cpus=4 cpufreq=1 gpu=1` 和用户空间，并保留 UFS 写入等关闭状态。内核校验、CPU 策略能力标记、镜像校验和设备身份仍须通过；它不能与不匹配的手动 CPU/内核参数混用。返回核验脚本只选择身份哈希匹配的 USB 设备，等待 Android 启动完成，再核对机型、原槽、解锁状态和五个活动启动分区哈希，不覆写原始基线。核验完成后才释放租约。这组性能基准使用虚拟输入。后续已完成的 S6SY792 基础实体触控见文末触控适配章节；其他外设和完整电源管理仍待移植。
 
 
-## 显示方案与后续路线（2026-10-23 起）
+## 显示方案与驱动分工（更新于 2026-10-25）
 
-以下保留 10 月 23 日的设计路线。10 月 24 日已实现硬件刷新同步、独立双缓冲映射/切换，
-以及显式 `--display direct --display-fences` 的单层全屏 IOSurface 直接显示。
-950 次直接传输和 4 次 CPU 回退的释放记录已完整对应；范围和证据见
-[显示增量验收](LEMONADE-DISPLAY.md)。多层合成、完整生命周期和 120 Hz 仍待实现与验收。
-
-当前 Adreno 驱动执行 GLES/Mesa 及已覆盖范围内的 Metal 渲染命令。`blit_targets` 路径先在 Mesa 私有纹理中绘图，再由 `target_to_surface()` 用 GPU blit 导出到 IOSurface。默认显示路径等待 GPU fence 后，调用 `drawLayer()/drawRows()`，把 iOS 的 1125×2436 缩放成面板的 1080×2400，写入固件 GOP 缓冲区。显式 direct 路径在单层全屏 BGRA、已验证行距下，改由 DPU 读取同一 IOSurface 页面并缩放；传输完成且撤销映射后才释放生产者。不支持的层布局恢复 GOP 后回退。GPU 渲染和显示控制器送屏仍是独立环节；[Android HWC](https://source.android.com/docs/core/graphics/implement-hwc) 与 [Linux KMS](https://docs.kernel.org/gpu/drm-kms.html) 的接口也分别处理缓冲区、图层和同步。
+采用独立的渲染与显示后端：Adreno/Mesa 负责生成 IOSurface，MiniIOMobileFramebuffer
+负责图层、引用和队列，lemonade DPU 驱动负责映射、缩放、命令传输、刷新模式和恢复。
+兼容的单层共享原页面送显；最多四层 BGRA 先合成到两块交替使用的自有表面，CPU 准备
+下一帧时 DPU 传输上一帧。iOS 保持 1125×2436 布局，DPU 缩放到物理 1080×2400。
 
 ```mermaid
 flowchart LR
-  CA[CoreAnimation / GLES / 已覆盖的 Metal] --> GPU[Adreno 660 / Mesa]
-  GPU --> Blit[GPU blit 导出]
-  Blit --> IOS[IOSurface 中的画面]
-  IOS --> CPU[默认或回退：CPU 缩放与整屏拷贝]
-  CPU --> GOP[固件 GOP 缓冲区]
-  GOP --> Panel[面板]
-  IOS --> DPU[显式 direct：单层共享页面、硬件缩放与完成后释放]
-  DPU --> Panel
+  CA[CoreAnimation / UIKit / Metal] --> GPU[Adreno 660 / Mesa]
+  GPU --> IOS[IOSurface 与 GPU fence]
+  IOS --> Single[单层直接送显]
+  IOS --> Multi[多层 CPU 双缓冲合成]
+  Single --> DPU[DPU 映射、缩放与传输]
+  Multi --> DPU
+  DPU --> Panel[AMB655X 固定 120 Hz]
+  DPU --> Retire[实际完成后撤销映射并释放或复用]
 ```
 
-### 已核实的硬件和可复用部分
+核心修复包括 Metal/AIR 绘制兼容与资源生命周期、常量缓冲上传范围、异步 GPU 完成、
+DPU 的 QSEED 参数和 PP0 完成判断、图层合成与双缓冲所有权，以及 GPU 退出前的调用/显示
+排空。完整问题清单、源码链接和证据见 [图形与显示驱动](LEMONADE-DISPLAY.md)。
 
-| 项目 | 证据与实现含义 |
+### 硬件约束与实现选择
+
+| 项目 | 约束与当前实现 |
 | --- | --- |
-| 面板 | 原机 FDT 为 Samsung AMB655X、1080×2400、`dsi_cmd_mode`，有 60/120 Hz 两组 timing、TE pin、DSC 1.2、两个 encoder、540×30 slice；不是 redwood 文档里的视频模式面板。运行时当前选中的 timing 仍需实机寄存器确认。 |
-| DPU/MDSS | SM8350 DPU 7.0。原机 MDSS 基址 `0x0ae00000`；Linux MDP 子块从 `0x0ae01000` 计偏移。两套 offset 相差 `0x1000`，必须先换算到物理地址，不能混用。 |
-| 输出 | INTF1/DSI0，原机 INTF1 物理地址 `0x0ae36000`；DSI0 `0x0ae94000`；DISPCC `0x0af00000`。显示 IRQ 为 GIC SPI 83，内部再区分 TE、完成、underrun 等事件。 |
-| 缩放 | 四个 VIG pipe 带 QSEED3 3.0。可尝试保留 iOS 当前 1125×2436 布局，由 VIG 缩到 1080×2400，避免为提速改动 iOS 屏幕类别。 |
-| 压缩 | DPU 有 DSC 1.2 硬件，面板参数来自原机 FDT；初期应保留固件已建立的 DSC/DSI 状态。 |
-| 地址空间 | DPU 使用 APPS SMMU（stream `0x820`、mask `0x402`，原机非安全 IOVA pool 位于 32 位范围）。这是独立于 Adreno 的地址空间，GPU IOVA 不能直接交给 DPU。 |
-| 现有 IOSurface | 已有共享页面、引用计数、GPU fence 和 `MiniIOSurfaceDrawn()`。页面分配不保证物理连续，因此长期零拷贝需要把相同页面映射进 DPU SMMU，并在显示完成前保留引用。 |
-| 固件 | lemonade UEFI 使用 `DisplayDxe.efi` 二进制。标准 GOP 只给固定 FrameBufferBase；不能把 GOP 的 CPU Blt 当作原生换帧。其是否周期重写 DPU、是否开启自动刷新，需要观测后确定。 |
+| 面板 | Samsung AMB655X，1080×2400 命令模式、DSC 1.2、两路 540×30 slice；只接受已核对面板的原厂 60/120 Hz 序列，测量 64 个 TE 周期后发布模式 |
+| DPU/MDSS | SM8350 DPU 7.0；MDSS 基址 `0x0ae00000`，MDP 子块从 `0x0ae01000` 计偏移，寄存器地址不能混用两套基准 |
+| 输出 | INTF1/DSI0，显示 IRQ 为 GIC SPI 83；TE 表示节拍，PP0 完成、行状态与帧计数共同确认一次传输 |
+| 缩放与压缩 | 使用 VIG/QSEED3；本机 preload 为水平 5 / 垂直 3，保留已建立的 DSC/DSI 链路，模式切换不重设 PLL |
+| 地址空间 | DPU 使用 APPS SMMU 的非安全显示流，与 Adreno GPU 地址空间独立；临时映射实际 IOSurface 页面，传输完成后撤销并同步 TLB |
+| 多层 | 当前在 CPU 上完成预乘 BGRA 合成；双缓冲让合成与传输重叠，不等于 DPU 原生多层合成 |
+| 回退 | 不支持的布局恢复 GOP 后用兼容路径；重新进入 direct 时重新切换并测量高刷模式，不把逻辑参数当作物理切换成功 |
+| 生命周期 | GPU fence 约束读取开始，DPU 完成约束自有表面的复用；超时保留资源，退出按用户调用、显示、GPU 的顺序排空 |
 
-主参考为 Linux v6.12 的 [SM8350 DPU catalog](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_7_0_sm8350.h)、[SSPP 地址/格式/缩放](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_sspp.c)、[命令模式 encoder](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c)、[DSC 1.2](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_dsc_1_2.c)，与原机 FDT 交叉检查。已下载的七个源码文件及 SHA-256 在 `local/lemonade/display-references/sources.json`；面板非身份参数摘要在 `display-panel-summary.txt`。
+实现参考包括固定版本的 [SM8350 DPU catalog](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/catalog/dpu_7_0_sm8350.h)、
+[SSPP 地址/格式/缩放](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_sspp.c)、
+[命令模式 encoder](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_cmd.c)
+及 OnePlus 原厂面板资料，并与本机寄存器、设备树和实际输出交叉核对。
 
-### 推荐实施顺序和验收
+### 已完成步骤与后续边界
 
-1. **只读接管前探测。** 新建 lemonade 专属 display probe，先确认时钟/电源可读条件，再记录当前 SSPP 地址、stride/format、CTL/LM/DSC/INTF 路由、TE/传输完成计数和 SMMU 状态。多次采样判断固件是否仍改写这些寄存器。此阶段不重设面板、不修改 DSI PLL。验收是原画面、USB 和返回 Android 均正常，并能解释哪条硬件链正在送屏。
-2. **两个独立测试缓冲区换帧。** 先用已验证地址范围的线性 BGRA buffer；按实际地址空间映射，不假定物理地址可直接使用。只切 SSPP source address，按需要提交 CTL flush/kickoff，通过 TE 和传输完成确认换帧；旧 buffer 必须等显示完成再释放。保留完整寄存器恢复路径和 GOP 回退。验收至少 1,000 次交替色块提交、0 次 SMMU fault/underrun/完成超时。
-3. **接入现有 GPU/IOSurface。** 新建最小 lemonade DPU backend，由 `MiniIOMobileFramebuffer` 在平台匹配且探测通过时使用。渲染完成 fence 是提交前条件；显示完成 fence 是释放旧 surface 的条件，同时必须让生产者等到 release fence 后才能重用，单纯保留对象引用不够。先单层 BGRA 和硬件缩放，再覆盖实际多层场景；支持不了的格式可明确回退到现有路径。首个验收目标是连续帧的 CPU 全屏 memcpy/逐像素缩放计数为 0。这时仍可能保留私有纹理到 IOSurface 的 GPU blit；要进一步做到渲染到扫描输出完全不拷贝，还需验证 GPU 可渲染与 DPU 可扫描的格式、stride、tiling/UBWC 布局一致，再去掉该 blit，不能仅凭平均 FPS 判定零拷贝。
-4. **60 Hz 的同步与功耗。** 用 TE/完成中断驱动显示节奏，替换当前软件时钟节拍；整组手势检查漏帧、晚帧、GPU/显示 fence、温度。持续 30 分钟交互和多次启动/退出后，再讨论日常默认。通过高速拍摄/实际面板观察确认撕裂，帧缓冲截图本身不能证明扫描同步。
-5. **完整生命周期。** 最后补面板初始化、DSC 参数与 DSI 命令、背光、休眠/唤醒、故障恢复、DPU/内存带宽动态投票；在这些通过后才推进 120 Hz。原厂最高刷新率不代表当前移植已支持相同模式。
+只读硬件探测、独立缓冲区切换、单层 IOSurface 映射、固定 120 Hz、系统模式发布、
+多层合成和双缓冲流水线均已有各自的实机证据。早期“先完成全套电源生命周期再推进
+120 Hz”的设计顺序已调整：目前在固件初始化好的显示链路上实现固定高刷及有界退出恢复。
 
-以上实施顺序是初始路线，不代表各阶段均已完成。当前 direct 已接通其中的单层共享 IOSurface 和 DPU 缩放，但仍同步等待命令完成；约 55 FPS 的有界手势结果也未达到稳定满 60 FPS。后续需要减少提交开销、使用完成中断、验证更广的图层布局与长时间交互，再推进面板生命周期和 120 Hz。
+完整面板上电初始化、背光、电源管理、睡眠唤醒、自适应刷新、动态带宽/温控和长期交互
+仍需实现或验收。最新流水线尚需用对应内核重做完整联合与运行包验收；它没有覆盖所有
+应用、任意格式或几何。帧率、MISR 和源表面截图也不能替代面板的光学撕裂检查。
 
 
 ## S6SY792 实体触控适配（2026-10-23）
@@ -321,6 +328,14 @@ flowchart LR
 新增 `xnu/files/bsd/dev/lemonade_touch.c` 接入 `/dev/redwood-touch`，沿用 backboardd 的 HID 输入桥。当前通信使用 GPIO 开漏 I²C；高电平通过释放引脚获得，支持最多 20 ms 的从设备时钟拉伸，空闲时每 4 ms 检查中断线。供电沿用设备树中的 `ldoc8` 1.8 V 和 `ldoc3` 3.0 V。芯片身份、应用模式、固件完整性和原始固件版本匹配后，才发送扫描开启命令。无固件更新、擦除或校准命令。
 
 诊断模式 `--touch inspect` 仅读取引脚、时钟和命令数据库。`--touch on` 需要带对应能力标记的已校验内核；原 POCO Goodix 和按键驱动增加平台检查，lemonade 的默认参数显式保留 `buttons=0`。退出 XNU 后恢复引脚配置。供电请求和触控状态均为临时运行状态，完整的睡眠/唤醒、电源管理与 GENI 硬件 I²C 仍需后续适配。
+
+适配思路是保留触控芯片原固件，以板级通信和事件解码接入既有 iOS HID 桥：
+
+| 原有缺口 | 实现与边界 |
+| --- | --- |
+| 上游 POCO 触控及按键初始化不适用于本机 | 平台检查隔离 Goodix/按键路径；新增 [lemonade_touch.c](../xnu/files/bsd/dev/lemonade_touch.c)，按本机引脚和供电配置访问 S6SY792 |
+| 尚无可用 GENI 硬件 I²C 后端 | 使用开漏 GPIO I²C、时钟拉伸超时和中断线轮询；退出恢复引脚，不宣称完成硬件 I²C 或睡眠唤醒 |
+| S6SY792 原始事件不能直接交给 iOS | [协议解码](../xnu/files/bsd/dev/lemonade_touch_protocol.h)处理触点编号、坐标及按下/移动/抬起，接入 `/dev/redwood-touch` 与 backboardd HID 桥；实体单指操作证据见下文 |
 
 ```bash
 python3 tools/lemonade-usb.py boot

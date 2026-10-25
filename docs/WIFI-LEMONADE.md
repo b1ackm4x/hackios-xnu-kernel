@@ -1,10 +1,61 @@
 # OnePlus 9 Wi-Fi 移植记录
 
-截至 2026-10-24，QCA6490 major 1 已在本机 iOS RAM 环境完成 ath11k 启动、扫描、WPA2 关联、DHCP 分配 IPv4、DNS 和真实 HTTP 传输。最终 240 秒测试中，首次连接与主动断开后的重新连接各完成 3/3 次 HTTP 请求，阶段、联网及正常退出检查全部通过。01:17 已恢复原 Android，五个启动分区哈希与备份一致，原 Wi-Fi 连通检查 3/3 成功。历史失败及修正见下文。
+截至 2026-10-25，QCA6490 major 1 的 PCIe/MHI、ath11k 兼容层与 iOS 无线接口已合入
+`main`。本机 RAM 环境已完成扫描、WPA2 关联、DHCP、DNS、真实 HTTP 传输及主动断开
+重连；后续 base.4 也完成显示/Metal/Wi-Fi 联合验收。最新显示双缓冲源码尚未重做整套
+联合验收，不能把 base.4 的结果转用于新内核，详见 [运行包记录](LEMONADE-BASE-120HZ.md)。
 
 major 1 的源码核对结果和具体实施顺序见 [QCA6490 major 1 适配方案](WIFI-QCA6490-PLAN.md)。当前已有完整固件握手、无线扫描、iOS 接口和基本联网的本机证据。
 
-开发分支：`codex/lemonade-wifi`。`device/lemonade` 保留此前 GPU、实体触控和研究文档的基线。本轮不修改手机分区、启动槽位、Android Wi-Fi 配置或设备校准数据。
+早期 `codex/lemonade-wifi` 的适配已归入当前 `main`；仓库关系见 [仓库说明](REPOSITORY.md)。
+移植使用临时 RAM 启动，不改写手机分区、启动槽位、Android Wi-Fi 配置或设备校准数据。
+
+## 驱动思路：先打通传输，再接无线协议与系统接口
+
+QCA6490 是 PCIe/MHI 设备，不能沿用 redwood 的 WCN6750 WPSS/AHB 启动流程。
+板级驱动负责电源、时钟、复位、PCIe、SID/SMMU 和 MHI；独立 major 1 profile 配合
+Linux 兼容层运行 ath11k；最后把 STA 接入 iOS 无线接口和 en0，由系统网络服务处理 IP。
+每层有单独的成功条件：PCI ID 可读不等于固件启动，WMI ready 不等于关联，关联不等于联网。
+
+```mermaid
+flowchart LR
+  Board[电源 / 时钟 / PHY / PCIe] --> DMA[BDF 到 SID / SMMU 受限 DMA]
+  DMA --> Boot[BHI / SBL / MHI M0 / BHIE]
+  Boot --> FW[QMI / WLFW 内存及板级文件握手]
+  FW --> Radio[ath11k / HTC / WMI / 扫描与 STA]
+  Radio --> IOS[iOS 无线接口 / en0]
+  IOS --> Net[关联 / DHCP / DNS / 实际数据传输]
+```
+
+固件按本机修订选择原厂 `amss.bin`，并使用同机 board、regdb 和 M3 文件，逐项核对哈希。
+受限 DMA 映射先于 Bus Master 开启；真实未映射页读取必须被 SMMU 拦截，才允许相同内核
+传送固件。当前 MHI/无线传输仍依赖轮询处理，未完成 CPU 中断驱动及完整省电生命周期。
+停止时先退出 STA/ath11k 和 MHI 工作线程，停止端点 DMA，再撤销映射、同步 TLB，恢复
+SID、PCIe 和引脚/时钟状态。RPMh 电源请求的完整所有权管理仍待实现。
+
+## 已修复的问题与源码入口
+
+| 问题 | 修复 | 设备或主机证据 |
+| --- | --- | --- |
+| 误入 SM7325 初始化，或未上电就访问 PCIe 寄存器 | 平台隔离；把 rails、domain、clocks、resets、controller、PHY、link 拆成有界阶段 | [板级驱动](../xnu/files/bsd/dev/lemonade_wifi.c)、[redwood 平台检查](../xnu/files/bsd/dev/redwood_wifi.c)；分阶段正常返回记录见下文 |
+| PCIe 初始化顺序、PIPE mux 和 PHY 时钟不匹配 | 按本机设备树请求 L6 1200 mV / L5 880 mV；修正 PARF 顺序、PIPE mux `0x6b054`、板级 PHY 表，PHY ready 后才读 DBI | 板级驱动；根控制器 `17cb:010c` 和端点 `17cb:1103` 实际读回，链路训练及恢复通过 |
+| 把 SMMU 格式位当 fault，或用不支持的 ATOS 宣称 DMA 可用 | 使用明确的寄存器访问指令、检查 ATOSNS 能力、故障掩码 `0xc00001fe`；软件页表与真实越界 DMA 分开验收 | 板级驱动、[验收器](../tools/lemonade-check-wifi.py)；实际 FAR/SID 匹配的保护页拦截两次通过 |
+| MHI 环布局及 MSI 初始化不完整 | 使用 44 字节 context、16 字节 TRE；按端点 32 位 MSI 能力配置四个消息到自有 mailbox，再轮询事件 | [协议定义](../xnu/files/bsd/dev/lemonade_mhi_protocol.h)、板级驱动；实际 M0、mission EE 和 IPCR 消息通过 |
+| QMI 提前查询能力失败，固件内存交接出现 SYSTEM_ERROR | 先登记和声明主机能力，再响应内存请求、等待 memory-ready；完整驱动 DMA 池扩为 64 MiB，地址按覆盖申请大小的二次幂对齐 | [兼容层 DMA 分配](../wifi/lx/src/lx_base.c)、[兼容总线层](../wifi/lx/src/lx_bus.c)、板级驱动；成功完成 WLFW 内存、regdb/board、M3 及运行模式握手；仅 16 KiB 对齐的失败版本保留作对照 |
+| PCI ID 相同却被当作已支持的 major 2 | 新增独立 QCA6490 major 1 profile，保留上游版本编号，host/target CE2 上限均为 3200 字节 | [profile 生成器](../tools/lemonade-ath11k-profile.py)；实际 major 1 芯片完成 ath11k 启动与扫描 |
+| CE 访问错误偏移，HTC/WMI 无法完成启动 | PCIe 分支设置 `ab->mem_ce = ab->mem`，CE 寄存器相对 BAR0 访问 | [兼容总线层](../wifi/lx/src/lx_bus.c)；修复后收到真实 unified-ready，阶段 22 通过 |
+| 驱动 ready 尚未形成 iOS 网络接口 | 增加 station 生命周期和系统无线接口桥接，交由 Apple80211/configd 完成关联及 DHCP | [无线接口桥](../wifi/lx/src/lx_80211.c)；en0、有效 IPv4、DNS、六次 HTTP 和主动重连通过 |
+| 退出时设备仍可能访问已释放 DMA 内存 | 停止驱动/线程和端点后再拆映射，核对 Bus Master、MSI、BAR、SMMU/SID 清理；无法安全释放时保留 DMA 页 | 板级驱动与兼容总线层；正常退出和原 Android 恢复有独立日志，不声称任意故障时序均已覆盖 |
+
+## 验收范围与历史记录
+
+2026-10-24 的独立 240 秒测试中，首次连接与主动断开后的重连各完成 3/3 次 HTTP 请求，
+联网及正常退出检查全部通过；恢复 Android 后五个启动分区哈希与备份一致，原 Wi-Fi
+连通检查 3/3 成功。后续联合验收见 base 文档。长期吞吐与稳定性、其他认证方式、漫游、
+睡眠唤醒，以及原生设置首次输入密码的完整流程仍未单独验收。
+
+下文保留 2026-10-23 至 24 日的逐阶段记录；其中“下一步”“尚未”等描述对应当时阶段，
+最终状态以上述概览和后续验收为准。固件、校准数据、原始日志和网络输入仅留在私有目录。
 
 ## 已确认的硬件
 
@@ -239,7 +290,7 @@ python3 tools/lemonade-verify-android.py
 2. 已训练链路、读取 `17cb:1103` 端点及内部硬件版本；固件阶段仅在受限 SMMU 已就绪后开启 Bus Master，退出前确认清零。
 3. 已验证 PARF BDF-to-SID、SMMU DMA 隔离、BHI/SBL、MHI M0、BHIE 全镜像及 IPCR/WLFW；QMI 初始化、内存请求和板级文件传输也已通过。
 4. 独立 QCA6490 major 1 profile、PCIe/MHI 兼容层、扫描、en0 和实际关联已通过。
-5. 用户授权的当前网络已通过 DHCP、DNS、六次 HTTP 传输、主动断开重连及退出恢复；基本 STA 联网目标完成。后续另行验证长期稳定性、其他认证方式和 GPU/触控同时运行。
+5. 用户授权的当前网络已通过 DHCP、DNS、六次 HTTP 传输、主动断开重连及退出恢复；基本 STA 联网目标完成。GPU/触控联合运行已在后续 base 中验证，见页首链接；长期稳定性、其他认证方式和完整省电仍需另行验证。
 
 固件内容、板级校准及原始设备树仅保存在被 Git 忽略的私有目录。扫描日志不保存网络标识；联网测试的凭据仅用于明确批准的临时传送，完成后删除，不进入仓库。
 
