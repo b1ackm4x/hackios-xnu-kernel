@@ -19,6 +19,7 @@
 - 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入 `main`；机型专用实验仍可使用机型分支。
 
 当前默认 120 Hz 基线 `2026.10.25-base.1` 在两个仓库均有标签 `base-2026.10.25-1`。
+后续高刷、合成、退出和 Safari 修复已继续集成到 `main`，不将未完成整包验收的源码提交标记为发布版。
 旧的 60 Hz 标签 `base-2026.10.24-1` 保留不变。配套提交见 `common/devices/lemonade.sources.json`，
 验收记录见 [LEMONADE-BASE-120HZ.md](LEMONADE-BASE-120HZ.md)。
 

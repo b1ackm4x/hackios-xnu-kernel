@@ -4,22 +4,30 @@
 
 ## 当前进度
 
-当前 base：**`2026.10.25-base.1`**，默认 **120 Hz**，源码标签：`base-2026.10.25-1`。
-
+当前 `main` 已集成默认 **120 Hz**、异步 Metal、双缓冲多层 BGRA 合成、安全退出，以及 Safari 网页刷新策略修复。
+最近完成整套运行包验收的本机版本是 **`2026.10.25-base.4`**；它不包含后续双缓冲改动。
+新源码通过构建与回归检查，新的完整运行包验收另行进行。
 | 模块 | 已验证范围 |
 | --- | --- |
-| GPU | Adreno 660 GLES / Metal；Metal 101 项、MPS 2 项、Core Animation 4 项通过 |
+| GPU | Adreno 660 GLES / Metal；Metal 103 项、MPS 2 项、Core Animation 4 项通过 |
 | 显示与触控 | SpringBoard 桌面、默认 120 Hz DPU 直接显示、实体触控；UIKit 最高 120 fps |
 | Wi-Fi | QCA6490 关联、DHCP、DNS、HTTP 和断线重连；联网检查 61 项通过 |
 | 干净运行包 | 已移除自检、测试程序、自动手势、调试录制和定时退出；默认运行与正常退出检查通过 |
 
 以上包含同机联合验收，尚未完成长期稳定性验证。系统只在 RAM 中运行，不刷写 Android 分区，重启后设置与会话不保留。
 
-120 Hz 已成为 base 的默认配置，双击启动即可使用。两轮应用真机验收中，UIKit `CADisplayLink` 达到约 **120 fps**，对应变化画面的 DPU 输出为 **119.57–119.96 fps**；Core Animation 动画输出为 **121.15–121.19 fps**。旧 `2026.10.24-base.1` 保留为 60 Hz 回退包。详见 [默认 120 Hz base](docs/LEMONADE-BASE-120HZ.md) 与 [帧率验收](docs/LEMONADE-IOS-120HZ.md)。
+120 Hz 是默认启动模式。原生设置曾受 Metal 同步等待限制，同条件实测约 84–86 fps；
+base.3 的同一内核实测慢滑 119.19 fps、快滑 119.86 fps，快速滚动的 P95 帧间隔由 16.6 ms 降至 8.3 ms。这里区分实际应用
+表现与面板模式，不将此前 Refresh 测试应用的 120 fps 结果当作所有应用的保证。
+base.3 的两层、四层与单层切换保持 120 Hz，3 次定时退出和 3 次主动退出均未观察到 backboardd SIGSEGV。
+后续双缓冲修复将同一原生 Metal 场景从约 60.5 fps 提升到 **116–117 fps**；应用和 GPU 频率未改，详见 [原生多层显示实测](docs/LEMONADE-NATIVE-BENCH.md)。
+旧运行包均保留。详见 [默认 120 Hz base 与修复验收](docs/LEMONADE-BASE-120HZ.md)。
+
+Safari 原来将网页动画限制在 60 fps。base.4 关闭该默认策略并保留用户修改，UFO Test 无观测探针时实测显示完成 **105.27 fps**；**该网页尚未稳定达到 120 fps**。
 
 ## 使用
 
-本机发布包：`out/releases/lemonade-2026.10.25-base.1.zip`。
+本机发布包：`out/releases/lemonade-2026.10.25-base.4.zip`。
 
 Mac 需安装 Python 3.11+、adb 和 fastboot。USB 连接这台一加 9，解压后双击 `Start.command`；返回 Android 使用 `Return-to-Android.command`。
 
@@ -27,7 +35,7 @@ Mac 需安装 Python 3.11+、adb 和 fastboot。USB 连接这台一加 9，解�
 
 - 完整 Metal 兼容、120 Hz 长时间稳定性与动态刷新率切换、睡眠唤醒、温控与电源管理，以及其余外设。
 - 原生设置首次输入 Wi-Fi 密码的完整流程尚未单独验收；天气小组件仍显示占位内容。
-- 压力测试结束时存在显示服务清理异常；干净 base 的正常退出已通过。
+- 双缓冲多层合成覆盖非平面 BGRA32；其他格式仍可能使用兼容显示路径。已有原生场景实测，新内核的完整运行包验收尚未完成。
 
 ## 代码布局
 

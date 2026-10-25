@@ -10,7 +10,7 @@
     "repository": "https://github.com/b1ackm4x/hackios-xnu-userland",
     "upstream": "https://github.com/oosexgang/hackios-xnu-userland",
     "upstream_base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
-    "commit": "c85a84d4157e606f6bc45ea11d56f256169aca98"
+    "commit": "dc773d94ce482d9b544accd62d82a5d1f8457e44"
   },
   "base_release": {
     "version": "2026.10.25-base.1",
@@ -24,5 +24,30 @@
     "version": "2026.10.24-base.1",
     "tag": "base-2026.10.24-1",
     "default_display_hz": 60
+  },
+  "local_base_release": {
+    "version": "2026.10.25-base.4",
+    "source_status": "verified local package preserved; later source fixes integrated separately on main",
+    "default_display_hz": 120,
+    "gpu_clock_mhz": 379,
+    "metal_completion": "asynchronous GPU fence",
+    "core_animation_clock": "native CADisplayTimer at 120 Hz; ca_vbl=0",
+    "previous_tagged_release": "2026.10.25-base.1",
+    "display_shutdown": "close terminal GPU user-call admission, drain active calls and accepted display frames before hardware stop",
+    "refresh_recovery": "remeasure and restore 120 Hz after compatibility frames",
+    "multilayer_display": "owned premultiplied BGRA32 composite, logical scaling/clipping, measured DPU refresh preserved",
+    "previous_local_release": "2026.10.25-base.3",
+    "safari_refresh": "real prefer-60 setting seeded off once in the fresh RAM profile; subsequent user changes honored",
+    "safari_stable_120_fps_verified": false
+  },
+  "integrated_source_fixes": {
+    "branch": "main",
+    "metal_completion": "submit on the encoding thread, then retire the real GPU fence on a separate queue",
+    "multilayer_display": "two owned premultiplied BGRA32 buffers overlap CPU composition with actual DPU transfer",
+    "display_shutdown": "drain admitted GPU user calls, source reads and outstanding display transfer before hardware stop",
+    "safari_refresh": "initialize the native prefer-60 preference once for the measured 120 Hz RAM desktop; honor later user changes",
+    "temporary_profiling_and_ab_switches": false,
+    "validation_document": "docs/LEMONADE-NATIVE-BENCH.md",
+    "new_full_runtime_package_verified": false
   }
 }
