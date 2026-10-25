@@ -19,7 +19,8 @@
 - 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入 `main`；机型专用实验仍可使用机型分支。
 
 当前默认 120 Hz 基线 `2026.10.25-base.1` 在两个仓库均有标签 `base-2026.10.25-1`。
-后续高刷、合成、退出和 Safari 修复已继续集成到 `main`，不将未完成整包验收的源码提交标记为发布版。
+后续高刷、合成、退出和 Safari 修复已继续集成到 `main`；正式 base 标签以整包验收为准。
+`ci-lemonade-<commit>` 标签用于主机测试与编译通过的通用组件实验版，不代表完整运行包已通过真机验收。
 旧的 60 Hz 标签 `base-2026.10.24-1` 保留不变。配套提交见 `common/devices/lemonade.sources.json`，
 验收记录见 [LEMONADE-BASE-120HZ.md](LEMONADE-BASE-120HZ.md)。
 
@@ -42,8 +43,9 @@ common/ugit config remote.pushDefault origin
 需要复现该组合时，可用 `common/ugit switch --detach <userland.commit>` 切到记录的提交；
 继续开发前用 `common/ugit switch main` 回到当前集成分支。
 
-这只取回可维护的源代码。设备原始备份、原机固件、Apple 系统文件、SDK、构建产物和私有验证日志
-不随仓库分发；准备和构建步骤见 [LEMONADE.md](LEMONADE.md)。
+这只取回可维护的源代码。设备原始备份、原机固件、Apple 系统文件、SDK、私有验证日志与新增构建产物
+不写入 Git。公开的通用构建产物通过 GitHub Releases 下载，范围与校验方法见 [CI 说明](LEMONADE-CI.md)；
+本地系统与设备文件的准备和构建步骤见 [LEMONADE.md](LEMONADE.md)。
 
 ## 日常提交
 
@@ -69,6 +71,7 @@ common/ugit push origin HEAD
 ```
 
 两边同时修改时，先提交用户空间，再更新内核仓库内的 `lemonade.sources.json`，记录配套的用户空间提交。
+推送 kernel 仓库 `main` 会触发 CI；仅推送 userland 不会自动更新配套版本或触发内核发布。
 真实设备测试的通过范围、性能数据和未完成项写入 `LEMONADE.md`，不要把构建成功写成硬件验收成功。
 两个仓库共用内核的 `.gitignore`；新增用户空间源文件可能被顶层白名单隐藏，需要先检查内容，
 再用 `common/ugit add -f -- <exact-new-source-file>` 精确添加，禁止对目录使用强制添加。
@@ -89,4 +92,4 @@ common/ugit log --oneline HEAD..upstream/main
 
 `local/`、`out/`、`logs/`、`fw-*/`、系统镜像、设备身份、配对信息、密钥与凭据均不提交。
 上游已公开的源码和随历史附带的预构建文件仍保留；新增的本机专用镜像与固件不上传。
-源码仓库公开；本地 base 压缩包及以上私有资料不随仓库发布。
+源码仓库公开；CI 使用明确的产物清单向 Release 发布通用组件，本地 base 压缩包及以上私有资料不随之发布。

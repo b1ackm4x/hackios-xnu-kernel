@@ -29,9 +29,13 @@ Safari 原来将网页动画限制在 60 fps。base.4 关闭该默认策略并�
 
 ## 使用
 
-本机发布包：`out/releases/lemonade-2026.10.25-base.4.zip`。
+公开下载入口：[CI 通用内核与驱动包](https://github.com/b1ackm4x/hackios-xnu-kernel/releases)。
+`main` 更新后自动测试、编译并发布实验版；下载包包含内核、运行库、加载器和配套源码，
+系统镜像与设备文件须在本地补齐，不能直接刷机。下载、校验和组包步骤见 [CI 说明](docs/LEMONADE-CI.md)。
 
-Mac 需安装 Python 3.11+、adb 和 fastboot。USB 连接这台一加 9，解压后双击 `Start.command`；返回 Android 使用 `Return-to-Android.command`。
+本机已验收的完整运行包：`out/releases/lemonade-2026.10.25-base.4.zip`，与上述 CI 组件包分别维护。
+
+这个本机运行包需要 Mac 安装 Python 3.11+、adb 和 fastboot。USB 连接其绑定的一加 9，解压后双击 `Start.command`；返回 Android 使用 `Return-to-Android.command`。
 
 ## 待完善
 
