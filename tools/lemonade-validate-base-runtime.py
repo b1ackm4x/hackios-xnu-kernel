@@ -8,7 +8,7 @@ import argparse,hashlib,importlib.util,json,os,re,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--version',default='2026.10.25-base.4')
+parser.add_argument('--version',default='2026.10.27-base.2')
 options=parser.parse_args()
 if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}',options.version):parser.error('Invalid release version')
 PKG=ROOT/'out/releases'/('lemonade-'+options.version)
@@ -17,6 +17,7 @@ os.umask(0o077)
 OUT.mkdir(exist_ok=True)
 s=importlib.util.spec_from_file_location('base_launch',PKG/'launch.py');launch=importlib.util.module_from_spec(s);s.loader.exec_module(launch)
 s=importlib.util.spec_from_file_location('base_direct',ROOT/'tools/lemonade-check-direct.py');direct=importlib.util.module_from_spec(s);s.loader.exec_module(direct)
+s=importlib.util.spec_from_file_location('base_validation',ROOT/'tools/lemonade-validate-base.py');validation=importlib.util.module_from_spec(s);s.loader.exec_module(validation)
 m=launch.verify(PKG)
 for name,entry in m['files'].items():
  assert launch.digest(PKG/name)==entry['sha256']
@@ -53,10 +54,10 @@ args=cmdlines[0].split() if len(cmdlines)==1 else []
 summary=re.findall(r'direct final completed=(\d+) fallbacks=(\d+) failed=(\d+) mapped_pages=(\d+)',raw.decode(errors='replace'))
 checks={
  'unchanged_release_image':launch.digest(PKG/'root.apfs')==m['files']['root.apfs']['sha256'],
- 'actual_default_arguments':[a for a in args if not a.startswith('epoch=')]==['debug=0x8','rd=md0']+launch.BASE_ARGUMENTS,
+ 'actual_default_arguments':validation.runtime_arguments_match(args,launch.BASE_ARGUMENTS),
  'runtime_setup_complete':'init: runtime setup complete; failures=0' in text,
  'no_boot_self_tests':'=== 36 checks' not in text and '64 MB of anonymous memory' not in text,
- 'no_test_workloads':not any(x in text for x in ('lemonade-net: RAM-only acceptance','lemonade_metal_features','lemonade_metal_mps','lemonade_metal_ca','metal_drv_test','/bin/rwtouch')),
+ 'no_test_workloads':not any(x in text for x in ('lemonade-net: RAM-only acceptance','lemonade-battery-test','lemonade_metal_features','lemonade_metal_mps','lemonade_metal_ca','metal_drv_test','/bin/rwtouch')),
  'no_timed_exit':'loader_return_after expired' not in text and not any(a.startswith('loader_return_after=') for a in args),
  'observed_running_without_timer':len(states)==11 and all('running' in x for x in states),
  'host_stop_observed':'the host asked for the end of the run: back to the loader' in text,
@@ -70,6 +71,18 @@ checks={
  'wifi_dma_stopped':'endpoint DMA stopped before unmap' in text and 'endpoint bus master clear verified' in text,
 }
 checks.update(direct.check_refresh(text))
+if m.get('battery_telemetry_supported'):
+ samples=set(re.findall(r'lemonade-battery: sample=(\d+).*? valid=([0-9a-f]+) failures=(\d+)',text))
+ checks['battery_sampling_continues']=(len({row[0] for row in samples})>=3 and
+     all(int(flags,16)&0x18b==0x18b and int(errors)==0 for _,flags,errors in samples) and
+     'lemonade-battery: telemetry stale' not in text)
+if m.get('jailbreak_bootstrap'):
+ checks['sileo_registered_automatically']='prep.sh: Sileo.app registered from /var/jb/Applications/Sileo.app' in text
+if m.get('bluetooth'):
+ checks['bluetooth_native_online']='native H4 transport online; real controller firmware verified' in text
+ stopped=re.findall(r'bt-lemonade: native transport stopped TX=(\d+) RX=(\d+) clean=(\d+)',text)
+ checks['bluetooth_transport_stopped_cleanly']=bool(stopped) and all(int(tx)>0 and int(rx)>0 and clean=='1' for tx,rx,clean in stopped)
+ checks['no_bluetooth_test_workload']='bt-client:' not in text and 'bt-ui:' not in text and 'bt-trace:' not in text
 if m.get('display_return_drain'):
  checks['display_drained_before_gpu_stop']=direct.check_return_drain(raw.decode(errors='replace'))
 if m.get('gpu_return_call_drain'):

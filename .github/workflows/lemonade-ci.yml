@@ -37,6 +37,8 @@ jobs:
             python3 "tools/test-lemonade-${suite}.py"
           done
           python3 tools/test-lemonade-ci.py
+          bash tools/test-lemonade-bluetooth.sh
+          python3 userland/tests/test_jb_setid_manifest.py
           clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-touch.c -o /tmp/touch-test
           /tmp/touch-test
           clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-mhi.c -o /tmp/mhi-test
@@ -58,6 +60,7 @@ jobs:
         run: |
           python3 tools/test-lemonade-metal-lifetime.py
           python3 tools/test-lemonade-metal-completion.py
+          bash tools/test-lemonade-bluetooth.sh
 
   build:
     needs: [linux-tests, metal-tests]

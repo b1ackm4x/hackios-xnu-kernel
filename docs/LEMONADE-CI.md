@@ -46,6 +46,7 @@ tar -xzf lemonade-ci-*.tar.gz
 | `out/lemonade-metal/` | Metal / AIR 运行库、bundle 和构建收据 |
 | `out/lemonade-base-runtime/` | init、Metal 启动助手、Safari 刷新策略库与收据 |
 | `userland/obj/` | GLES 与 OSMesa 运行库 |
+| `out/lemonade-bt-runtime/` | 蓝牙生产 bootstrap、原生主机兼容库及构建收据；不含固件、控制器地址或诊断程序 |
 | `loader/loader.efi` | 使用通用 USB 标识 `lemonade-ci` 的 EFI 开发产物 |
 | `sources/`、`licenses/` | 配套源码、ath11k 源码和许可证 |
 
@@ -61,7 +62,7 @@ tar -xzf lemonade-ci-*.tar.gz
 
 ## 内容与隐私
 
-每次 CI 从源码编译 XNU 与 lemonade 驱动、ath11k/WLFW、通用 EFI 加载器、Mesa/GLES、Metal/AIR、init、Metal 启动助手和 Safari 刷新策略库。工具链与 SDK 下载后先核对固定 SHA-256。
+每次 CI 从源码编译 XNU 与 lemonade 驱动、ath11k/WLFW、通用 EFI 加载器、Mesa/GLES、Metal/AIR、init、Metal 启动助手、Safari 刷新策略库及蓝牙 bootstrap/兼容库。工具链与 SDK 下载后先核对固定 SHA-256。
 
 打包器只复制明确列出的构建产物，并检查内核、源码与构建收据匹配。它不读取作者手机或本地系统镜像，不打包 `local/`、APFS、启动镜像、原机固件、DTB、Wi-Fi 密码/连接历史、个人账户、密钥或设备日志。当前系统和设备文件由维护者在开发环境中准备；面向用户的本地准备工具还需接通。
 
@@ -71,7 +72,7 @@ Wi-Fi 驱动已经编入内核；芯片运行固件与板级配置（例如 `ams
 
 ## 验证边界
 
-Linux 测试覆盖实际显示合成代码、fence/退出路径、触控/MHI 协议、网络与设备选择，以及电池采集、缓存失效、充电状态和生产 IOKit 适配；macOS 另运行 Metal 对象生命周期和异步完成测试。两组测试通过后才编译、打包和发布。
+Linux 测试覆盖实际显示合成代码、fence/退出路径、触控/MHI 协议、网络与设备选择，以及电池采集、缓存失效、充电状态和生产 IOKit 适配；macOS 另运行 Metal 对象生命周期和异步完成测试。两组均运行蓝牙生产协议、固件解析、队列、UART、重连和共享电源事务的 ASan/UBSan 测试；Apple Silicon 另检查真实 Mach 页保护与 ioctl ABI。两组测试通过后才编译、打包和发布。
 
 电池与充电状态属于新的 base 默认功能，使用 `lemonade_battery=1`。CI 组件包含配套 loader 与内核；本地重新封装启动镜像后，base 打包器要求两者均支持 `bq28z610-uefi-cache-v2`。现有 base.4 包不自动改变，也不能借用它的联合验收记录发布新组合；电池实机边界见 [电池驱动说明](LEMONADE-BATTERY.md)。
 

@@ -4,6 +4,7 @@
  * OnePlusOSS android_kernel_oneplus_sm8350 at 13ca08fdf0979fdd61d5e8991661874bb2d19150.
  * touchscreen=2 inspects only. All access is gated by the loader's platform.
  */
+#include <sys/lemonade_radio.h>
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -150,51 +151,6 @@ supply_address(const char *name)
     return 0;
 }
 
-static bool supply_on(const char *name, unsigned millivolts) {
-    uint32_t address = supply_address(name);
-    vm_offset_t t = rsc + 0xd00;
-    if (!address || ((address >> 16) & 15) != 4) { return false; }
-    for (unsigned i = 0; !rd(t + 0x18); i++) {
-        if (i == 1000) { return false; }
-        pause_us(100);
-    }
-    if (rd(t + 4) & 1) {
-        redwood_tl("s6sy792: RSC slot has a pending completion; supply request refused\n");
-        return false;
-    }
-    uint32_t old_irq = rd(t), old_control = rd(t + 0x14), old_wait = rd(t + 0x10), old_enable = rd(t + 0x1c);
-    uint32_t old_commands[3][3];
-    const uint32_t offsets[] = {0, 8, 4}, values[] = {millivolts, 7, 1};
-    for (unsigned i = 0; i < 3; i++) {
-        for (unsigned j = 0; j < 3; j++) { old_commands[i][j] = rd(t + 0x30 + 20 * i + 4 * j); }
-    }
-    wr(t + 0x14, old_control & ~(1u << 24));
-    wr(t + 0x14, old_control & ~((1u << 24) | (1u << 16)));
-    wr(t + 8, 1);
-    for (unsigned i = 0; i < 3; i++) {
-        wr(t + 0x30 + 20 * i, 0x10108); /* four bytes, write, response */
-        wr(t + 0x34 + 20 * i, address + offsets[i]);
-        wr(t + 0x38 + 20 * i, values[i]);
-    }
-    wr(t + 0x10, 7); wr(t + 0x1c, 7); wr(t, old_irq | 1);
-    wr(t + 0x14, 1u << 16); wr(t + 0x14, (1u << 16) | (1u << 24));
-    bool done = false;
-    for (unsigned i = 0; i < 2000; i++) {
-        if (rd(t + 4) & 1) { done = true; break; }
-        pause_us(100);
-    }
-    wr(t + 0x14, rd(t + 0x14) & ~(1u << 24));
-    wr(t + 0x14, rd(t + 0x14) & ~(1u << 16));
-    wr(t + 0x1c, 0); wr(t + 8, 1);
-    for (unsigned i = 0; i < 3; i++) {
-        for (unsigned j = 0; j < 3; j++) { wr(t + 0x30 + 20 * i + 4 * j, old_commands[i][j]); }
-    }
-    wr(t + 0x10, old_wait); wr(t + 0x1c, old_enable); wr(t, old_irq);
-    /* Restoring an old trigger edge would replay the firmware's old requests. */
-    wr(t + 0x14, old_control & ~(1u << 24));
-    redwood_tl("s6sy792: %s %u mV request %s\n", name, millivolts, done ? "complete" : "timed out");
-    return done;
-}
 
 static void release_all(void) {
     for (unsigned i = 0; i < 10; i++) {
@@ -256,7 +212,7 @@ static bool start_chip(void) {
     output(RESET, false, 3, 8);
     wr(PIN_CFG(IRQ), 3u << 6); /* input, no pull, 8 mA */
     line(SDA, true); line(SCL, true);
-    if (!supply_on("ldoc8", 1800) || !supply_on("ldoc3", 3000)) { return false; }
+    if (!lemonade_radio_supply_on("ldoc8", 1800) || !lemonade_radio_supply_on("ldoc3", 3000)) { return false; }
     output(ANALOG_ENABLE, true, 0, 2);
     pause_ms(5); output(RESET, true, 3, 8); pause_ms(100);
     redwood_tl("s6sy792: open-drain GPIO I2C: SDA=%u SCL=%u IRQ=%u reset=%u\n",

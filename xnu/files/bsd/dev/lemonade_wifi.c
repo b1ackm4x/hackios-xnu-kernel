@@ -20,6 +20,7 @@
 #include <sys/redwood_input.h>
 #include <sys/errno.h>
 #include <sys/lemonade_wifi.h>
+#include <sys/lemonade_radio.h>
 #include <sys/redwood_lx.h>
 #include <sys/redwood_qrtr.h>
 #include <sys/systm.h>
@@ -28,7 +29,7 @@
 #include "lemonade_mhi_protocol.h"
 
 extern void redwood_tl(const char *format, ...) __printflike(1, 2);
-static vm_offset_t gcc, pins, parf, dbi, phy, rsc, database, config, bar;
+static vm_offset_t gcc, pins, parf, dbi, phy, config, bar;
 static bool phy_started, perst_saved, radio_started, link_started, bar_saved;
 static unsigned iatu_count;
 static uint32_t perst_cfg, perst_io;
@@ -253,80 +254,6 @@ static bool platform_is_lemonade(void) {
     return SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
         SecureDTGetProperty(entry, "device_type", &value, &size) == kSuccess &&
         size == sizeof("lemonade") && !memcmp(value, "lemonade", size);
-}
-struct wifi_db_slave { uint16_t id, header, data, count, version, reserved[3]; };
-struct wifi_db_header {
-    uint32_t version;
-    uint8_t magic[4];
-    struct wifi_db_slave slave[8];
-    uint32_t checksum, reserved;
-    uint8_t data[];
-};
-struct wifi_db_entry { char id[8]; uint32_t priority[2], address; uint16_t length, offset; };
-
-static uint32_t
-supply_address(const char *name)
-{
-    const struct wifi_db_header *db = (const void *)database;
-    char id[8] = {0};
-    strlcpy(id, name, sizeof(id));
-    if (memcmp(db->magic, "\xdb\x30\x03\x0c", 4)) { return 0; }
-    for (unsigned s = 0; s < 8; s++) {
-        const struct wifi_db_slave *slave = &db->slave[s];
-        if (!slave->id || slave->count > 512 ||
-            (uint32_t)slave->header + slave->count * sizeof(struct wifi_db_entry) > 0x1f000) { continue; }
-        const struct wifi_db_entry *entry = (const void *)(db->data + slave->header);
-        for (unsigned i = 0; i < slave->count; i++) {
-            if (!memcmp(entry[i].id, id, sizeof(id))) { return entry[i].address; }
-        }
-    }
-    return 0;
-}
-
-static bool supply_on(const char *name, unsigned millivolts) {
-    uint32_t address = supply_address(name);
-    vm_offset_t t = rsc + 0xd00;
-    if (!address || ((address >> 16) & 15) != 4) { return false; }
-    for (unsigned i = 0; !rd(t + 0x18, 0); i++) {
-        if (i == 1000) { return false; }
-        pause_us(100);
-    }
-    if (rd(t + 4, 0) & 1) {
-        redwood_tl("wifi-lemonade: RSC slot has a pending completion; supply request refused\n");
-        return false;
-    }
-    uint32_t old_irq = rd(t, 0), old_control = rd(t + 0x14, 0), old_wait = rd(t + 0x10, 0), old_enable = rd(t + 0x1c, 0);
-    uint32_t old_commands[3][3];
-    const uint32_t offsets[] = {0, 8, 4}, values[] = {millivolts, 7, 1};
-    for (unsigned i = 0; i < 3; i++) {
-        for (unsigned j = 0; j < 3; j++) { old_commands[i][j] = rd(t + 0x30 + 20 * i + 4 * j, 0); }
-    }
-    wr(t + 0x14, old_control & ~(1u << 24));
-    wr(t + 0x14, old_control & ~((1u << 24) | (1u << 16)));
-    wr(t + 8, 1);
-    for (unsigned i = 0; i < 3; i++) {
-        wr(t + 0x30 + 20 * i, 0x10108); /* four bytes, write, response */
-        wr(t + 0x34 + 20 * i, address + offsets[i]);
-        wr(t + 0x38 + 20 * i, values[i]);
-    }
-    wr(t + 0x10, 7); wr(t + 0x1c, 7); wr(t, old_irq | 1);
-    wr(t + 0x14, 1u << 16); wr(t + 0x14, (1u << 16) | (1u << 24));
-    bool done = false;
-    for (unsigned i = 0; i < 2000; i++) {
-        if (rd(t + 4, 0) & 1) { done = true; break; }
-        pause_us(100);
-    }
-    wr(t + 0x14, rd(t + 0x14, 0) & ~(1u << 24));
-    wr(t + 0x14, rd(t + 0x14, 0) & ~(1u << 16));
-    wr(t + 0x1c, 0); wr(t + 8, 1);
-    for (unsigned i = 0; i < 3; i++) {
-        for (unsigned j = 0; j < 3; j++) { wr(t + 0x30 + 20 * i + 4 * j, old_commands[i][j]); }
-    }
-    wr(t + 0x10, old_wait); wr(t + 0x1c, old_enable); wr(t, old_irq);
-    /* Restoring an old trigger edge would replay the firmware's old requests. */
-    wr(t + 0x14, old_control & ~(1u << 24));
-    redwood_tl("wifi-lemonade: %s %u mV request %s\n", name, millivolts, done ? "complete" : "timed out");
-    return done;
 }
 
 static bool inspect(void) {
@@ -1510,9 +1437,7 @@ static bool power_root(unsigned step) {
         redwood_tl("wifi-lemonade: root already clocked; refusing reset/power experiment\n");
         return false;
     }
-    rsc = ml_io_map_unmappable(0x18220000, 0x10000, VM_WIMG_IO);
-    database = ml_io_map_unmappable(0x80860000, 0x20000, VM_WIMG_WCOMB);
-    if (!rsc || !database || !supply_on("ldob6", 1200) || !supply_on("ldob5", 880)) { return false; }
+    if (!lemonade_radio_supply_on("ldob6", 1200) || !lemonade_radio_supply_on("ldob5", 880)) { return false; }
     redwood_tl("wifi-lemonade: stage 2 rails complete\n");
     if (step == 2) { return true; }
     change_gcc(0x52128, 1, 0); /* PCIe0's votable power domain */
@@ -1580,9 +1505,9 @@ static bool power_root(unsigned step) {
         return false;
     }
     /* Board supply phandles -> RPMh resource names, from its regulator nodes. */
-    if (!supply_on("smpb10", 1800) || !supply_on("ldoe7", 2800) ||
-        !supply_on("smpe2", 950) || !supply_on("smpb11", 950) ||
-        !supply_on("smpc1", 1880) || !supply_on("smpb12", 1350)) { return false; }
+    if (!lemonade_radio_supply_on("smpb10", 1800) || !lemonade_radio_supply_on("ldoe7", 2800) ||
+        !lemonade_radio_supply_on("smpe2", 950) || !lemonade_radio_supply_on("smpb11", 950) ||
+        !lemonade_radio_supply_on("smpc1", 1880) || !lemonade_radio_supply_on("smpb12", 1350)) { return false; }
     radio_cfg = rd(pins, 64 * 0x1000); radio_io = rd(pins, 64 * 0x1000 + 4);
     clkreq_cfg = rd(pins, 95 * 0x1000); clkreq_io = rd(pins, 95 * 0x1000 + 4);
     radio_started = true;

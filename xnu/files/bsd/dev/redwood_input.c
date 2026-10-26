@@ -26,6 +26,7 @@
 static uint32_t touch_lat = 2;          /* 2: not yet looked up */
 
 extern void loader_log_line(const char *line);
+extern void lemonade_bluetooth_init(void);
 
 /*
  * A "tl:" line, for the kernel's drivers: into the loader's log as it is written -- the kernel's own
@@ -226,6 +227,7 @@ redwood_input_init(void)
 	lemonade_display_init();
 	redwood_adreno_init();
 	lemonade_wifi_init();
+	lemonade_bluetooth_init();
 	redwood_wifi_init();
 	redwood_adsp_init();
 }

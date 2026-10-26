@@ -128,6 +128,118 @@ class DeviceSafety(unittest.TestCase):
         self.assertIn(['fastboot', '-s', self.loader, 'oem', 'log'], self.calls)
         self.assertEqual(next((self.root / 'local/lemonade').glob('*-battery.log')).read_bytes(), self.log)
 
+    def test_bluetooth_firmware_rejects_unbound_and_modified_images(self):
+        folder = self.root / 'out/bt'; folder.mkdir()
+        image = folder / 'root.apfs'; image.write_bytes(b'private fixture')
+        record = {'profile': 'lemonade-bt-firmware-v1', 'device_serial_sha256': self.identity,
+                  'kernel_sha256': 'kernel', 'system_sha256': 'system', 'all_entries_verified': True,
+                  'root_sha256': hashlib.sha256(image.read_bytes()).hexdigest(), 'bytes': image.stat().st_size}
+        path = folder / 'manifest.json'; path.write_text(json.dumps(record))
+        with patch.object(usb, 'ROOT', self.root):
+            self.assertEqual(usb.verified_bluetooth_overlay(folder, 'kernel', self.identity, 'system')[0], image.resolve())
+            for key, value in [('device_serial_sha256', 'other phone'), ('kernel_sha256', 'old kernel'),
+                               ('system_sha256', 'other system'), ('all_entries_verified', False),
+                               ('bytes', 0), ('profile', 'other')]:
+                altered = dict(record); altered[key] = value; path.write_text(json.dumps(altered))
+                with self.assertRaisesRegex(SystemExit, 'provenance mismatch'):
+                    usb.verified_bluetooth_overlay(folder, 'kernel', self.identity, 'system')
+            path.write_text(json.dumps(record)); image.write_bytes(b'changed fixture')
+            with self.assertRaisesRegex(SystemExit, 'provenance mismatch'):
+                usb.verified_bluetooth_overlay(folder, 'kernel', self.identity, 'system')
+        self.assertEqual(self.calls, [])
+
+    def test_bluetooth_firmware_requires_duration_overlay_and_isolation(self):
+        cases = [(), ('--bluetooth-image', str(self.root / 'out/bt')),
+                 ('--bluetooth-image', str(self.root / 'out/bt'), '--seconds', '60', '--gpu'),
+                 ('--bluetooth-image', str(self.root / 'out/bt'), '--seconds', '60', '--wifi', 'inspect')]
+        for extra in cases:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--kernel', 'built', '--userland', '--bluetooth', 'firmware', *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_bluetooth_requires_explicit_built_kernel_and_capability(self):
+        for extra in ((), ('--kernel', 'prebuilt'), ('--kernel', 'built', '--checkpoint', '4')):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', '--bluetooth', 'inspect', *extra)
+        self.assertEqual(self.calls, [])
+        self.fastboot, self.product = self.loader + '\tfastboot\n', 'xnuloader'
+        data = b'Bluetooth inspect fixture'
+        (self.root / 'out/lemonade-kernel').write_bytes(data)
+        manifest = {'device': 'lemonade', 'stage': 'xnu-kernel', 'sha256': hashlib.sha256(data).hexdigest()}
+        path = self.root / 'out/lemonade-kernel.manifest.json'
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(SystemExit, 'Bluetooth inspection'):
+            self.run_action('run', '--kernel', 'built', '--bluetooth', 'inspect')
+        self.assertFalse(any('stage' in c for c in self.calls))
+        manifest['bluetooth_modes_supported'] = ['inspect']
+        path.write_text(json.dumps(manifest))
+        self.result = 'returned 0 0'
+        self.run_action('run', '--kernel', 'built', '--bluetooth', 'inspect', '--seconds', '8')
+        payload = next(c for c in self.calls if c[0] == 'python3' and 'mkpayload.py' in c[1])
+        self.assertIn('lemonade_bt=1', payload[payload.index('--cmdline') + 1].split())
+
+    def test_bluetooth_ui_rejects_incomplete_or_replacing_overlays_before_device_access(self):
+        base = ['--kernel', 'built', '--userland', '--bluetooth', 'native', '--bluetooth-ui',
+                '--bluetooth-image', str(self.root / 'out/bt'), '--seconds', '120']
+        display = ['--gpu', '--touch', 'on', '--display', 'direct', '--display-fences']
+        cases = [[], ['--gpu'], display + ['--metal-system', 'desktop'],
+                 display + ['--metal-test'], display + ['--refresh-test'],
+                 display + ['--wifi', 'inspect'], display + ['--network-test']]
+        for extra in cases:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.run_action('run', *base, *extra)
+        self.assertEqual(self.calls, [])
+
+    def test_bluetooth_ui_keeps_verified_bluetooth_root_and_enables_base_renderer(self):
+        self.root = self.root.resolve()
+        self.log = b'adreno: THE GPU STAYS ON\nfixture native UI log\n'
+        self.fastboot, self.product = self.loader + '\tfastboot\n', 'xnuloader'
+        self.result = 'returned 0 0'
+        data = b'native UI kernel'
+        (self.root / 'out/lemonade-kernel').write_bytes(data)
+        kernel_hash = hashlib.sha256(data).hexdigest()
+        (self.root / 'out/lemonade-kernel.manifest.json').write_text(json.dumps({
+            'device': 'lemonade', 'stage': 'xnu-kernel', 'sha256': kernel_hash,
+            'bluetooth_modes_supported': ['native'], 'touch_driver_supported': 'lemonade-s6sy792-v1',
+            'display_modes_supported': ['direct'], 'display_fences_supported': 'copy-release-v1'}))
+        (self.root / 'userland').mkdir()
+        ordinary = self.root / 'userland/root.apfs'; ordinary.write_bytes(b'ordinary root')
+        image_record = {'bytes': ordinary.stat().st_size, 'sha256': hashlib.sha256(ordinary.read_bytes()).hexdigest()}
+        (self.root / 'local/lemonade/images.json').write_text(json.dumps({
+            'userland/root.apfs': image_record, 'userland/system.apfs': image_record}))
+        folder = self.root / 'out/bt'; folder.mkdir()
+        image = folder / 'root.apfs'; image.write_bytes(b'Bluetooth root with base renderer')
+        record = {'profile': 'lemonade-bt-firmware-v1', 'device_serial_sha256': self.identity,
+            'kernel_sha256': kernel_hash, 'system_sha256': image_record['sha256'], 'all_entries_verified': True,
+            'root_sha256': hashlib.sha256(image.read_bytes()).hexdigest(), 'bytes': image.stat().st_size,
+            'native_services': {'bluetoothd': {}}, 'native_client': None,
+            'board_compat': {'verified': True}, 'board_bootstrap': {'verified': True}}
+        (folder / 'manifest.json').write_text(json.dumps(record))
+        self.run_action('run', '--kernel', 'built', '--userland', '--bluetooth', 'native',
+            '--bluetooth-image', str(folder), '--bluetooth-ui', '--gpu', '--touch', 'on',
+            '--display', 'direct', '--display-fences', '--seconds', '120')
+        payload = next(c for c in self.calls if c[0] == 'python3')
+        self.assertEqual([x for x in payload if x.startswith('ramdisk=')], ['ramdisk=' + str(image)])
+        cmdline = payload[payload.index('--cmdline') + 1].split()
+        for expected in ('lemonade_bt=6', 'lemonade_bt_ui=1', 'metal=1', 'camtl=1',
+                         'metal_profile=1', 'touchscreen=1', 'gpu=1', 'ufs_write=0', 'ca_vbl=0'):
+            self.assertIn(expected, cmdline)
+        saved = json.loads((self.root / 'out/lemonade-xnu.manifest.json').read_text())
+        self.assertNotIn('userland/root.apfs', saved['images'])
+        self.assertIn('out/bt/root.apfs', saved['images'])
+
+    def test_loader_status_does_not_require_a_running_adb_server(self):
+        self.fastboot, self.product = self.loader + '\tfastboot\n', 'xnuloader'
+        original = self.fake_command
+        def disconnected_adb(argv, timeout=15, check=True):
+            if argv == ['adb', 'devices', '-l']:
+                if check:raise subprocess.CalledProcessError(1, argv)
+                return subprocess.CompletedProcess(argv, 1, '', 'dedicated server unavailable')
+            return original(argv, timeout, check)
+        self.fake_command = disconnected_adb
+        self.run_action('status')
+        self.assertIn(['fastboot', '-s', self.loader, 'getvar', 'product'], self.calls)
+
     def test_battery_sampling_fault_injection_is_scoped(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.run_action('reboot', '--battery-sampling', 'pause')

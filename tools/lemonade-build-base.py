@@ -32,11 +32,52 @@ RUNTIME_METAL = ('libredwoodmetal.dylib', 'libredwoodair.dylib', 'libredwood.dyl
                  'RedwoodMetal.bundle/RedwoodMetal', 'RedwoodMetal.bundle/Info.plist')
 REMOVED_JOBS = ('com.redwood.demo', 'com.redwood.wifi', 'com.redwood.varstore')
 DEBUG_ENV = ('REDWOOD_METAL_TRACE', 'OS_ACTIVITY_DT_MODE', 'CA_ASSERT_MAIN_THREAD_TRANSACTIONS')
+JAILBREAK_JOB = 'com.lemonade.jailbreak-preparation'
 DESKTOP_SERVICES = {
     'com.apple.geod': ('/System/Library/PrivateFrameworks/GeoServices.framework/geod', 'com.apple.geod'),
     'com.apple.navd': ('/System/Library/PrivateFrameworks/MapsSupport.framework/navd', 'com.apple.navigationService'),
     'com.apple.sleepd': ('/System/Library/PrivateFrameworks/SleepDaemon.framework/sleepd', 'com.apple.sleepd.sleepserver'),
 }
+
+
+def jailbreak_services(system):
+    """Prepare and register a present rootless bootstrap on every fresh RAM boot."""
+    container = base.apfs.Container(str(system))
+    try:
+        volume = base.apfs.pick_volume(container, None)
+        if not volume.lookup('/jb'):
+            return {}, None
+        if volume.lookup('/Applications/Sileo.app'):
+            raise ValueError('System contains a conflicting second Sileo bundle')
+        required = {'/private/preboot/jb-rw': 0o40755, '/jb/prep.sh': 0o100755,
+                    '/jb/usr/bin/login': 0o104755,
+                    '/jb/Applications/Sileo.app/giveMeRoot': 0o104755}
+        for path, mode in required.items():
+            entry = volume.lookup(path)
+            inode = volume.inode(entry[0]) if entry else None
+            if inode is None or (inode.mode, inode.owner, inode.group) != (mode, 0, 0):
+                raise ValueError('Invalid rootless bootstrap path or permissions: ' + path)
+        entry = volume.lookup('/jb/Applications/Sileo.app/Info.plist')
+        if not entry:
+            raise ValueError('Sileo bundle metadata is missing')
+        info = plistlib.loads(volume.inode(entry[0]).contents())
+        if info.get('CFBundleIdentifier') != 'org.coolstar.SileoStore':
+            raise ValueError('Unexpected Sileo bundle identity')
+        prep = volume.inode(volume.lookup('/jb/prep.sh')[0]).contents()
+        # prep.sh starts bounded registration retries in the background. Let
+        # them finish if the parent exits before SpringBoard becomes ready.
+        job = {'Label': JAILBREAK_JOB, 'RunAtLoad': True, 'AbandonProcessGroup': True,
+               'ProgramArguments': ['/var/jb/bin/sh', '/var/jb/prep.sh'],
+               'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
+        return {'LaunchDaemons/' + JAILBREAK_JOB + '.plist':
+                (0o100644, 0, 0, plistlib.dumps(job, fmt=plistlib.FMT_BINARY))}, {
+                    'bundle_identifier': info['CFBundleIdentifier'],
+                    'version': info.get('CFBundleShortVersionString'),
+                    'canonical_prefix': '/private/preboot/jb-rw/procursus',
+                    'prep_sha256': hashlib.sha256(prep).hexdigest(),
+                    'automatic_registration': True, 'persistent_installs': False}
+    finally:
+        container.close()
 
 
 def desktop_services():
@@ -93,7 +134,7 @@ def checked_receipt(directory):
 
 def validate_tree(tree):
     binaries = {p for p in tree if p.startswith(('bin/', 'sbin/'))}
-    if binaries != {'bin/metal-enable', 'sbin/init'}:
+    if binaries != {'bin/metal-enable', 'sbin/init', 'bin/lemonade-bt-bootstrap'}:
         raise ValueError('Base contains unexpected helper/test executables')
     if 'etc/rc.jobs' in tree or 'share/pattern.bin' in tree or 'fw/lemonade-network' in tree:
         raise ValueError('Base contains a test workload or private network input')
@@ -110,8 +151,28 @@ def validate_tree(tree):
             if job.get('Label') in REMOVED_JOBS or any(k in job.get('EnvironmentVariables', {}) for k in DEBUG_ENV):
                 raise ValueError('Test job or tracing environment in base')
             program = job.get('Program') or job.get('ProgramArguments', [''])[0]
-            if program.startswith('/redwood/'):
+            if program.startswith('/redwood/') and not (
+                    relative == 'LaunchDaemons/org.lemonade.bluetooth-bootstrap.plist' and
+                    job.get('Label') == 'org.lemonade.bluetooth-bootstrap' and
+                    job.get('ProgramArguments') == ['/redwood/bin/lemonade-bt-bootstrap'] and
+                    job.get('MachServices') == {'com.apple.BlueTool': True}):
                 raise ValueError('Unwanted automatic helper in base: ' + program)
+    for name in ('hpbtfw10.tlv', 'hpnv10.bin', 'bt-address'):
+        if 'fw/' + name not in tree or tree['fw/' + name][:3] != (0o100600, 0, 0):
+            raise ValueError('Missing or incorrectly protected Bluetooth input')
+    if len(tree['fw/bt-address'][3]) != 6:
+        raise ValueError('Invalid private Bluetooth address')
+    injection = tree.get('etc/inject.conf', (0, 0, 0, b''))[3]
+    if b'/redwood/lib/liblemonade-bt-compat.dylib bluetoothd' not in injection.splitlines():
+        raise ValueError('Native Bluetooth compatibility is missing')
+    if any('bt-trace' in p or 'bt-ui-trace' in p or 'bt-client' in p for p in tree):
+        raise ValueError('Bluetooth diagnostic artifact in base')
+    if b'bt-trace' in injection or b'bt-ui-trace' in injection:
+        raise ValueError('Bluetooth diagnostic injection in base')
+    for name in ('com.apple.bluetoothd', 'com.apple.bluetoothuserd', 'com.apple.nanoregistryd',
+                 'com.apple.nanoregistrylaunchd', 'org.lemonade.bluetooth-bootstrap'):
+        if 'LaunchDaemons/' + name + '.plist' not in tree:
+            raise ValueError('Missing native Bluetooth service: ' + name)
     for name in ('com.apple.wifid', 'com.apple.configd', 'com.apple.mDNSResponder', 'com.apple.chronod', *DESKTOP_SERVICES):
         if 'LaunchDaemons/' + name + '.plist' not in tree:
             raise ValueError('Missing runtime service: ' + name)
@@ -147,7 +208,12 @@ def pack_tree(entries, destination):
 
 
 def checksums(folder):
-    names = sorted(p.name for p in folder.iterdir() if p.is_file() and p.name != 'SHA256SUMS')
+    manifest = json.loads((folder / 'manifest.json').read_text())
+    names = sorted(set(manifest['files']) | {'manifest.json'})
+    for name in names:
+        path = folder / name
+        if Path(name).name != name or path.is_symlink() or not path.is_file():
+            raise ValueError('Invalid release file: ' + name)
     (folder / 'SHA256SUMS').write_text(''.join(digest(folder / n) + '  ' + n + '\n' for n in names))
 
 
@@ -201,6 +267,8 @@ def main():
     tree.update(widgets)
     desktop, desktop_receipts = desktop_services()
     tree.update(desktop)
+    jailbreak, jailbreak_receipt = jailbreak_services(ROOT / 'userland/system.apfs')
+    tree.update(jailbreak)
     for p, (mode, uid, gid, data) in list(tree.items()):
         if p.startswith('LaunchDaemons/') and stat.S_ISREG(mode):
             job = plistlib.loads(data)
@@ -218,6 +286,10 @@ def main():
             raise SystemExit('Original radio firmware differs: ' + name)
         tree['fw/' + name] = (0o100644, 0, 0, (firmware_dir / name).read_bytes())
         selected[name] = {'sha256': entry['sha256'], 'bytes': entry['bytes']}
+    bluetooth = module('base_bluetooth', 'lemonade-build-bt-firmware.py')
+    tree, bluetooth_receipt = bluetooth.runtime_entries(tree, ROOT / 'userland/system.apfs',
+        baseline['hardware_serial_sha256'], argparse.Namespace(native=True, board_bootstrap=True,
+            board_compat=True, native_trace=False, native_client=False, settings_launch=False, ui_trace=False))
     validate_tree(tree)
     pack_tree(tree, destination / 'root.apfs')
     boot = json.loads((ROOT / 'out/lemonade-boot.manifest.json').read_text())
@@ -236,7 +308,7 @@ def main():
         (destination / name).chmod(0o700)
     readme = f'''# OnePlus 9 Base {args.version}
 
-现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、默认 120 Hz DPU 直接显示、实体触控、QCA6490 Wi-Fi、系统网络服务，以及真实电量和充电状态显示。
+现阶段功能基线：Adreno 660 GLES/Metal、SpringBoard 桌面、小组件、默认 120 Hz DPU 直接显示、实体触控、QCA6490 Wi-Fi、系统网络服务，真实电量和充电状态显示，以及原生蓝牙发现。
 
 本版本包含异步 Metal 提交、原生 Core Animation 帧时钟，以及双缓冲 BGRA 多层合成：下一帧合成与上一帧显示传输重叠，完成通知和退出排空仍等待真实硬件完成。Safari 在首次使用时关闭“优先 60 fps”的网页策略，之后可在 Safari 设置中改回；只在驱动实测 120 Hz 的 RAM 环境启用。具体真机验证结果记录在 manifest.json；应用实际帧率取决于负载。
 
@@ -251,6 +323,10 @@ Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接�
 这是现阶段 base，并非所有功能都完成的手机系统。默认请求 120 Hz，只有面板测量通过才向系统发布该模式；应用可使用最高 120 fps，实际帧率仍取决于应用和负载。自适应刷新率切换、完整 Metal 兼容、睡眠唤醒、长期温控、电源管理和未移植外设仍待后续版本。当前数据卷在 RAM 中，重启后设置和会话不保留；蜂窝通信等未列入本次功能基线。详细验证状态在 `manifest.json`。旧的 `2026.10.24-base.1` 保留为 60 Hz 回退包。
 
 Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副本覆盖关联、地址获取、DNS、HTTP 和断线重连。正式包不包含该联网程序或网络配置；原生设置中首次输入密码的完整流程尚未单独验收。
+
+蓝牙使用本机控制器和原生“设置 → 蓝牙”页面。启动器会在 Android 中暂时关闭蓝牙以完成冷启动，正常返回 Android 时恢复原设置。再次启动时，启动器会先返回 Android 后重新进行冷启动；当前不复用已经运行过系统的 RAM 加载器。蓝牙配对、音频及外设数据仍未验收。
+
+Sileo 在开机时准备并注册 rootless 软件环境，图标可能稍后出现。软件安装在 RAM 中，重启后不保留。已修复安装触发图标缓存更新时退出以及 bootstrap 特殊权限丢失的问题；本包不自动安装测试应用。
 
 电池数据每 5 秒从原厂电量计读取，交由 iOS 原生电源服务显示；仅采集状态，不操作充电启停或快充。单独实测已确认真实电量及接电满电显示；物理 USB 拔插后日志通道重连失败，拔插状态切换和未满电充电图标尚未完成验收。采样中断时内核会撤回过期读数，但 powerd 仍可能保留最后值。
 
@@ -272,8 +348,11 @@ Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副�
         'dma_guard_verified': False, 'integration_verified': False,
         'base_root_sha256': images['userland/root.apfs']['sha256'], 'kernel_inputs': inputs,
         'runtime_build': runtime, 'metal_runtime': {n: metal['artifacts'][n] for n in RUNTIME_METAL},
+        'bluetooth': bluetooth_receipt, 'bluetooth_discovery_verified': False,
+        'bluetooth_coexistence_verified': False,
         'wifi_firmware': selected, 'widget_service': {k:v for k,v in widget_receipt.items() if k!='job_sha256'},
         'desktop_services': desktop_receipts,
+        'jailbreak_bootstrap': jailbreak_receipt,
         'root_file_inventory': {p: {'mode': oct(v[0]), 'uid': v[1], 'gid': v[2], 'sha256': hashlib.sha256(v[3]).hexdigest()}
                                 for p,v in sorted(tree.items())},
         'files': {p.name: {'sha256': digest(p), 'bytes': p.stat().st_size} for p in sorted(destination.iterdir()) if p.is_file()}}

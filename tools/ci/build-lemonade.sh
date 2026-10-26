@@ -35,4 +35,5 @@ AIR=1 bash tools/mk-mesa.sh
 RUNTIME_ONLY=1 bash tools/lemonade-build-metal.sh
 bash tools/lemonade-build-gl.sh
 bash tools/lemonade-build-base-runtime.sh
+bash tools/ci/build-bluetooth.sh
 python3 tools/ci/package-lemonade.py

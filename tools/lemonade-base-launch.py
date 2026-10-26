@@ -11,7 +11,7 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-BASE_VERSION = '2026.10.25-base.4'
+BASE_VERSION = '2026.10.27-base.2'
 BATTERY_TELEMETRY = 'bq28z610-uefi-cache-v2'
 # Keep the iPhone X userland's native 120 Hz CADisplayTimer. Forced driver
 # notifications lose frames after asynchronous Metal submission; DPU TE and
@@ -19,7 +19,7 @@ BATTERY_TELEMETRY = 'bq28z610-uefi-cache-v2'
 BASE_ARGUMENTS = ('sb_delay=8 bootcpu=7 cpus=4 cpufreq=1 ddr=0 gpu=1 gpu_log=0 adreno_speed=2 '
     'metal=1 metal_profile=1 camtl=1 lemonade_display=10 lemonade_display_hz=120 lemonade_panel=655 ca_vbl=0 fb_fences=1 '
     'touchscreen=1 buttons=0 wifi=0 lemonade_wifi=24 lemonade_runtime=1 lemonade_dma_verified=1 '
-    'adsp=0 lemonade_battery=1 ufs=0 ufs_native=0 ufs_write=0 var_store=0').split()
+    'lemonade_bt=6 adsp=0 lemonade_battery=1 ufs=0 ufs_native=0 ufs_write=0 var_store=0').split()
 
 
 def digest(path):
@@ -34,7 +34,7 @@ def command(argv, timeout=30, check=True):
     return result.stdout + result.stderr
 
 
-def verify(folder=HERE):
+def verify(folder=HERE, require_acceptance=True):
     manifest = json.loads((folder / 'manifest.json').read_text())
     if manifest.get('profile') != 'lemonade-base-v1':
         raise SystemExit('不是 OnePlus 9 base 发布包')
@@ -57,6 +57,10 @@ def verify(folder=HERE):
             raise SystemExit('发布包中存在无效文件')
         if path.stat().st_size != entry['bytes'] or digest(path) != entry['sha256']:
             raise SystemExit('发布包校验失败：' + name)
+    # Recovery and read-only status must remain available for a failed candidate.
+    # Device binding and every packaged file are still checked above.
+    if not require_acceptance:
+        return manifest
     if (not manifest.get('dma_guard_verified') or manifest.get('dma_guard_kernel_sha256') != manifest['files']['kernel']['sha256']):
         raise SystemExit('此候选尚未完成对应内核的 Wi-Fi DMA 验证')
     if (not manifest.get('integration_verified') or
@@ -64,7 +68,24 @@ def verify(folder=HERE):
             manifest.get('integration_kernel_sha256') != manifest['files']['kernel']['sha256'] or
             manifest.get('integration_root_sha256') != manifest['files']['root.apfs']['sha256']):
         raise SystemExit('此候选尚未通过 GPU、显示与 Wi-Fi 联合验收')
+    bluetooth = manifest.get('bluetooth', {})
+    if (bluetooth.get('native_h4_contract') != 'H4:POSIX:com.apple.uart.bluetooth,115200' or
+            not bluetooth.get('board_bootstrap') or not bluetooth.get('board_compat') or
+            any(bluetooth.get(k) for k in ('native_client', 'native_trace', 'native_ui_trace')) or
+            not manifest.get('bluetooth_discovery_verified') or not manifest.get('bluetooth_coexistence_verified') or
+            manifest.get('bluetooth_kernel_sha256') != manifest['files']['kernel']['sha256'] or
+            manifest.get('bluetooth_root_sha256') != manifest['files']['root.apfs']['sha256']):
+        raise SystemExit('此候选尚未通过原生蓝牙发现与 Wi-Fi 共存验收')
     return manifest
+
+
+def ensure_adb_server():
+    argv = ['adb']
+    socket = os.environ.get('ADB_SERVER_SOCKET', '')
+    port = re.fullmatch(r'tcp:(?:127\.0\.0\.1|localhost):(\d+)', socket)
+    if port:
+        argv += ['-P', port[1]]
+    command(argv + ['start-server'], timeout=20)
 
 
 def adb_target(manifest):
@@ -116,9 +137,57 @@ def wait_for(function, seconds):
     return None
 
 
+def android_bluetooth(manifest, serial, restore=False, folder=HERE):
+    """Preserve this exact phone's original setting across a cold RAM boot."""
+    if hashlib.sha256(serial.encode()).hexdigest() != manifest['hardware_serial_sha256']:
+        raise SystemExit('蓝牙状态操作的设备身份不匹配')
+    state = folder / 'android-bluetooth-state.json'
+    def shell(text):
+        return command(['adb', '-s', serial, 'exec-out', "su -c '" + text + "'"], timeout=40).strip()
+    record = json.loads(state.read_text()) if state.exists() else None
+    if record and (record.get('identity') != manifest['hardware_serial_sha256'] or
+                   record.get('original') not in ('0', '1')):
+        raise SystemExit('原 Android 蓝牙状态记录无效；未改变设置')
+    if restore:
+        if not record or not record.get('pending'):
+            return
+        target = record['original']
+    else:
+        if not record or not record.get('pending'):
+            original = shell('settings get global bluetooth_on')
+            if original not in ('0', '1'):
+                raise SystemExit('无法确认原 Android 蓝牙状态；未重启设备')
+            record = {'identity': manifest['hardware_serial_sha256'], 'original': original, 'pending': True}
+            temporary = state.with_suffix('.tmp')
+            temporary.write_text(json.dumps(record) + '\n')
+            temporary.chmod(0o600)
+            temporary.replace(state)
+        target = '0'
+    shell('cmd bluetooth_manager ' + ('enable' if target == '1' else 'disable'))
+    shell('cmd bluetooth_manager wait-for-state:' + ('STATE_ON' if target == '1' else 'STATE_OFF'))
+    if shell('settings get global bluetooth_on') != target:
+        raise SystemExit('Android 蓝牙状态读回不匹配；保留恢复记录')
+    if restore:
+        record['pending'] = False
+        temporary = state.with_suffix('.tmp')
+        temporary.write_text(json.dumps(record) + '\n')
+        temporary.chmod(0o600)
+        temporary.replace(state)
+        print('原 Android 蓝牙设置已恢复。', flush=True)
+
+
 def start(manifest):
     serial = fastboot_target(manifest)
+    if serial and product(serial) == 'xnuloader':
+        if 'running' in fb(serial, 'getvar', 'result'):
+            raise SystemExit('base 已在运行；重新启动前请先退出')
+        # Shared radio state can survive a RAM-kernel return. Re-enter through
+        # Android instead of treating a stopped loader as a cold boot.
+        print('再次启动前先返回 Android，恢复设备并重新准备冷启动…', flush=True)
+        stop(manifest, android=True)
+        serial = None
     if not serial:
+        ensure_adb_server()
         android = adb_target(manifest)
         if not android:
             raise SystemExit('请用 USB 连接这台 OnePlus 9，并在 Android 中允许 USB 调试')
@@ -127,7 +196,8 @@ def start(manifest):
             value = command(['adb', '-s', android, 'shell', 'getprop', key]).strip()
             if value != expected:
                 raise SystemExit('设备机型或引导状态与发布包不匹配')
-        print('已核对目标手机，进入引导模式…', flush=True)
+        android_bluetooth(manifest, android)
+        print('已核对目标手机并准备蓝牙冷启动，进入引导模式…', flush=True)
         command(['adb', '-s', android, 'reboot', 'bootloader'])
         serial = wait_for(lambda: fastboot_target(manifest), 60)
         if not serial:
@@ -160,6 +230,15 @@ def start(manifest):
 
 
 def stop(manifest, android=False):
+    if android:
+        ensure_adb_server()
+        serial = adb_target(manifest)
+        if serial:
+            if not wait_for(lambda: command(['adb', '-s', serial, 'shell', 'getprop', 'sys.boot_completed']).strip() == '1', 60):
+                raise SystemExit('Android 尚未完成启动；保留蓝牙恢复记录')
+            android_bluetooth(manifest, serial, restore=True)
+            print('原 Android 已完成启动。')
+            return
     serial = loader(manifest)
     result = fb(serial, 'getvar', 'result')
     if 'running' in result:
@@ -171,6 +250,7 @@ def stop(manifest, android=False):
         fb(serial, 'reboot')
         serial = wait_for(lambda: adb_target(manifest), 90)
         if serial and wait_for(lambda: command(['adb', '-s', serial, 'shell', 'getprop', 'sys.boot_completed']).strip() == '1', 60):
+            android_bluetooth(manifest, serial, restore=True)
             print('原 Android 已完成启动。')
         else:
             raise SystemExit('已请求返回 Android，但尚未确认启动完成')
@@ -183,7 +263,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('start', 'stop', 'android', 'status', 'verify', 'log'))
     args = parser.parse_args()
-    manifest = verify()
+    manifest = verify(require_acceptance=args.action in ('start', 'verify'))
     if args.action == 'start':
         start(manifest)
     elif args.action in ('stop', 'android'):

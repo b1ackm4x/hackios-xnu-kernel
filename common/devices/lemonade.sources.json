@@ -10,7 +10,7 @@
     "repository": "https://github.com/b1ackm4x/hackios-xnu-userland",
     "upstream": "https://github.com/oosexgang/hackios-xnu-userland",
     "upstream_base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
-    "commit": "dc773d94ce482d9b544accd62d82a5d1f8457e44"
+    "commit": "3278f7f01796e74ecd634c0d348d2b255a37658f"
   },
   "base_release": {
     "version": "2026.10.25-base.1",
@@ -26,8 +26,8 @@
     "default_display_hz": 60
   },
   "local_base_release": {
-    "version": "2026.10.25-base.4",
-    "source_status": "verified local package preserved; later source fixes integrated separately on main",
+    "version": "2026.10.27-base.2",
+    "source_status": "integrated in paired main sources; exact private runtime passed DMA, combined, native Bluetooth UI and untouched runtime acceptance",
     "default_display_hz": 120,
     "gpu_clock_mhz": 379,
     "metal_completion": "asynchronous GPU fence",
@@ -35,10 +35,20 @@
     "previous_tagged_release": "2026.10.25-base.1",
     "display_shutdown": "close terminal GPU user-call admission, drain active calls and accepted display frames before hardware stop",
     "refresh_recovery": "remeasure and restore 120 Hz after compatibility frames",
-    "multilayer_display": "owned premultiplied BGRA32 composite, logical scaling/clipping, measured DPU refresh preserved",
-    "previous_local_release": "2026.10.25-base.3",
+    "multilayer_display": "two owned premultiplied BGRA32 buffers overlap composition and DPU transfer",
+    "previous_local_release": "2026.10.26-base.2",
     "safari_refresh": "real prefer-60 setting seeded off once in the fresh RAM profile; subsequent user changes honored",
-    "safari_stable_120_fps_verified": false
+    "safari_stable_120_fps_verified": false,
+    "battery_telemetry": "BQ28Z610 cache v2 with native IORegistry and IOPS verification",
+    "sileo": "canonical rootless prefix, set-ID preservation and automatic registration",
+    "integration_battery_verified": true,
+    "bluetooth": "original native Settings discovery with verified Qualcomm H4 controller",
+    "bluetooth_coexistence_verified": true,
+    "bluetooth_pairing_verified": false,
+    "bluetooth_audio_verified": false,
+    "radio_restart": "return through Android before each subsequent RAM boot",
+    "kernel_sha256": "22206252397d69c037632b7ef695ead42c4e64a790210f0b624a30cd1e96dd6a",
+    "root_sha256": "b8b686fbf49b51167826a36b4856e4d07bc6aa5d0d9b10811b4390c4df4e0929"
   },
   "integrated_source_fixes": {
     "branch": "main",
@@ -48,9 +58,13 @@
     "safari_refresh": "initialize the native prefer-60 preference once for the measured 120 Hz RAM desktop; honor later user changes",
     "temporary_profiling_and_ab_switches": false,
     "validation_document": "docs/LEMONADE-NATIVE-BENCH.md",
-    "new_full_runtime_package_verified": false,
+    "new_full_runtime_package_verified": true,
     "battery_telemetry": "BQ28Z610 telemetry and ChargerEx presence, cache v2, native IOPMPowerSource; enabled by default in new base builds",
     "battery_validation_document": "docs/LEMONADE-BATTERY.md",
-    "charger_control": false
+    "charger_control": false,
+    "verified_local_runtime_version": "2026.10.27-base.2",
+    "bluetooth": "original native Settings discovery with verified Qualcomm H4 controller",
+    "bluetooth_validation_document": "docs/LEMONADE-BLUETOOTH.md",
+    "sileo": "canonical rootless prefix, set-ID preservation and automatic registration"
   }
 }

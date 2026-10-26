@@ -60,6 +60,8 @@ extern void redwood_ufs_quiesce(void);
 extern void lemonade_touch_quiesce(void);
 extern void lemonade_display_quiesce(void);
 extern void lemonade_wifi_quiesce(void);
+extern void lemonade_bluetooth_quiesce(void);
+extern void lemonade_bluetooth_stop(void);
 extern void lemonade_wifi_stop(void);
 extern void redwood_var_save_on_return(void);   /* bsd/dev/redwood_ufs.c: the data volume into the flash */
 void loader_checkpoint(uint64_t n);
@@ -374,6 +376,7 @@ loader_return(void)
 	psci_smp_stop_others();
 #endif
 	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
+	lemonade_bluetooth_quiesce();
 	lemonade_wifi_quiesce();       /* bounded PCIe probe: stop before clocks are restored */
 	lemonade_touch_quiesce();      /* touch bus pins restored after other cores have stopped */
 	lemonade_display_quiesce();    /* survey's register-bus votes restored on panic too */
@@ -445,6 +448,7 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
 	if (!as_panic) {
 		redwood_var_save_on_return();   /* the data volume kept, while the system is still whole */
 		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
+		lemonade_bluetooth_stop();
 		lemonade_wifi_stop();
 		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
 		redwood_adsp_stop();            /* and the audio DSP */
@@ -492,6 +496,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		}
 		redwood_var_save_on_return();
 		redwood_adreno_stop();
+		lemonade_bluetooth_stop();
 		lemonade_wifi_stop();
 		redwood_wifi_stop();
 		redwood_adsp_stop();

@@ -25,6 +25,23 @@ def command(argv, timeout=15, check=True):
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=check)
 
 
+def verified_bluetooth_overlay(folder, kernel_hash, identity, system_hash):
+    folder = folder.resolve()
+    if not folder.is_relative_to((ROOT / 'out').resolve()):
+        raise SystemExit('Refusing: Bluetooth image must be in out/')
+    record = json.loads((folder / 'manifest.json').read_text())
+    image = folder / 'root.apfs'
+    with image.open('rb') as stream:
+        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if (record.get('profile') != 'lemonade-bt-firmware-v1' or
+        record.get('device_serial_sha256') != identity or
+        record.get('kernel_sha256') != kernel_hash or not record.get('all_entries_verified') or
+        actual != record.get('root_sha256') or image.stat().st_size != record.get('bytes') or
+        record.get('system_sha256') != system_hash):
+        raise SystemExit('Refusing: Bluetooth firmware image provenance mismatch')
+    return image, record
+
+
 def verified_refresh_panel(identity):
     """Match the private live-panel observation to this device and prepared DTB."""
     path = ROOT / 'local/lemonade/refresh-panel.json'
@@ -140,6 +157,8 @@ def main():
     parser.add_argument("--userland", action="store_true", help="include root.apfs; upload system.apfs with ramdisk first")
     parser.add_argument("--kernel", choices=("prebuilt", "built"),
                         help="use the upstream kernel or the locally built, manifest-verified lemonade kernel")
+    parser.add_argument('--bluetooth-image', type=Path, help='verified private Bluetooth firmware RAM overlay')
+    parser.add_argument('--bluetooth-ui', action='store_true', help='explicit native Settings acceptance with the Bluetooth overlay and base Metal renderer')
     parser.add_argument("--gpu", action="store_true", help="enable the adapted Adreno 660 for rendering (requires --kernel built)")
     parser.add_argument("--gpu-step", type=int, default=0, help="run Adreno bring-up through step 1..22, then return")
     parser.add_argument('--gpu-clock', type=int, choices=(315, 379, 443, 540), help='explicit SM8350 stock GPU OPP in MHz; default remains 315')
@@ -165,6 +184,7 @@ def main():
     parser.add_argument('--display-record', action='store_true', help='record a bounded 64 MiB ring of held source images; requires --display direct; not an optical panel capture')
     parser.add_argument('--display-fences', action='store_true', help='producer-release waits; requires --display sync/direct --userland')
     parser.add_argument("--touch", choices=("inspect", "on"), help="Samsung S6SY792 touch inspection or input (adapted kernel only)")
+    parser.add_argument('--bluetooth', choices=('inspect', 'clocks', 'identify', 'firmware', 'scan', 'native'), help='SE18 inspection, clock probe or cold controller identification')
     parser.add_argument("--wifi", choices=("inspect", "rails", "domain", "clocks", "resets", "controller", "phy", "root", "radio", "link", "endpoint", "mmio", "smmu", "sid", "dma", "dma-fault", "bhi", "mhi", "bhie", "ipcr", "qmi", "driver", "scan", "station"), help="bounded Wi-Fi stages; station exposes the iOS interface without choosing a network")
     parser.add_argument("--cpu-policy", choices=("firmware", "inspect", "balanced"),
                         help="SM8350 EPSS policy: inspect only, or capped stock OPPs with restore on return")
@@ -204,6 +224,19 @@ def main():
         parser.error("Performance metrics require run --kernel built")
     if args.touch and (args.action != "run" or args.kernel != "built" or args.checkpoint or args.gpu_step):
         parser.error("Touch requires run --kernel built without a checkpoint or GPU step")
+    if args.bluetooth and (args.action != 'run' or args.kernel != 'built' or args.checkpoint or args.gpu_step):
+        parser.error('Bluetooth inspection requires run --kernel built without a checkpoint or GPU step')
+    if args.bluetooth_ui and (args.bluetooth != 'native' or not args.gpu or args.touch != 'on' or
+            args.display != 'direct' or not args.display_fences or args.metal_system or args.metal_test or
+            args.refresh_test or args.metal_widgets or args.network_test):
+        parser.error('--bluetooth-ui requires native Bluetooth, GPU, touch on and direct fenced display with the Bluetooth overlay')
+    if args.bluetooth in ('identify', 'firmware', 'scan', 'native') and (not args.userland or args.wifi or
+            ((args.touch or args.gpu) and not args.bluetooth_ui) or args.cpu_policy != 'firmware'):
+        parser.error('Bluetooth identification requires --userland and isolated hardware configuration')
+    if bool(args.bluetooth_image) != (args.bluetooth in ('firmware', 'scan', 'native')):
+        parser.error('--bluetooth-image is required only with --bluetooth firmware/scan/native')
+    if args.bluetooth in ('firmware', 'scan', 'native') and (args.seconds is None or args.seconds < 60):
+        parser.error('Firmware download requires an explicit --seconds 60..300')
     if args.wifi and (args.action != "run" or args.kernel != "built" or args.checkpoint or args.gpu_step):
         parser.error("Wi-Fi requires run --kernel built without a checkpoint or GPU step")
     if args.display and (args.action != 'run' or args.kernel != 'built' or args.checkpoint or args.gpu_step or args.wifi):
@@ -259,7 +292,9 @@ def main():
         return hashlib.sha256(serial.encode()).hexdigest() == expected
 
     def usb_adb():
-        for line in command(["adb", "devices", "-l"]).stdout.splitlines()[1:]:
+        # A dedicated ADB server may exit when Android disconnects. Loader
+        # operations use independently verified fastboot and need no ADB daemon.
+        for line in command(["adb", "devices", "-l"], check=False).stdout.splitlines()[1:]:
             cells = line.split()
             # Recent libusb-backed adb prints a bare topology path (2-1.1),
             # while other backends print usb:<path>. Neither occurs on TCP/TLS.
@@ -449,6 +484,8 @@ def main():
                 raise SystemExit("Refusing: kernel has no lemonade S6SY792 touch support")
             if args.battery and kernel_manifest.get('battery_telemetry_supported') != 'bq28z610-uefi-cache-v2':
                 raise SystemExit('Refusing: kernel has no lemonade external-gauge telemetry support')
+            if args.bluetooth and args.bluetooth not in kernel_manifest.get('bluetooth_modes_supported', []):
+                raise SystemExit('Refusing: kernel does not support Bluetooth inspection')
             if args.wifi and args.wifi not in kernel_manifest.get("wifi_modes_supported", []):
                 raise SystemExit("Refusing: kernel has no requested lemonade Wi-Fi mode")
             if args.display and args.display not in kernel_manifest.get('display_modes_supported', []):
@@ -487,6 +524,9 @@ def main():
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith(('metal=', 'camtl=', 'metal_profile=')))
             cmdline += ' metal=1 metal_profile=' + str(args.metal_profile or 0)
             cmdline += ' camtl=' + ('1' if args.metal_system == 'desktop' else '0')
+        if args.bluetooth_ui:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith(('metal=', 'camtl=', 'metal_profile=')))
+            cmdline += ' metal=1 metal_profile=1 camtl=1 lemonade_bt_ui=1'
         if args.display:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_display='))
             cmdline += ' lemonade_display=' + str({'inspect': 1, 'clocks': 2, 'irq': 3, 'sync': 4, 'smmu': 5, 'map': 6, 'flip': 7, 'manual': 8, 'scale': 9, 'direct': 10}[args.display])
@@ -498,10 +538,14 @@ def main():
                 cmdline += ' lemonade_display_pattern=' + str({None: 0, 'uniform': 0, 'grid': 1, 'columns': 2, 'rows': 3}[args.display_pattern])
             if args.display in ('sync', 'direct'):
                 cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('ca_vbl='))
-                cmdline += ' ca_vbl=1'
+                # Match the validated base desktop's display-link scheduling.
+                cmdline += ' ca_vbl=' + ('0' if args.bluetooth_ui else '1')
         if args.touch:
             cmdline = " ".join(arg for arg in cmdline.split() if not arg.startswith("touchscreen="))
             cmdline += " touchscreen=" + ("2" if args.touch == "inspect" else "1")
+        if args.bluetooth:
+            cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('lemonade_bt='))
+            cmdline += ' lemonade_bt=' + str({'inspect': 1, 'clocks': 2, 'identify': 3, 'firmware': 4, 'scan': 5, 'native': 6}[args.bluetooth])
         if args.display_fences:
             cmdline = ' '.join(arg for arg in cmdline.split() if not arg.startswith('fb_fences='))
             cmdline += ' fb_fences=1'
@@ -561,6 +605,16 @@ def main():
         cmdline = f"loader_return_after={args.seconds} epoch={int(time.time())} sb_delay=8 " + cmdline
         payload = ROOT / "out/lemonade-xnu.bin"
         extra_images = [f"ramdisk={verified_image('userland/root.apfs')}"] if args.userland or args.gpu or args.gpu_step else []
+        bluetooth_record = None
+        if args.bluetooth_image:
+            image_manifest = json.loads((ROOT / 'local/lemonade/images.json').read_text())
+            bluetooth_image, bluetooth_record = verified_bluetooth_overlay(args.bluetooth_image,
+                expected_kernel, expected, image_manifest['userland/system.apfs']['sha256'])
+            if bool(bluetooth_record.get('native_services')) != (args.bluetooth == 'native'):
+                raise SystemExit('Refusing: native Bluetooth jobs and mode must be selected together')
+            if args.bluetooth_ui and not (bluetooth_record.get('board_compat') and bluetooth_record.get('board_bootstrap')):
+                raise SystemExit('Refusing: native Bluetooth UI requires the verified board compatibility and bootstrap')
+            extra_images = [f'ramdisk={bluetooth_image}']
         if firmware_overlay:
             extra_images = [f'ramdisk={firmware_overlay}']
         graphics_record = None
@@ -582,12 +636,16 @@ def main():
         record.update({"boot_cpu": args.boot_cpu, "cpus_requested": args.cpus})
         record["performance_metrics"] = args.metrics
         record["gpu_submission_trace"] = args.gpu_trace
+        record['bluetooth_ui'] = args.bluetooth_ui
         record['gpu_clock_mhz_requested'] = args.gpu_clock
         record["metrics_mode"] = "frame-input-present-v2" if args.metrics else None
         record["cpu_policy"] = args.cpu_policy
         record["profile"] = args.profile
         record["touch"] = args.touch
         record["wifi"] = args.wifi
+        record['bluetooth'] = args.bluetooth
+        if bluetooth_record:
+            record['bluetooth_firmware'] = bluetooth_record
         record['battery'] = args.battery
         record['network_test'] = args.network_test
         record['metal_test'] = args.metal_test
@@ -611,6 +669,9 @@ def main():
             image_manifest = json.loads((ROOT / "local/lemonade/images.json").read_text())
             record["images"] = {name: image_manifest[name] for name in
                                 ("userland/root.apfs", "userland/system.apfs")}
+            if bluetooth_record:
+                record['images'].pop('userland/root.apfs')
+                record['images'][str(bluetooth_image.relative_to(ROOT))] = bluetooth_record
             if firmware_record:
                 record['images'].pop('userland/root.apfs')
                 record['images']['out/lemonade-wifi/root.apfs'] = firmware_record
@@ -694,6 +755,11 @@ def main():
                     dest.write_bytes(network_helper.redact(dest.read_bytes(), network_record))
                     record['network_identity_redacted'] = True
                 firmware_overlay.unlink(missing_ok=True)
+        if args.action == 'run' and args.bluetooth and dest.exists():
+            sanitized = re.sub(rb'(?i)(?<![0-9a-f])(?:[0-9a-f]{2}:){5}[0-9a-f]{2}(?![0-9a-f])',
+                               b'[radio address omitted]', dest.read_bytes())
+            dest.write_bytes(sanitized)
+            record['radio_addresses_redacted'] = True
         print(f"Saved private device evidence: {dest}")
         if args.action == "run":
             if network_record is not None and record['live_logs']:

@@ -2,37 +2,75 @@
 
 本文记录维护者本机包的功能与验收证据。新用户请看 [复现指南](LEMONADE-REPRODUCE.md)：发布方负责实机验收，用户只准备本机必要文件与指定 Apple 系统。现有本机包及其验收记录不能直接用于另一台手机；普通用户准备工具与已验收公开运行版本尚未交付。
 
-`main` 已集成异步 Metal、双缓冲多层显示、退出排空、Safari 刷新策略，以及默认启用的真实电量与充电状态。双缓冲原生场景实测约 116–117 fps，详见 [原生多层显示修复](LEMONADE-NATIVE-BENCH.md)。电池单独实测与 USB 重连限制见 [电池驱动](LEMONADE-BATTERY.md)；新组合尚需完整运行包验收。
+`main` 已集成异步 Metal、双缓冲多层显示、退出排空、Safari 刷新策略，以及默认启用的真实电量、充电状态、原生蓝牙发现和 Sileo 修复。双缓冲原生场景实测约 116–117 fps，详见 [原生多层显示修复](LEMONADE-NATIVE-BENCH.md)。电池单独实测与 USB 重连限制见 [电池驱动](LEMONADE-BATTERY.md)；当前组合的完整运行包验收已通过，见下文 `2026.10.27-base.2`。
 
 驱动设计、问题清单和源码入口见 [图形与显示驱动](LEMONADE-DISPLAY.md)、
 [面板切换](LEMONADE-120HZ.md) 与 [Wi-Fi 驱动](WIFI-LEMONADE.md)。
 
-最近完成整套运行包验收的是 `2026.10.25-base.4`，它解除 Safari 默认的 60 fps 网页限制，包含 base.3 的多层合成与退出修复，但尚未包含后来加入的双缓冲流水线和电池采集。GPU 为 379 MHz；该版本的 UFO Test 尚未稳定达到 120 fps。
+最近完成整套运行包验收的是 `2026.10.27-base.2`，包含双缓冲显示、Wi-Fi、电池、Sileo 和原生蓝牙发现。GPU 为 379 MHz；本版未重新测量 UFO Test，不以面板 120 Hz 代替网页实际帧率。
 双击包内 `Start.command` 即使用 120 Hz，不需要补充启动参数。旧的
 `2026.10.24-base.1` 目录、ZIP 和源码标签保持不变，可用于 60 Hz 回退。
 
 ## 原绑定设备使用
 
-本机运行包：`out/releases/lemonade-2026.10.25-base.4/`，压缩包为同名 `.zip`。
-运行包和源码版本分开管理；本次源码整理不创建新的包或标签。原 base.1、base.2、base.3、base.4 包与既有标签均保留。
+本机运行包：`out/releases/lemonade-2026.10.27-base.2/`，压缩包为同名 `.zip`。
+运行包和源码版本分开管理；对应实现合入两个仓库的 `main`，原运行包与既有标签均保留。
 将此包绑定的 LE2110 通过 USB 接入安装了 Python 3.11+、adb、fastboot 的 Mac，运行
 `Start.command`；返回 Android 使用 `Return-to-Android.command`。
 
 默认参数包含 `lemonade_display_hz=120` 和 `lemonade_panel=655`，并启用 DPU 直接显示、
 生产者释放同步。`ca_vbl=0` 让 Core Animation 使用原生 CADisplayTimer；DPU 的 TE 同步和
 GPU fence 检查仍然启用。现有本机启动器在启动前校验设备身份、文件哈希、面板绑定、维护者已完成的对应内核 DMA
-保护测试，以及 120 Hz 与 GPU／触控／Wi-Fi 联合验收记录；不在每次启动时重跑验收。面板切换后先测量 64 个 TE
+保护测试，以及 120 Hz 与 GPU／触控／Wi-Fi／电池／蓝牙联合验收、原生蓝牙设备列表记录；不在每次启动时重跑验收。面板切换后先测量 64 个 TE
 周期，成功后才向 iOS 发布 120 Hz 模式。
 
 运行包包含 Adreno 660 GLES/Metal、SpringBoard、小组件所需服务、实体触控和 QCA6490
-Wi-Fi。`/redwood/bin` 仍只有必要的 `metal-enable`；没有测试应用、网络测试程序、自动手势、
+Wi-Fi、原生蓝牙与电池服务。`/redwood/bin` 只包含 `metal-enable` 和板级蓝牙 bootstrap；没有测试应用、网络测试程序、自动手势、
 开机自检、详细性能采样或定时退出。网络密码和既有账号没有打入包内。
 
 系统从 RAM 运行，重启后设置与会话不保留。它不是完整 Android 替代 ROM。120 Hz 是
 固定启动模式，应用实际帧率受自身配置和负载影响；自适应刷新率、长期温控与续航、睡眠唤醒
 和其余外设仍待后续验证。原生设置中首次输入 Wi-Fi 密码的完整流程也尚未单独验收。
 
-## base.4 Safari 网页刷新策略（2026-10-25）
+## 2026.10.27-base.2 蓝牙集成版
+
+基于前一版完整 base 加入原生蓝牙 H4 控制器、固件启动服务与原生主机兼容。
+内核 SHA-256：`22206252397d69c037632b7ef695ead42c4e64a790210f0b624a30cd1e96dd6a`；root：`b8b686fbf49b51167826a36b4856e4d07bc6aa5d0d9b10811b4390c4df4e0929`。
+对应用户态提交固定在 `common/devices/lemonade.sources.json`。正式包不包含蓝牙测试客户端、追踪库、UI 观察器或自动设置页面启动。
+
+- 当前内核重新通过真实 DMA 防护；180 秒联合验收覆盖显示 36 项、网络 61 项、Metal 103 项、MPS 2 项、Core Animation 4 项，完成 2773 次 DPU 传输，零回退和失败。
+- Wi-Fi 验证关联、DHCP、DNS、三次 HTTP 请求和受控重连；蓝牙保持真实已开启/可用状态，14 次采样全部通过；电池有 13 个日志样本和 10 次不同更新的原生接口对照。
+- 另一次从 Android 冷启动的 180 秒测试，在 Wi-Fi station、图形和电池均启用时，原生 `BTSDevicesController` 显示 1 个真实设备，收到 1 次原生发现通知；画面读回确认附近 Mac，蓝牙服务没有重启。
+- 未增加诊断负载的正式包持续运行 90 秒后由主机主动停止，通过 28 项检查，完成 743 次 DPU 传输；蓝牙传输、UART/时钟、Wi-Fi DMA、显示及 GPU 均正常停止。
+
+一次复用已返回的 RAM 加载器的测试在 Wi-Fi 初始化期间进入 Qualcomm `05c6:900e`，当时还未观察到蓝牙启动。底层根因仍未隔离；启动器现会先返回 Android，再重新冷启动，恢复原 Android 蓝牙设置。软件重启后已核对 Android 与五个分区哈希，失败记录保留，不作为通过证据。
+
+最后再次返回原 Android，原槽位、蓝牙设置和五个关键分区哈希均核对通过。证据在 `local/lemonade/release-2026.10.27-base.2/` 与 `local/lemonade/base-bluetooth-20261027/`。蓝牙配对、音频、外设数据、反复开关、睡眠唤醒和长期稳定性仍未验收。
+
+## 2026.10.26-base.2 联合体验版（历史）
+
+本机新包包含当前 Wi-Fi、图形/触控、双缓冲显示、电量和 Sileo 修复。对应 kernel 为
+`5fecc557d6d445e5050d17eb569e3a9c1e117a153eae56d27bbac6e4663904b9`，root 为 `76a8bd250cd35641dabb916047eac98f74d14909ca5293e011a544b696cfcfa1`。
+正式包没有测试程序、自动手势、录制或定时退出；Sileo 由正常启动服务准备并注册。
+
+该组合先完成对应内核的 DMA 防护检查，再通过显示 36 项、网络 61 项、Metal 103 项、
+MPS 2 项、Core Animation 4 项，完成 1903 次显示传输。Wi-Fi 覆盖关联、DHCP、DNS、
+三次 HTTP 请求和断线重连。电池取得 7 个不同日志样本与 10 次不同更新的原生对照；
+内核、IORegistry、IOPS 和电源列表均为 100%，接电、满电标志一致，无过期或采样错误。
+验收脚本现在核对实际原生接口，不再依赖可能未保留在日志环中的 IOKit 注册消息。
+
+正式运行包随后持续运行 90 秒，直到主机主动停止，共通过 25 项检查，
+完成 772 次显示传输；Sileo 自动注册、电池持续更新、正常排空与退出均通过。
+之后已返回原 Android，核对原槽位和五个关键分区哈希。证据位于
+`local/lemonade/release-2026.10.26-base.2/`，组合验收与正式包运行分别记录。
+
+<img src="assets/lemonade-base-20261026.png" width="300" alt="联合验收时桌面同时显示 Wi-Fi 和绿色 100% 电量">
+
+图像来自联合验收期间已完成显示传输的源表面，非光学拍摄。原生首次输入 Wi-Fi 密码、
+物理 USB 拔插后的电源切换、未满电实际充电和长期稳定性仍未完成验收。
+Sileo 的图形化安装与 NewTerm 命令验证使用独立镜像，详情见 [Sileo 修复](LEMONADE-SILEO.md)。
+
+## base.4 Safari 网页刷新策略（历史，2026-10-25）
 
 原手机现场日志覆盖 60.160 秒，实际提交 **60.006 fps**，同时面板模式始终为 120 Hz。
 所以用户看到的 UFO Test 60 fps 不是误报，原生界面达到 120 fps 也不能证明网页达到该速度。
@@ -236,6 +274,11 @@ tools/lemonade-build-kernel.sh
 AIR=1 bash tools/mk-mesa.sh
 bash tools/lemonade-build-metal.sh
 bash tools/lemonade-build-base-runtime.sh
+bash tools/lemonade-build-bt-bootstrap.sh
+bash tools/lemonade-build-bt-compat.sh
+bash tools/lemonade-build-bt-client.sh
+bash tools/lemonade-build-bt-ui-trace.sh
+bash tools/lemonade-build-battery-test.sh
 
 # 宿主：先持有该手机的 Device Hub 租约，核对 Android USB 目标与面板
 python3 tools/lemonade-usb.py panel
@@ -248,14 +291,20 @@ python3 tools/test-lemonade-display-pipeline.py
 python3 tools/test-lemonade-gpu-return.py
 python3 tools/test-lemonade-display-resume.py
 python3 tools/test-lemonade-check-direct.py
-python3 tools/lemonade-build-base.py
-python3 tools/lemonade-validate-base.py
-python3 tools/lemonade-validate-base-runtime.py
+# 选择尚未存在的新版本；以下名称仅为模板。
+BASE_CANDIDATE='2026.10.27-base.3-candidate.1'
+python3 tools/lemonade-build-base.py --version "$BASE_CANDIDATE"
+python3 tools/lemonade-validate-base.py --version "$BASE_CANDIDATE"
+python3 "out/releases/lemonade-$BASE_CANDIDATE/launch.py" android
+python3 tools/lemonade-validate-base-bluetooth.py --version "$BASE_CANDIDATE"
+python3 tools/lemonade-validate-base-runtime.py --version "$BASE_CANDIDATE"
+python3 "out/releases/lemonade-$BASE_CANDIDATE/launch.py" android
+python3 tools/lemonade-verify-android.py
 ```
 
-启动器默认选择已验证的 `2026.10.25-base.4`；构建器拒绝覆盖已有版本目录。
-为当前源码生成新候选时，必须向构建器和两个验收器传入相同且尚未使用的 `--version`。联合验收使用一次性副本
-加入图形和网络负载，正式 `root.apfs` 不变。验证结束删除临时网络输入；留存日志先脱敏。
+构建与验收工具当前默认版本为 `2026.10.27-base.2`；构建器拒绝覆盖已有版本目录。
+为当前源码生成新候选时，必须向构建器和三个验收器传入相同且尚未使用的 `--version`。联合验收使用一次性副本
+加入图形、网络、电池和蓝牙负载，正式 `root.apfs` 不变。验证结束删除临时网络输入；留存日志先脱敏。
 随后使用包内启动器原样运行干净镜像，确认默认模式、持续运行及主动退出恢复。
 最后返回 Android，运行 `tools/lemonade-verify-android.py` 核对五个关键分区哈希。
 

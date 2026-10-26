@@ -15,7 +15,10 @@ mkdir -p out
 python3 - <<'COPY'
 import hashlib, json, os
 from pathlib import Path
-paths = ['bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
+paths = ['bsd/dev/lemonade_radio.c', 'bsd/sys/lemonade_radio.h',
+         'bsd/dev/lemonade_bluetooth.c', 'bsd/dev/lemonade_bt_protocol.h', 'bsd/dev/lemonade_bt_firmware.h',
+         'bsd/dev/lemonade_bt_native.h', 'bsd/dev/lemonade_bt_queue.h', 'iokit/Kernel/LemonadeBluetooth.cpp',
+         'bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
          'bsd/dev/lemonade_battery.c', 'bsd/sys/lemonade_battery.h', 'iokit/Kernel/RedwoodBattery.cpp',
 	 'bsd/dev/lemonade_display.c', 'bsd/sys/lemonade_display.h', 'iokit/Kernel/MiniIOMobileFramebuffer.cpp', 'iokit/Kernel/RedwoodGPU.cpp',
          'bsd/dev/lemonade_touch.c', 'bsd/dev/lemonade_touch_protocol.h',
@@ -41,11 +44,16 @@ python3 - "$XNU_SRC/bsd/conf/files" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]); original = p.read_text(); s = original
-for name in ('lemonade_touch.c', 'lemonade_wifi.c', 'lemonade_display.c', 'lemonade_battery.c'):
+for name in ('lemonade_radio.c', 'lemonade_bluetooth.c', 'lemonade_touch.c', 'lemonade_wifi.c', 'lemonade_display.c', 'lemonade_battery.c'):
     if 'bsd/dev/' + name not in s:
         s += '\nbsd/dev/' + name + '\tstandard\n'
 if s != original:
     p.write_text(s)
+import os
+p = Path(os.environ['XNU_SRC']) / 'iokit/conf/files'
+s = p.read_text()
+if 'iokit/Kernel/LemonadeBluetooth.cpp' not in s:
+    p.write_text(s + '\niokit/Kernel/LemonadeBluetooth.cpp\toptional iokitcpp\n')
 PY
 mkdir -p out local/lemonade
 LOG="local/lemonade/gpu-kernel-build-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -91,6 +99,12 @@ record = {'device': 'lemonade', 'stage': 'xnu-kernel',
           'battery_telemetry_supported': 'bq28z610-uefi-cache-v2',
           'battery_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_battery.c').read_bytes()).hexdigest(),
           'battery_hardware_verified': False,
+          'bluetooth_modes_supported': ['inspect', 'clocks', 'identify', 'firmware', 'scan', 'native'],
+          'bluetooth_transport_available': False,
+          'bluetooth_hardware_verified': False,
+          'bluetooth_driver_sha256': inputs['bsd/dev/lemonade_bluetooth.c'],
+          'radio_supply_profile': 'lemonade-shared-rpmh-retained-v1',
+          'radio_supply_sha256': inputs['bsd/dev/lemonade_radio.c'],
           'wifi_modes_supported': ['inspect', 'rails', 'domain', 'clocks', 'resets', 'controller', 'phy', 'root', 'radio', 'link', 'endpoint', 'mmio', 'smmu', 'sid', 'dma', 'dma-fault', 'bhi', 'mhi', 'bhie', 'ipcr', 'qmi', 'driver', 'scan', 'station'],
           'wifi_driver_sha256': hashlib.sha256(Path('xnu/files/bsd/dev/lemonade_wifi.c').read_bytes()).hexdigest(),
           'build_log': str(log), 'gpu_hardware_verified': False}

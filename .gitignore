@@ -37,6 +37,7 @@ __pycache__/
 /tools/mk-mesa.sh
 /tools/mk-jb.sh
 /tools/jb-preinstall.py
+/tools/jb-setid-manifest.py
 /tools/font_trim.py
 /tools/metallib.py
 
