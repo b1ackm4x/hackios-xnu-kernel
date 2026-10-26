@@ -690,8 +690,13 @@ if [ -n "$FLASHBOOT" ] && [ -f $CACHE/dyld_shared_cache_arm64 ]; then
 		done
 		echo "  the package manager's prefix: $(du -sh flashboot/jb | cut -f1) as /jb of the boot volume"
 	fi
-	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs Boot=flashboot | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs Boot=flashboot
+	JB_META=
+	if [ -d flashboot/jb ]; then
+		[ -f ../jb/setid.manifest ] || { echo 'Rebuild the bootstrap with tools/mk-jb.sh (missing set-ID manifest)' >&2; exit 1; }
+		JB_META=,manifest=../jb/setid.manifest
+	fi
+	python3 ../tools/apfs/mkapfs.py -z --plain fw -o flashboot.boot.apfs "Boot=flashboot$JB_META" | tail -1
+	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh flashboot.boot.apfs "Boot=flashboot$JB_META"
 	# the third container: Apple's App cryptex as it is (10 MB; fetch.sh), for the boot volume's Cryptexes/App
 	APP=""
 	[ -f $IOS/cryptex-app.dmg ] && APP=$IOS/cryptex-app.dmg
@@ -751,15 +756,15 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	fi
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: the Procursus bootstrap with
 	# Sileo in it, as /jb. It cannot live at /var/jb in the image -- /private/var is a memory
-	# filesystem made afresh at every boot -- so init copies it there (src/init.c, copy_tree).
+	# filesystem made afresh at every boot. init grafts it into a separate RAM filesystem under
+	# /private/preboot, where LaunchServices accepts rootless applications.
 	if [ -d ../jb/root/var/jb ]; then
 		rm -rf sysroot/jb
 		cp -a ../jb/root/var/jb sysroot/jb
-		# the applications of the prefix are system applications here: LaunchServices builds its
-		# database afresh at every boot by walking /Applications, which is how their icons appear
-		for app in sysroot/jb/Applications/*.app; do
-			[ -d "$app" ] && cp -a "$app" sysroot/Applications/
-		done
+		mkdir -p sysroot/private/preboot/jb-rw
+		# Keep one canonical registration path for prep.sh and later uikittools triggers.
+		# A second copy in /Applications makes a package refresh unregister the running Sileo.
+		# Applications are copied (not symlinked) by init and registered by prep.sh.
 		# Sileo moves, copies and removes files as root with /bin/mv, /bin/cp, /bin/rm, /bin/mkdir and
 		# /bin/chmod -- where a jailbreak with a writable root keeps them -- and iOS's /bin has df and ps
 		# alone: every one of those spawns failed with nothing said, and the package it had downloaded never
@@ -825,7 +830,12 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	done
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
 	# files in 2.5 GB, what fits into the phone's RAM beside iOS
-	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$IOS/system.manifest | tail -1
-	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$IOS/system.manifest
+	JB_META=
+	if [ -d sysroot/jb ]; then
+		[ -f ../jb/setid.manifest ] || { echo 'Rebuild the bootstrap with tools/mk-jb.sh (missing set-ID manifest)' >&2; exit 1; }
+		JB_META=,manifest=../jb/setid.manifest
+	fi
+	python3 ../tools/apfs/mkapfs.py -z -o system.apfs "System=sysroot,manifest=$IOS/system.manifest$JB_META" | tail -1
+	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs "System=sysroot,manifest=$IOS/system.manifest$JB_META"
 	rm -rf sysroot
 fi

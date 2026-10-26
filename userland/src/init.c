@@ -649,9 +649,9 @@ own_tree(const char *path, int uid)
  * system image is already 2.8 GB of its 4.3 GB), so the prefix is grafted instead: every directory
  * is made for real, and every file and link in it becomes a symbolic link to its twin in /jb. The
  * directories are then writable -- a package that puts a file in /var/jb/usr/bin puts it in memory,
- * next to the links -- while the 114 MB of programs and libraries stay where they are, read only
- * and shared. What dpkg and apt write over rather than beside (their databases and settings) is
- * copied for real: GRAFT_COPY below.
+ * next to the links -- while most programs and libraries stay read only and shared. Application
+ * bundles must contain real files for LaunchServices. Those and what dpkg and apt write over
+ * (their databases and settings) are copied for real: graft_copy below.
  */
 static int
 copy_tree(const char *from, const char *to, int *files)
@@ -715,7 +715,8 @@ copy_tree(const char *from, const char *to, int *files)
 }
 
 /* The parts of the prefix that are written over, not just added to, and so are copied for real. */
-static const char *const graft_copy[] = { "Library", "etc", "var", "tmp" };
+/* LaunchServices must see real bundle files, not links into the read-only image. */
+static const char *const graft_copy[] = { "Applications", "Library", "etc", "var", "tmp" };
 
 static int
 graft_tree(const char *from, const char *to, int top, int *made, int *linked)
@@ -896,13 +897,13 @@ mount_writable(void)
 		int dirs = 0, entries = 0, grafted, users = 0;
 
 		/*
-		 * With the root on the flash, the prefix's writable copy goes into a memory filesystem of its own
+		 * For both RAM and flash roots, the prefix's writable copy goes into a memory filesystem of its own
 		 * on the boot volume's jb-rw, as procursus, and /var/jb is a link to it: where /var/jb leads on
 		 * an iPhone with a rootless jailbreak, into /private/preboot. LaunchServices registers an
 		 * application from there, and from /private/var not at all -- everything a package put in
 		 * /var/jb/Applications was "Unable to register", with nothing on the files even looked at.
 		 */
-		if (strcmp(jb, "/private/preboot/jb") == 0 && stat("/private/preboot/jb-rw", &st) == 0) {
+		if (stat("/private/preboot/jb-rw", &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR) {
 			if (mount("ramfs", "/private/preboot/jb-rw", 0, NULL) == 0 &&
 			    symlink("/private/preboot/jb-rw/procursus", "/private/var/jb") == 0) {
 				to = "/private/preboot/jb-rw/procursus";

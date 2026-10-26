@@ -28,6 +28,7 @@ get "$MIRROR/bootstraps/$SUITE/bootstrap-iphoneos-arm64.tar.zst" bootstrap.tar.z
 get "$MIRROR/pool/main/iphoneos-arm64-rootless/$SUITE/sileo/$SILEO" sileo.deb
 
 rm -rf "$OUT/root"
+rm -f "$OUT/setid.manifest" "$OUT/setid.manifest.new"
 mkdir -p "$OUT/root"
 zstd -dc "$OUT/debs/bootstrap.tar.zst" | tar -C "$OUT/root" -xf -
 [ -d "$OUT/root/var/jb" ] || { echo "mk-jb.sh: the bootstrap has no var/jb in it" >&2; exit 1; }
@@ -197,29 +198,22 @@ cat > "$OUT/root/var/jb/prep.sh" <<'PREP'
 #!/var/jb/bin/sh
 # Run once per boot, after the prefix has been grafted onto /var/jb (rc.jobs.sileo does it).
 /var/jb/usr/libexec/firmware
-# The prefix's applications: in the system image they are in /Applications already (userland/build.sh),
-# where LaunchServices finds them by itself; with the iOS volume on the flash as the root they are not,
-# and are registered from the prefix as a rootless jailbreak does it (uikittools' uicache) -- by where the
-# bundle really is, as there: in /var/jb, grafted, its files are links into the boot volume
-# (/private/preboot/jb), and LaunchServices refuses a bundle made of links ("Unable to register").
+# init copies application bundles into the writable prefix under /private/preboot for both
+# RAM and flash roots. Register only through /var/jb, the same path uikittools scans later.
+# Do not fall back to the read-only image or duplicate a bundle in /Applications: a later
+# package trigger would unregister that alternate path and terminate the running app.
 # Asked again every five seconds, two minutes at most, aside: right after SpringBoard it may be busy.
 for app in /var/jb/Applications/*.app; do
-	[ -d "/Applications/${app##*/}" ] && continue
-	# by its own path in the prefix first: that is the one a later uicache -- the trigger of any package
-	# that brings an application -- finds again when it rebuilds the database, and an application
-	# registered under some other path is "uninstalled" by that rebuild, which makes SpringBoard kill it
-	# (a running Sileo died the moment a tweak was installed). The real path, with the grafted prefix a
-	# directory of the boot volume, is only the fallback.
-	real=$(/var/jb/usr/bin/readlink "$app/Info.plist" 2>/dev/null)
-	real=${real%/Info.plist}
+	[ -d "$app" ] || continue
 	(
 		for try in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
-			for path in "$app" ${real:+"$real"}; do
-				case "$(/var/jb/usr/bin/uicache -p "$path" 2>&1)" in
-				*Error*) ;;
-				*) echo "prep.sh: ${app##*/} registered from $path (try $try)"; exit 0 ;;
-				esac
-			done
+			result=$(/var/jb/usr/bin/uicache -p "$app" 2>&1)
+			status=$?
+			# uikittools 2.1.7 can print an error yet return zero; inspect both.
+			case "$status:$result" in
+			0:*Error*) ;;
+			0:*) echo "prep.sh: ${app##*/} registered from $app (try $try)"; exit 0 ;;
+			esac
 			sleep 5
 		done
 		echo "prep.sh: ${app##*/} could not be registered"
@@ -234,6 +228,12 @@ exit 0
 PREP
 chmod 755 "$OUT/root/var/jb/prep.sh"
 rm -f "$OUT/root/var/jb/prep_bootstrap.sh"
+
+# A shared host filesystem can discard set-ID bits even after chmod succeeds.
+# Carry their archive metadata directly to mkapfs, after copying the prefix.
+zstd -dc "$OUT/debs/bootstrap.tar.zst" |
+	python3 "$ROOT/tools/jb-setid-manifest.py" "$OUT/root/var/jb" > "$OUT/setid.manifest.new"
+mv "$OUT/setid.manifest.new" "$OUT/setid.manifest"
 
 echo "mk-jb.sh: $OUT/root/var/jb ($(du -sh "$OUT/root/var/jb" | cut -f1), $(find "$OUT/root/var/jb" | wc -l) entries)"
 echo "          Sileo $(grep -m1 '^Version:' "$TMP/control/control" | cut -d' ' -f2), $(grep -c '^Package:' "$OUT/root/var/jb/Library/dpkg/status") packages in dpkg's database"
