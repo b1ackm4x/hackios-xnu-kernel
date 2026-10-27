@@ -28,6 +28,11 @@ def main():
                  'fw-wifi/probe', 'xnuloader/identity.h', 'devices/oneplus-9/prebuilt/boot.img'):
         if subprocess.run(['git', 'check-ignore', '-q', name], cwd=ROOT).returncode:
             raise SystemExit('Private/generated path is not ignored: ' + name)
+    for name in ('Makefile', 'devices/oneplus-9/tools/new-source.py',
+                 'userland/src/new-source.c', 'userland/tests/new-test.py',
+                 'sysimage/new-script.py', 'licenses/new-license.txt'):
+        if subprocess.run(['git', 'check-ignore', '--no-index', '-q', name], cwd=ROOT).returncode == 0:
+            raise SystemExit('Public source path would be hidden by ignore rules: ' + name)
     print('Single-repository source, device layout and private-file exclusions verified.')
 
 if __name__ == '__main__':

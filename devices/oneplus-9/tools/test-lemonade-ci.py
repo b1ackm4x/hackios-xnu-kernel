@@ -72,6 +72,44 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package.check_receipt(root, 'out')
 
+    def test_package_keeps_commit_identity_after_copying_licenses(self):
+        import contextlib
+        import io
+        import tarfile
+        commit = 'c' * 40
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = [*package.FILES, 'xnuloader/loader.efi', 'LICENSE',
+                       'licenses/userland-MIT.txt', 'xnu-src/xnu-8796.121.2/APPLE_LICENSE',
+                       'xnu-deps/build/ath11k/freebsd/COPYRIGHT',
+                       'xnu-deps/build/mesa/mesa-25.0.7/docs/license.rst',
+                       'xnu-deps/build/ath11k/src-lemonade/driver.c', 'docs/LEMONADE-CI.md']
+            for source in sources:
+                path = root / source
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'public fixture')
+            def archive(args, **kwargs):
+                self.assertEqual(args[:3], ['git', 'archive', '--format=tar.gz'])
+                self.assertEqual(args[-1], 'HEAD')
+                Path(args[4]).write_bytes(b'source archive fixture')
+            with patch.object(package, 'ROOT', root), patch.object(package, 'check_outputs'), \
+                 patch.object(package, 'git', side_effect=[commit, '']), \
+                 patch.object(package.subprocess, 'run', side_effect=archive), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                package.main()
+            manifest = json.loads((root / 'out/ci-release/manifest.json').read_text())
+            self.assertEqual(manifest['source_commit'], commit)
+            self.assertEqual(manifest['source_layout'], 'monorepo')
+            self.assertNotIn('userland_commit', manifest)
+            self.assertIn('sources/source.tar.gz', manifest['files'])
+            self.assertNotIn('sources/kernel.tar.gz', manifest['files'])
+            self.assertNotIn('sources/userland.tar.gz', manifest['files'])
+            self.assertFalse(manifest['hardware_verified'])
+            self.assertIn('licenses/userland-MIT.txt', manifest['files'])
+            with tarfile.open(root / ('out/ci-release/lemonade-ci-' + commit[:12] + '.tar.gz')) as bundle:
+                inside = json.load(bundle.extractfile('lemonade-ci-' + commit[:12] + '/manifest.json'))
+                self.assertEqual(inside, manifest)
+
     def test_release_requires_every_uploaded_asset_and_matching_server_digest(self):
         import copy
         import hashlib

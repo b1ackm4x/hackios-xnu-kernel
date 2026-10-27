@@ -14,7 +14,11 @@
 !/tools/
 !/xnu/
 !/xnu-deps/
-!/devices/poco-x5-pro/uefi/
+!/devices/
+!/sysimage/
+!/userland/
+!/licenses/
+!/Makefile
 !/prebuilt/
 !/wifi/
 !/.github/

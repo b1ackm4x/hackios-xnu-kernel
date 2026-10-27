@@ -89,12 +89,12 @@ def module(name, path):
 
 def main():
     check_outputs(ROOT)
-    source = git('rev-parse', 'HEAD')
+    source_commit = git('rev-parse', 'HEAD')
     if git('status', '--porcelain', '--untracked-files=no'):
         raise SystemExit('Refusing to label modified tracked sources with a clean commit SHA')
     output = ROOT / 'out/ci-release'
     output.mkdir(parents=True, exist_ok=True)
-    name = 'lemonade-ci-' + source[:12]
+    name = 'lemonade-ci-' + source_commit[:12]
     folder = output / name
     folder.mkdir(exist_ok=False)
     for relative in FILES:
@@ -123,7 +123,7 @@ def main():
     files = {p.relative_to(folder).as_posix(): {'sha256': digest(p), 'bytes': p.stat().st_size}
              for p in sorted(folder.rglob('*')) if p.is_file()}
     manifest = {
-        'profile': 'lemonade-public-build-v2', 'source_commit': source,
+        'profile': 'lemonade-public-build-v2', 'source_commit': source_commit,
         'source_layout': 'monorepo',
         'target': 'OnePlus 9 lemonade / ARM64 components', 'build_host': platform.machine(),
         'run_url': os.environ.get('LEMONADE_CI_RUN_URL', ''),
