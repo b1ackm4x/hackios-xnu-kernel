@@ -10,7 +10,7 @@
     "repository": "https://github.com/b1ackm4x/hackios-xnu-userland",
     "upstream": "https://github.com/oosexgang/hackios-xnu-userland",
     "upstream_base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
-    "commit": "3278f7f01796e74ecd634c0d348d2b255a37658f"
+    "commit": "f86a705e549ec1f8caca8e0bdd3b37450634dbd1"
   },
   "base_release": {
     "version": "2026.10.25-base.1",
@@ -27,7 +27,7 @@
   },
   "local_base_release": {
     "version": "2026.10.27-base.2",
-    "source_status": "integrated in paired main sources; exact private runtime passed DMA, combined, native Bluetooth UI and untouched runtime acceptance",
+    "source_status": "sealed runtime predates upstream sync; its exact accepted source pair remains recorded here",
     "default_display_hz": 120,
     "gpu_clock_mhz": 379,
     "metal_completion": "asynchronous GPU fence",
@@ -48,7 +48,9 @@
     "bluetooth_audio_verified": false,
     "radio_restart": "return through Android before each subsequent RAM boot",
     "kernel_sha256": "22206252397d69c037632b7ef695ead42c4e64a790210f0b624a30cd1e96dd6a",
-    "root_sha256": "b8b686fbf49b51167826a36b4856e4d07bc6aa5d0d9b10811b4390c4df4e0929"
+    "root_sha256": "b8b686fbf49b51167826a36b4856e4d07bc6aa5d0d9b10811b4390c4df4e0929",
+    "kernel_commit": "c8033b632ec9dd76733486e7eb401e4fa02d431d",
+    "userland_commit": "3278f7f01796e74ecd634c0d348d2b255a37658f"
   },
   "integrated_source_fixes": {
     "branch": "main",
@@ -58,7 +60,7 @@
     "safari_refresh": "initialize the native prefer-60 preference once for the measured 120 Hz RAM desktop; honor later user changes",
     "temporary_profiling_and_ab_switches": false,
     "validation_document": "docs/LEMONADE-NATIVE-BENCH.md",
-    "new_full_runtime_package_verified": true,
+    "new_full_runtime_package_verified": false,
     "battery_telemetry": "BQ28Z610 telemetry and ChargerEx presence, cache v2, native IOPMPowerSource; enabled by default in new base builds",
     "battery_validation_document": "docs/LEMONADE-BATTERY.md",
     "charger_control": false,
@@ -66,5 +68,15 @@
     "bluetooth": "original native Settings discovery with verified Qualcomm H4 controller",
     "bluetooth_validation_document": "docs/LEMONADE-BLUETOOTH.md",
     "sileo": "canonical rootless prefix, set-ID preservation and automatic registration"
+  },
+  "upstream_sync": {
+    "repository": "https://github.com/oosexgang/hackios-xnu-kernel",
+    "commit": "88513176b1e96ecf0b764cd62c6f4e6ac71345e3",
+    "date": "2026-10-27",
+    "strategy": "selective normalized transplant; downstream platform and Metal changes retained",
+    "manifest": "common/upstream/20261027.json",
+    "validation_document": "docs/UPSTREAM-SYNC-20261027.md",
+    "lemonade_modem_enabled": false,
+    "new_runtime_hardware_verified": false
   }
 }

@@ -11,7 +11,10 @@
  */
 #include "efi.h"
 #include "lemonade_battery.h"
-#include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
+#ifndef HACKIOS_IDENTITY_HEADER
+#define HACKIOS_IDENTITY_HEADER "identity.h"
+#endif
+#include HACKIOS_IDENTITY_HEADER         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */

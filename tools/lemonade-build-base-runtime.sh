@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build only the boot initializer and Metal startup helper used by the base.
+# Build the production initializer, startup helper and system policy libraries.
 set -euo pipefail
 umask 022
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,21 +21,26 @@ xnu-clang -arch arm64 -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" -O1 -fobjc-arc \
     -framework Foundation -framework WebKit -framework IOKit -lobjc \
     -o "$OUT/libredwood-safari-refresh.dylib" userland/src/lemonade_safari_refresh.m
 "$THEOS/toolchain/linux/iphone/bin/ldid" -S "$OUT/libredwood-safari-refresh.dylib"
+xnu-clang -arch arm64 -isysroot "$THEOS/sdks/iPhoneOS16.5.sdk" -O1 -fblocks \
+    -dynamiclib -install_name /redwood/lib/libredwood-sb.dylib \
+    -framework CoreFoundation -framework IOKit -lobjc \
+    -o "$OUT/libredwood-sb.dylib" userland/src/inject_sb.c
+"$THEOS/toolchain/linux/iphone/bin/ldid" -S "$OUT/libredwood-sb.dylib"
 python3 - <<'PY'
 import hashlib,json,struct
 from pathlib import Path
 out=Path('out/lemonade-base-runtime')
 sources=['userland/src/init.c','userland/libmini/mini.c','userland/libmini/mini.h',
          'userland/libmini/start.S','tools/lemonade-metal-enable.c','tools/lemonade-build-base-runtime.sh',
-         'userland/src/lemonade_safari_refresh.m']
+         'userland/src/lemonade_safari_refresh.m','userland/src/inject_sb.c']
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 artifacts={}
-for name in ('init','metal-enable','libredwood-safari-refresh.dylib'):
+for name in ('init','metal-enable','libredwood-safari-refresh.dylib','libredwood-sb.dylib'):
  p=out/name;b=p.read_bytes();assert struct.unpack_from('<4I',b)==(0xfeedfacf,0x100000c,0,6 if name.endswith('.dylib') else 2)
  artifacts[name]={'sha256':digest(p),'bytes':len(b)}
 for marker in (b'64 MB of anonymous memory',b'read a 300 KB file',b'run a program through dyld',b'300 files in one directory'):
  assert marker not in (out/'init').read_bytes(),marker
 (out/'build.json').write_text(json.dumps({'profile':'lemonade-base-runtime-v1','artifacts':artifacts,
  'sources':{p:digest(Path(p)) for p in sources},'boot_self_tests':False},indent=2)+'\n')
-print('Built production init and Metal startup helper; boot self-test code absent.')
+print('Built production init, Metal helper, Safari and SpringBoard libraries; boot self-test code absent.')
 PY

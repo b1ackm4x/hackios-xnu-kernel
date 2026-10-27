@@ -15,7 +15,10 @@ mkdir -p out
 python3 - <<'COPY'
 import hashlib, json, os
 from pathlib import Path
-paths = ['bsd/dev/lemonade_radio.c', 'bsd/sys/lemonade_radio.h',
+paths = ['bsd/dev/redwood_cell.c', 'bsd/dev/redwood_ipa.c', 'bsd/dev/redwood_mpss.c', 'bsd/dev/redwood_nas.c',
+         'bsd/dev/redwood_modem_policy.h', 'bsd/sys/redwood_ipa.h', 'bsd/sys/redwood_nas.h',
+         'bsd/dev/redwood_net.c', 'bsd/sys/redwood_net.h', 'bsd/dev/redwood_qmi.c', 'bsd/sys/redwood_qmi.h',
+         'bsd/dev/redwood_ufs.c', 'bsd/dev/redwood_adsp.c', 'bsd/dev/lemonade_radio.c', 'bsd/sys/lemonade_radio.h',
          'bsd/dev/lemonade_bluetooth.c', 'bsd/dev/lemonade_bt_protocol.h', 'bsd/dev/lemonade_bt_firmware.h',
          'bsd/dev/lemonade_bt_native.h', 'bsd/dev/lemonade_bt_queue.h', 'iokit/Kernel/LemonadeBluetooth.cpp',
          'bsd/dev/redwood_adreno.c', 'bsd/dev/redwood_cpufreq.c',
@@ -44,7 +47,7 @@ python3 - "$XNU_SRC/bsd/conf/files" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]); original = p.read_text(); s = original
-for name in ('lemonade_radio.c', 'lemonade_bluetooth.c', 'lemonade_touch.c', 'lemonade_wifi.c', 'lemonade_display.c', 'lemonade_battery.c'):
+for name in ('redwood_cell.c', 'redwood_ipa.c', 'redwood_mpss.c', 'redwood_nas.c', 'lemonade_radio.c', 'lemonade_bluetooth.c', 'lemonade_touch.c', 'lemonade_wifi.c', 'lemonade_display.c', 'lemonade_battery.c'):
     if 'bsd/dev/' + name not in s:
         s += '\nbsd/dev/' + name + '\tstandard\n'
 if s != original:

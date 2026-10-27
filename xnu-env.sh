@@ -3,7 +3,14 @@
 # iOS SDK; XNU_SRC is the kernel tree (xnu/apply.sh creates it).
 DARWIN_REDWOOD=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export DARWIN_REDWOOD
-export THEOS=${THEOS:-$HOME/theos}
+export XNU_HOST_OS=$(uname)
+# On macOS there is no theos: xnu-deps/setup.sh lays out xnu-deps/theos-mac like one (links to the
+# cctools of Xcode and to the iPhoneOS 16.5 SDK of github.com/theos/sdks).
+if [ "$XNU_HOST_OS" = Darwin ]; then
+	export THEOS=${THEOS:-$DARWIN_REDWOOD/xnu-deps/theos-mac}
+else
+	export THEOS=${THEOS:-$HOME/theos}
+fi
 export XNU_SRC=${XNU_SRC:-$DARWIN_REDWOOD/xnu-src/xnu-8796.121.2}
 export XNUDEPS=$DARWIN_REDWOOD/xnu-deps
 export PATH=$XNUDEPS/host/bin:$PATH

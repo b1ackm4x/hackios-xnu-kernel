@@ -1,12 +1,13 @@
 # 仓库与机型分支维护
 
-当前适配目标是 OnePlus 9（LE2110，`lemonade`）。上游将内核和用户空间拆成两个 Git 仓库，
-构建时将它们叠放到同一个工作目录。我们沿用这个结构，避免漏掉 GLES 桥接和镜像构建改动。
+当前适配目标是 OnePlus 9（LE2110，`lemonade`）。我们仍将内核和用户空间两个仓库叠放在同一个工作目录。
+上游在 2026-10-26 前后合并为单仓并重写历史；我们按功能同步，保留自己的双仓结构和已验证实现。
+最近一次同步与保留范围见 [2026-10-27 上游同步](UPSTREAM-SYNC-20261027.md)。
 
 | 内容 | 我们的仓库 | 上游 |
 | --- | --- | --- |
 | 内核、loader、机型配置和测试工具 | `b1ackm4x/hackios-xnu-kernel` | `oosexgang/hackios-xnu-kernel` |
-| 用户空间、GLES 桥接、Mesa 和镜像构建 | `b1ackm4x/hackios-xnu-userland` | `oosexgang/hackios-xnu-userland` |
+| 用户空间、GLES 桥接、Mesa 和镜像构建 | `b1ackm4x/hackios-xnu-userland` | `oosexgang/hackios-xnu-kernel`（旧 userland 仓库现为迁移指针） |
 
 两个仓库均为公开的独立派生仓库，不属于 GitHub 的 Fork 网络；
 原许可证、作者和完整上游提交历史全部保留。
@@ -81,14 +82,15 @@ common/ugit push origin HEAD
 ## 合并上游
 
 ```sh
-git fetch upstream
-common/ugit fetch upstream
-git log --oneline HEAD..upstream/main
-common/ugit log --oneline HEAD..upstream/main
+git fetch upstream main
+# 上次同步 SHA；下一次同步后更新记录。
+git log --oneline 88513176b1e96ecf0b764cd62c6f4e6ac71345e3..upstream/main
 ```
 
-工作区干净后，在短期同步分支分别合并 `upstream/main`，解决冲突并完成主机测试与相关设备验证，
-再合入 `main`。不要用 `reset --hard upstream/main` 覆盖我们的机型适配。
+工作区干净后，在双仓短期同步分支上，以 `common/upstream/` 记录的最近同步 SHA 比较上游单仓差异，
+按来源路径分别移植到 kernel 与 userland。不能直接合并不相关历史，也不能把旧 userland 仓库的迁移指针当成源码更新。
+保留我们的机型、Metal 和构建实现，运行主机回归与编译，再合入 `main`；需要新运行包时另做对应设备验收。
+不要用 `reset --hard upstream/main` 覆盖我们的机型适配。
 
 ## 留在本地的资料
 

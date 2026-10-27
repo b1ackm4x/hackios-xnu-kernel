@@ -3,6 +3,16 @@
 set -e
 cd "$(dirname "$0")"
 EXTRA_CFLAGS=()
+# CI and open-kernel builds use a transient placeholder without overwriting the
+# maintainer's locally generated iOS identity header.
+if [ "${LOADER_PLACEHOLDER:-0}" = 1 ]; then
+  IDENTITY_BUILD=$(mktemp -d "${TMPDIR:-/tmp}/hackios-identity.XXXXXX")
+  trap 'rm -rf "$IDENTITY_BUILD"' EXIT
+  python3 mkidentity.py --placeholder > "$IDENTITY_BUILD/identity.h"
+  EXTRA_CFLAGS+=("-DHACKIOS_IDENTITY_HEADER=\"$IDENTITY_BUILD/identity.h\"")
+else
+  [ -f identity.h ] || bash mkidentity.sh
+fi
 if [ -n "${LOADER_USB_SERIAL:-}" ]; then
   [[ "$LOADER_USB_SERIAL" =~ ^[a-zA-Z0-9_-]{1,31}$ ]] || { echo "invalid LOADER_USB_SERIAL" >&2; exit 1; }
   EXTRA_CFLAGS+=("-DHACKIOS_USB_SERIAL=\"$LOADER_USB_SERIAL\"")

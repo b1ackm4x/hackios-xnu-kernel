@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FILES = (
     'out/lemonade-kernel', 'out/lemonade-kernel.manifest.json', 'out/lemonade-build-inputs.json',
     'out/lemonade-base-runtime/init', 'out/lemonade-base-runtime/metal-enable',
-    'out/lemonade-base-runtime/libredwood-safari-refresh.dylib', 'out/lemonade-base-runtime/build.json',
+    'out/lemonade-base-runtime/libredwood-safari-refresh.dylib',
+    'out/lemonade-base-runtime/libredwood-sb.dylib', 'out/lemonade-base-runtime/build.json',
     'out/lemonade-bt-runtime/lemonade-bt-bootstrap',
     'out/lemonade-bt-runtime/liblemonade-bt-compat.dylib', 'out/lemonade-bt-runtime/build.json',
     'out/lemonade-metal/libredwoodmetal.dylib', 'out/lemonade-metal/libredwoodair.dylib',

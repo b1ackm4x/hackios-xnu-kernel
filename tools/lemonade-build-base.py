@@ -252,6 +252,7 @@ def main():
             p not in {'etc/rc.jobs', 'share/pattern.bin', *('LaunchDaemons/' + n + '.plist' for n in REMOVED_JOBS)}}
     tree['sbin/init'] = (0o100755, 0, 0, (runtime_dir / 'init').read_bytes())
     tree['bin/metal-enable'] = (0o100755, 0, 0, (runtime_dir / 'metal-enable').read_bytes())
+    tree['lib/libredwood-sb.dylib'] = (0o100755, 0, 0, (runtime_dir / 'libredwood-sb.dylib').read_bytes())
     tree['lib/libredwood-safari-refresh.dylib'] = (0o100755, 0, 0,
         (runtime_dir / 'libredwood-safari-refresh.dylib').read_bytes())
     mode, uid, gid, injection = tree['etc/inject.conf']

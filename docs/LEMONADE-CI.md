@@ -1,5 +1,10 @@
 # OnePlus 9 CI 组件下载与维护者发布流程
 
+2026-10-27 上游同步后，CI loader 使用不含 Apple 设备树属性的临时占位身份头；
+它供源码/链接与开放内核实验验证，不能直接用于 iOS。维护者需从自己的 IPSW 生成
+`xnuloader/identity.h` 后重建 loader。本机已封存的 base.2 保持不变。
+详见 [上游同步范围](UPSTREAM-SYNC-20261027.md)。
+
 普通用户请先阅读 [复现指南](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-REPRODUCE.md)。编译和实机验收由维护者在发布前完成；用户只准备自己的必要设备文件与指定 Apple 系统，本地工具负责校验、组装和启动。用户不需要运行验收程序。
 
 `main` 每次更新都会运行主机测试、从固定 userland 提交编译，并在全部成功后发布 `ci-lemonade-<commit>` 实验版。PR 运行相同测试、编译和组包校验，不发布 Release；也可以在 Actions 手动运行。

@@ -26,7 +26,7 @@ set -e -o pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/../xnu-env.sh"
 cd "$XNUDEPS"
-JOBS=${JOBS:-$(nproc)}
+JOBS=${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
 CCTOOLS=$THEOS/toolchain/linux/iphone/bin
 IOS_SDK=$THEOS/sdks/iPhoneOS16.5.sdk
 MACOS_SDK_URL=https://github.com/joseluisq/macosx-sdks/releases/download/13.3/MacOSX13.3.sdk.tar.xz
@@ -58,9 +58,46 @@ update() {
 	if cmp -s "$1.new" "$1"; then rm "$1.new"; else mv "$1.new" "$1"; fi
 }
 
+# macOS: no theos, but Xcode has the same cctools and the SDK can be had from github.com/theos/sdks.
+# theos-mac/ is laid out like theos so that the rest of this script does not care.
+theos_mac() {
+	local tool
+	mkdir -p "$THEOS/toolchain/linux/iphone/bin" "$THEOS/sdks"
+	for tool in ld nm otool strip lipo libtool nmedit ctf_insert codesign_allocate install_name_tool; do
+		link "$(/usr/bin/xcrun -f $tool)" "$THEOS/toolchain/linux/iphone/bin/$tool"
+	done
+	if [ ! -d "$THEOS/sdks-git/iPhoneOS16.5.sdk/usr/include" ]; then
+		log "fetching iPhoneOS16.5.sdk from github.com/theos/sdks (about 220 MB)"
+		rm -rf "$THEOS/sdks-git"
+		git clone -q --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$THEOS/sdks-git" &&
+			git -C "$THEOS/sdks-git" sparse-checkout set iPhoneOS16.5.sdk || die "cannot fetch the SDK"
+	fi
+	link ../sdks-git/iPhoneOS16.5.sdk "$THEOS/sdks/iPhoneOS16.5.sdk"
+}
+
+# linktree FROM TO: TO becomes a tree of links to the files of FROM (cp -rs, which BSD cp lacks)
+linktree() {
+	if [ "$XNU_HOST_OS" = Darwin ]; then
+		python3 - "$1" "$2" <<-'PY'
+		import os, sys
+		src, dst = sys.argv[1], sys.argv[2]
+		for root, dirs, files in os.walk(src):
+		    rel = os.path.relpath(root, src)
+		    out = dst if rel == '.' else os.path.join(dst, rel)
+		    os.makedirs(out, exist_ok=True)
+		    for name in files:
+		        os.symlink(os.path.join(root, name), os.path.join(out, name))
+		PY
+	else
+		cp -rs "$1" "$2"
+	fi
+}
+
 stage1() {
 	local missing= tool
-	for tool in git curl tar xz make cc clang clang++ flex bison m4 perl python3 autoreconf automake; do
+	local tools="git curl tar xz make cc clang clang++ flex bison m4 perl python3 autoreconf automake"
+	[ "$XNU_HOST_OS" = Darwin ] && { theos_mac; tools="git curl tar make cc clang clang++ flex bison m4 perl python3"; }
+	for tool in $tools; do
 		command -v $tool >/dev/null || missing="$missing $tool"
 	done
 	[ -z "$missing" ] || die "not installed:$missing"
@@ -84,13 +121,21 @@ stage1() {
 	if [ ! -d MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework/Headers/DriverKit ]; then
 		log "downloading the macOS 13.3 SDK for its DriverKit headers"
 		curl -L --fail --retry 3 -s -o macos-sdk.tar.xz "$MACOS_SDK_URL" || die "download failed: $MACOS_SDK_URL"
-		tar -xJf macos-sdk.tar.xz --wildcards '*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*' ||
+		local wild=--wildcards; [ "$XNU_HOST_OS" = Darwin ] && wild=        # bsdtar: patterns as they are
+		tar -xJf macos-sdk.tar.xz $wild '*MacOSX13.3.sdk/System/Library/Frameworks/Kernel.framework*' ||
 			die "cannot unpack the macOS SDK"
 		rm -f macos-sdk.tar.xz
 	fi
 
 	# --- host tools ----------------------------------------------------------------------------
 	mkdir -p host/bin
+	if [ "$XNU_HOST_OS" = Darwin ]; then
+		# macOS has it all: mig (Xcode's; it takes $MIGCC and $MIGCOM from the kernel build), unifdef, csh
+		link "$(/usr/bin/xcrun -f mig)" host/bin/mig
+		link "$(/usr/bin/xcrun -f migcom)" host/bin/migcom
+		link /usr/bin/unifdef host/bin/unifdef
+		link /bin/tcsh host/bin/tcsh
+	fi
 	# mig: Apple's own does not build on glibc; this is a port that does
 	if [ ! -x host/bin/migcom ] || [ ! -x host/bin/mig ]; then
 		log "building mig"
@@ -120,7 +165,12 @@ stage1() {
 	for tool in nm otool strip lipo libtool nmedit ctf_insert codesign_allocate install_name_tool; do
 		link "$CCTOOLS/$tool" host/bin/$tool
 	done
-	link "$CCTOOLS/ld" host/bin/ld64
+	if [ "$XNU_HOST_OS" = Darwin ]; then
+		# (not a link: Xcode's ld looks itself up by the name it was called by, and knows no "ld64")
+		printf '#!/bin/sh\nexec "%s" "$@"\n' "$(/usr/bin/xcrun -f ld)" > host/bin/ld64.new && chmod +x host/bin/ld64.new && mv host/bin/ld64.new host/bin/ld64
+	else
+		link "$CCTOOLS/ld" host/bin/ld64
+	fi
 	link xnu-clang host/bin/xnu-clang++
 
 	# --- the SDK -------------------------------------------------------------------------------
@@ -129,7 +179,7 @@ stage1() {
 	if [ ! -d "$XNU_SDK_PATH/usr/include" ]; then
 		log "making the SDK: links to $IOS_SDK"
 		rm -rf "$XNU_SDK_PATH"
-		cp -rs "$(cd "$IOS_SDK" && pwd)" "$XNU_SDK_PATH"
+		linktree "$(cd "$IOS_SDK" && pwd -P)" "$XNU_SDK_PATH"
 	fi
 	local sdk_local=$XNU_SDK_PATH/usr/local
 	mkdir -p $sdk_local/include/kernel/os $sdk_local/include/os $sdk_local/lib/kernel $sdk_local/libexec

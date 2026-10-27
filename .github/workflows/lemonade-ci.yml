@@ -37,6 +37,11 @@ jobs:
             python3 "tools/test-lemonade-${suite}.py"
           done
           python3 tools/test-lemonade-ci.py
+          python3 tools/test-upstream-net.py
+          bash tools/qmi-test/run.sh
+          bash tools/qmi-test/run-nas.sh
+          bash tools/soc-args-test.sh
+          python3 tools/test-upstream-tools.py
           bash tools/test-lemonade-bluetooth.sh
           python3 userland/tests/test_jb_setid_manifest.py
           clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-touch.c -o /tmp/touch-test

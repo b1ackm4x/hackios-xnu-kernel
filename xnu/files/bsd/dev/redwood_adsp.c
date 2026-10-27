@@ -109,6 +109,7 @@ extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 /* What the Wi-Fi's DSP and this one both use (redwood_wifi.c). */
 extern lck_mtx_t redwood_aop_mailbox_lock;
 extern lck_mtx_t redwood_smem_alloc_lock;
+extern lck_mtx_t redwood_rsc_lock;            /* RPMh's sequencer, shared with the other DSP's driver */
 
 static LCK_GRP_DECLARE(adsp_lock_group, "redwood-adsp");
 
@@ -896,10 +897,12 @@ rails(uint32_t level)
 		values[r] = (uint32_t)position;
 	}
 	need(&rsc);
+	lck_mtx_lock(&redwood_rsc_lock);
 	/* (the boot loader leaves the trigger set after its last request, done: idle is what the status says) */
 	if (rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS) == 0) {
 		printf("adsp: %u: TCS %u of the sequencer is busy (status %#x, control %#x): the rails are not asked\n", step, RPMH_TCS,
 		    rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_STATUS), rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL));
+		lck_mtx_unlock(&redwood_rsc_lock);
 		return false;
 	}
 	printf("adsp: %u: about to ask RPMh, through TCS %u, for lcx.lvl (%#x) = %u and lmx.lvl (%#x) = %u (level %u%s)\n", step,
@@ -932,6 +935,7 @@ rails(uint32_t level)
 	wr(rsc.base + RSC_IRQ_CLEAR, 1u << RPMH_TCS);
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL, rd(rsc.base + RSC_TCS(RPMH_TCS) + TCS_CONTROL) & ~(TCS_TRIGGER | TCS_ACTIVE_MODE));
 	wr(rsc.base + RSC_TCS(RPMH_TCS) + TCS_ENABLED, 0);
+	lck_mtx_unlock(&redwood_rsc_lock);
 	return done != 0;
 }
 

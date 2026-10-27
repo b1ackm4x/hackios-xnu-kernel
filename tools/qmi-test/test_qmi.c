@@ -968,6 +968,11 @@ test_helpers(void)
 	/* no router: no handle */
 	redwood_qmi_set_transport(NULL);
 	check(qmi_handle_init(&qmi, 8192, &handle_ops, handle_handlers) == -ENXIO && qmi.sock == NULL, "a handle is made with no router there");
+	check(redwood_qmi_handle_init_transport(&qmi, 8192, &handle_ops, handle_handlers, &router_ops) == 0 &&
+	    qmi.sock != NULL, "an explicit transport cannot be used without the default router");
+	qmi_handle_release(&qmi);
+	check(qmi_handle_init(&qmi, 8192, &handle_ops, handle_handlers) == -ENXIO,
+	    "explicit transport changed the default router");
 
 	redwood_qmi_set_transport(&router_ops);
 	memset(&seen, 0, sizeof(seen));

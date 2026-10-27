@@ -44,10 +44,11 @@ __pycache__/
 /xnuloader/*
 !/xnuloader/build.sh
 !/xnuloader/efi.h
-!/xnuloader/identity.h
 !/xnuloader/loader.c
 !/xnuloader/lemonade_battery.c
 !/xnuloader/lemonade_battery.h
+!/xnuloader/im4p.py
+!/xnuloader/mkidentity.sh
 !/xnuloader/mkidentity.py
 !/xnuloader/mkpayload.py
 

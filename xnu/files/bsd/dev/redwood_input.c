@@ -230,4 +230,5 @@ redwood_input_init(void)
 	lemonade_bluetooth_init();
 	redwood_wifi_init();
 	redwood_adsp_init();
+	redwood_mpss_init();
 }

@@ -25,9 +25,11 @@
 #include <sys/kpi_mbuf.h>
 
 #define REDWOOD_NET_FRAME_MAX   1514
+#define REDWOOD_NET_UNITS       2       /* en0: the radio (or virtio); en1: the modem's packets (redwood_cell.c) */
 
 struct redwood_net_link {
 	const char *    name;           /* for the log */
+	unsigned        unit;           /* which enN this is (0 unless said otherwise) */
 	uint8_t         address[6];     /* the interface's Ethernet address */
 	bool            wireless;       /* the interface is told to be Wi-Fi (its "subfamily"), which is how the
 	                                 * network stack and configd tell a radio from a cable */
@@ -47,12 +49,14 @@ struct redwood_net_link {
 	unsigned        (*poll)(void);
 };
 
-/* Make en0 on top of that link (the structure must stay). One link, once: false if there is one already. */
+/* Make en<unit> on top of that link (the structure must stay). One link per unit, once: false if there is one already. */
 bool redwood_net_attach(const struct redwood_net_link *link);
-/* A frame has arrived. Copied; the buffer is the caller's again on return. */
+/* A frame has arrived (on en0 / on en<unit>). Copied; the buffer is the caller's again on return. */
 void redwood_net_input(const uint8_t *frame, size_t length);
-/* Frames can pass now / can no longer pass. */
+void redwood_net_input_unit(unsigned unit, const uint8_t *frame, size_t length);
+/* Frames can pass now / can no longer pass (on en0 / on en<unit>). */
 void redwood_net_link_state(bool up);
+void redwood_net_link_state_unit(unsigned unit, bool up);
 
 void redwood_net_init(void);            /* the links there are: each looks for its hardware (or its boot-arg) */
 /* an Apple80211 request (SIOCGA80211, SIOCSA80211) for the interface of a radio: redwood_apple80211.c */

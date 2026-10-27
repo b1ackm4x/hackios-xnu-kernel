@@ -190,6 +190,7 @@ static LCK_GRP_DECLARE(wifi_lock_group, "redwood-wifi");
  */
 LCK_MTX_DECLARE(redwood_aop_mailbox_lock, &wifi_lock_group);
 LCK_MTX_DECLARE(redwood_smem_alloc_lock, &wifi_lock_group);
+LCK_MTX_DECLARE(redwood_rsc_lock, &wifi_lock_group);      /* RPMh's sequencer (TCS 0 of the RSC): the audio DSP's and the modem's drivers both ask through it */
 /* ... and the sound's (redwood_sound.c): a free match register and context of the SMMU, found and taken */
 LCK_MTX_DECLARE(redwood_smmu_lock, &wifi_lock_group);
 

@@ -83,6 +83,8 @@ void redwood_adreno_minute(void);       /* once a minute: a line about how warm 
 void redwood_wifi_init(void);           /* boot-arg wifi=1: the phone's Wi-Fi; wifi_step=N: the first N steps of it */
 void lemonade_wifi_init(void);          /* lemonade_wifi=1: guarded, read-only PCIe survey */
 void redwood_adsp_init(void);           /* boot-arg adsp=1: the phone's audio DSP started and linked; adsp_step=N: the first N steps */
+void redwood_mpss_init(void);           /* opt-in SM7325 modem experiment; refuses other boards */
+int redwood_ufs_read_partition(const char *, uint64_t, uint8_t *, uint64_t, uint64_t *);
 void redwood_wifi_stop(void);           /* where a run ends in order: the Wi-Fi DSP, if it was started, shut down */
 int redwood_wifi_say(const char *format, ...) __printflike(1, 2);      /* a line of the Wi-Fi steps' log */
 int redwood_wifi_tell(const char *format, ...) __printflike(1, 2);     /* ... one that is said even with wifi=1 */

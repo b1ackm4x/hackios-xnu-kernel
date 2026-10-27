@@ -30,7 +30,7 @@ bash tools/mk-ath11k.sh
 mkdir -p xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT
 bash tools/mk-wlfw.sh
 bash tools/lemonade-build-kernel.sh
-LOADER_USB_SERIAL=lemonade-ci bash xnuloader/build.sh
+LOADER_PLACEHOLDER=1 LOADER_USB_SERIAL=lemonade-ci bash xnuloader/build.sh
 AIR=1 bash tools/mk-mesa.sh
 RUNTIME_ONLY=1 bash tools/lemonade-build-metal.sh
 bash tools/lemonade-build-gl.sh

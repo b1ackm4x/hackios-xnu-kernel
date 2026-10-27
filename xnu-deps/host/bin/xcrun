@@ -1,6 +1,9 @@
 #!/bin/bash
 # Minimal xcrun replacement for building XNU on Linux
 HB="$(cd "$(dirname "$0")" && pwd)"
+# On macOS the host side (the SDK and tools the build tools of SETUP/ are made with) is the real
+# xcrun's business; only the kernel's own SDK is ours.
+case " $* " in *" -sdk macosx"*) [ "$(uname)" = Darwin ] && exec /usr/bin/xcrun "$@" ;; esac
 sdk=""; find=""; show=""
 while [ $# -gt 0 ]; do case "$1" in
   -sdk) sdk="$2"; shift 2;; -verbose) shift;;
@@ -18,6 +21,7 @@ case "$show" in
 esac
 if [ -n "$find" ]; then
   for d in "$HB" /usr/bin; do [ -x "$d/$find" ] && { echo "$d/$find"; exit 0; }; done
+  [ "$(uname)" = Darwin ] && exec /usr/bin/xcrun -find "$find"
   exit 1
 fi
 [ $# -gt 0 ] && exec "$@"

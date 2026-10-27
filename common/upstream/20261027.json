@@ -1,0 +1,164 @@
+{
+  "source_repository": "https://github.com/oosexgang/hackios-xnu-kernel",
+  "source_commit": "88513176b1e96ecf0b764cd62c6f4e6ac71345e3",
+  "observed_at": "2026-10-27",
+  "legacy_kernel_base": "8e61187098f2c26c5daee8f9f72b6416aa64b9ab",
+  "legacy_userland_base": "906425b75e02b4f99eb5d7bb1ef7c9583472d772",
+  "legacy_userland_moved_commit": "2573c4a8d80ed143e534d16b5a386efa5b06ccbb",
+  "strategy": "selective normalized source transplant; downstream changes take precedence",
+  "source_files": [
+    {
+      "path": "xnu/files/bsd/dev/redwood_cell.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.cell.c"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_ipa.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.ipa.c"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_mpss.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.mpss.c"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_nas.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.nas.c"
+    },
+    {
+      "path": "xnu/files/bsd/sys/redwood_ipa.h",
+      "upstream_path": "xnu/files/bsd/sys/hakios.ipa.h"
+    },
+    {
+      "path": "xnu/files/bsd/sys/redwood_nas.h",
+      "upstream_path": "xnu/files/bsd/sys/hakios.nas.h"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_net.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.net.c"
+    },
+    {
+      "path": "xnu/files/bsd/sys/redwood_net.h",
+      "upstream_path": "xnu/files/bsd/sys/hakios.net.h"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_qmi.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.qmi.c"
+    },
+    {
+      "path": "xnu/files/bsd/sys/redwood_qmi.h",
+      "upstream_path": "xnu/files/bsd/sys/hakios.qmi.h"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_ufs.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.ufs.c"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_adsp.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.adsp.c"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_wifi.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.wifi.c"
+    },
+    {
+      "path": "xnu/files/bsd/dev/redwood_input.c",
+      "upstream_path": "xnu/files/bsd/dev/hakios.input.c"
+    },
+    {
+      "path": "xnu/files/osfmk/arm64/loader_return.c",
+      "upstream_path": "xnu/files/osfmk/arm64/loader_return.c"
+    },
+    {
+      "path": "xnu-build.sh",
+      "upstream_path": "xnu-build.sh"
+    },
+    {
+      "path": "xnu-env.sh",
+      "upstream_path": "xnu-env.sh"
+    },
+    {
+      "path": "xnu-deps/setup.sh",
+      "upstream_path": "xnu-deps/setup.sh"
+    },
+    {
+      "path": "xnu-deps/host/bin/xcrun",
+      "upstream_path": "xnu-deps/host/bin/xcrun"
+    },
+    {
+      "path": "xnu-deps/hostinc/xnu_clang_compat.h",
+      "upstream_path": "xnu-deps/hostinc/xnu_clang_compat.h"
+    },
+    {
+      "path": "xnuloader/im4p.py",
+      "upstream_path": "xnuloader/im4p.py"
+    },
+    {
+      "path": "xnuloader/mkidentity.py",
+      "upstream_path": "xnuloader/mkidentity.py"
+    },
+    {
+      "path": "xnuloader/mkidentity.sh",
+      "upstream_path": "xnuloader/mkidentity.sh"
+    },
+    {
+      "path": "tools/soc-args.py",
+      "upstream_path": "tools/soc-args.py"
+    },
+    {
+      "path": "tools/soc-args-test.sh",
+      "upstream_path": "tools/soc-args-test.sh"
+    },
+    {
+      "path": "tools/qmi-test/run-nas.sh",
+      "upstream_path": "tools/qmi-test/run-nas.sh"
+    },
+    {
+      "path": "tools/qmi-test/shim/sys/systm.h",
+      "upstream_path": "tools/qmi-test/shim/sys/systm.h"
+    },
+    {
+      "path": "tools/qmi-test/test_nas.c",
+      "upstream_path": "tools/qmi-test/test_nas.c"
+    },
+    {
+      "path": "tools/qmi-test/test_qmi.c",
+      "upstream_path": "tools/qmi-test/test_qmi.c"
+    },
+    {
+      "path": "tools/modem_firmware.py",
+      "upstream_path": "devices/poco-x5-pro/tools/modem_firmware.py"
+    },
+    {
+      "path": "tools/cellular_probe.py",
+      "upstream_path": "devices/poco-x5-pro/tools/cellular_probe.py"
+    },
+    {
+      "path": "userland/src/inject_sb.c",
+      "upstream_path": "userland/src/inject_sb.c"
+    },
+    {
+      "path": "userland/build.sh",
+      "upstream_path": "userland/build.sh"
+    }
+  ],
+  "additional_adapted_files": [
+    "xnu/redwood.patch",
+    "xnu/files/bsd/sys/redwood_input.h",
+    "xnuloader/build.sh",
+    "xnuloader/loader.c"
+  ],
+  "retained_areas": [
+    "Metal/AIR implementations and tests",
+    "OnePlus platform loader and battery cache",
+    "120 Hz and double-buffer display",
+    "QCA6490 DMA protection",
+    "native Bluetooth and shared SM8350 radio supplies",
+    "Sileo and Safari policies",
+    "two-repository build, CI and documentation"
+  ],
+  "modem_hardware_profiles": [
+    "redwood"
+  ],
+  "lemonade_modem_enabled": false,
+  "new_runtime_hardware_verified": false,
+  "documentation": "docs/UPSTREAM-SYNC-20261027.md"
+}

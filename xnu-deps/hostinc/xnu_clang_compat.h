@@ -16,6 +16,8 @@
 #else
 #define __builtin_xnu_types_compatible(a, b)     __builtin_types_compatible_p(a, b)
 #endif
+#else
+#define XNU_NO_TYPE_BUILTINS                     0       /* Apple's clang: the real ones */
 #endif
 #endif
 #endif
