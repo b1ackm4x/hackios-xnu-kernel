@@ -748,6 +748,23 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		mkdir -p sysroot/fw
 		cp ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] sysroot/fw/
 	fi
+	# MPSS firmware is much too large for the small boot image. Keep it in the system APFS,
+	# only when explicitly requested, after checking every loadable segment against this DTB.
+	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
+	if [ -n "$MODEM" ]; then
+		: "${MODEM_DTB:?MODEM requires the target device DTB}"
+		: "${MODEM_NODE:?MODEM requires the target modem node}"
+		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
+		../tools/modem_firmware.py --dtb "$MODEM_DTB" --firmware-dir ../fw-modem \
+			--node "$MODEM_NODE" >/dev/null
+		mkdir -p sysroot/fw
+		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
+		# ... and the firmware partition's image/ (its mcfg configurations and the registry's *.jsn, pulled from
+		# the phone's /vendor/firmware_mnt/image into ../fw-modem/image), which the modem reads over TFTP (redwood_mpss.c)
+		if [ -d ../fw-modem/image ]; then
+			rm -rf sysroot/fw/image && cp -R ../fw-modem/image sysroot/fw/image
+		fi
+	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (bsd/dev/redwood_speaker.c,
 	# for sound=3): Android's own register values, which are not in the repository either
 	if [ -f ../fw-audio/aw882xx_acf.bin ]; then
