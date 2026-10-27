@@ -125,11 +125,11 @@
     },
     {
       "path": "devices/poco-x5-pro/tools/modem_firmware.py",
-      "upstream_path": "devices/poco-x5-pro/devices/poco-x5-pro/tools/modem_firmware.py"
+      "upstream_path": "devices/poco-x5-pro/tools/modem_firmware.py"
     },
     {
       "path": "devices/poco-x5-pro/tools/cellular_probe.py",
-      "upstream_path": "devices/poco-x5-pro/devices/poco-x5-pro/tools/cellular_probe.py"
+      "upstream_path": "devices/poco-x5-pro/tools/cellular_probe.py"
     },
     {
       "path": "userland/src/inject_sb.c",

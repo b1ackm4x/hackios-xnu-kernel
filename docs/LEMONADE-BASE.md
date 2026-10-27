@@ -113,4 +113,4 @@ python3 devices/oneplus-9/tools/lemonade-validate-base-runtime.py
 这属于尚待完善的进程与 GPU 停止顺序，不能把这轮记录表述为完整生命周期无异常。
 
 项目保留 [oosexgang/hackios-xnu-kernel](https://github.com/oosexgang/hackios-xnu-kernel)
-和对应 userland 的原作者归属及许可，设备适配维护在 b1ackm4x 的两个公开仓库中。
+和对应 userland 的原作者归属及许可，设备适配现维护在 b1ackm4x 的单一 HackiOS 仓库中，两个原仓库的历史均保留。

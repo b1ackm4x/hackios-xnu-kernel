@@ -60,9 +60,8 @@ iOS 16.5 的系统显示模式、UIKit 帧回调和实际变化画面的 DPU 输
 
 先按 [移植环境](LEMONADE.md) 配置本机基线、Docker 工具链、Metal/AIR 依赖与合法取得的
 iOS 16.5 镜像。下面是在既有环境中使用本分支的命令；不会替换原 base 发布包。
-两个仓库均使用 `codex/lemonade-120hz`，配对版本见
-[`lemonade.sources.json`](../devices/oneplus-9/sources.json)。新建配套 checkout 时显式设置
-`USERLAND_REF=codex/lemonade-120hz`，`common/setup.sh` 的默认值仍是 `main`。
+这些功能最初在两个 `codex/lemonade-120hz` 分支验证，现已随历史合入单仓 `main`；源码来源见
+[`sources.json`](../devices/oneplus-9/sources.json)。新工作区一次 clone 即包含全部源码，无需 `USERLAND_REF`。
 
 ```sh
 docker exec hackios-lemonade-env bash -lc \

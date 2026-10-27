@@ -14,7 +14,7 @@
 ## 原绑定设备使用
 
 本机运行包：`out/releases/lemonade-2026.10.27-base.2/`，压缩包为同名 `.zip`。
-运行包和源码版本分开管理；对应实现合入两个仓库的 `main`，原运行包与既有标签均保留。
+运行包和源码版本分开管理；对应实现与两个原仓库的历史已合入单仓 `main`，原运行包与既有标签均保留。
 将此包绑定的 LE2110 通过 USB 接入安装了 Python 3.11+、adb、fastboot 的 Mac，运行
 `Start.command`；返回 Android 使用 `Return-to-Android.command`。
 
