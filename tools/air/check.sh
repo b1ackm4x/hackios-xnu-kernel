@@ -11,7 +11,7 @@
 #   tools/air/check.sh -q         only the numbers, write nothing
 set -e
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
-IOS=${IOS:-$ROOT/ios165}
+IOS=${IOS:-$ROOT/sysimage}
 QUIET=0
 [ "${1:-}" = "-q" ] && QUIET=1
 

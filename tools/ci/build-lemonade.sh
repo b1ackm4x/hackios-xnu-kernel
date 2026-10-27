@@ -29,11 +29,11 @@ bash tools/mk-ath11k.sh
 # WLFW emits a generated header; a cold build has no BSD object directory yet.
 mkdir -p xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT
 bash tools/mk-wlfw.sh
-bash tools/lemonade-build-kernel.sh
+bash devices/oneplus-9/tools/lemonade-build-kernel.sh
 LOADER_PLACEHOLDER=1 LOADER_USB_SERIAL=lemonade-ci bash xnuloader/build.sh
 AIR=1 bash tools/mk-mesa.sh
-RUNTIME_ONLY=1 bash tools/lemonade-build-metal.sh
-bash tools/lemonade-build-gl.sh
-bash tools/lemonade-build-base-runtime.sh
+RUNTIME_ONLY=1 bash devices/oneplus-9/tools/lemonade-build-metal.sh
+bash devices/oneplus-9/tools/lemonade-build-gl.sh
+bash devices/oneplus-9/tools/lemonade-build-base-runtime.sh
 bash tools/ci/build-bluetooth.sh
 python3 tools/ci/package-lemonade.py

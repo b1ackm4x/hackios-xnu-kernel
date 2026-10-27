@@ -3,13 +3,13 @@
 #
 #   1. the on-disk structures in apfs_format.h against the offsets apfs.py reads at
 #   2. the UDIF reader against the image's own trailer and partition table
-#   3. the APFS reader against 7-Zip's, over every entry in the volume (needs ios165/)
-#   4. file contents against the files 7-Zip extracted, byte for byte (needs ios165/)
+#   3. the APFS reader against 7-Zip's, over every entry in the volume (needs sysimage/)
+#   4. file contents against the files 7-Zip extracted, byte for byte (needs sysimage/)
 #   5. the C the kernel is built from against apfs.py, over the whole volume
 #   6. the hash in directory records, worked out as the C lookup does (needs the image)
 #   7. every name looked up by name through the C, against its directory (needs the image)
 #
-# Steps 3 to 7 need the APFS partition unpacked out of ios165/rootfs.dmg; pass it as
+# Steps 3 to 7 need the APFS partition unpacked out of sysimage/rootfs.dmg; pass it as
 # $1, or set APFS_IMAGE.  Without it only the first two steps run.
 #
 # APFS_SUBTREE=/some/path keeps step 5 to one subtree, which is the quick way to run it;
@@ -57,34 +57,34 @@ else
 fi
 echo
 
-echo "== 2. the UDIF reader on ios165/rootfs.dmg"
-if [ -f "$ROOT/ios165/rootfs.dmg" ]; then
-	python3 "$HERE/dmg.py" info "$ROOT/ios165/rootfs.dmg" | tail -n 14 || fail=1
+echo "== 2. the UDIF reader on sysimage/rootfs.dmg"
+if [ -f "$ROOT/sysimage/rootfs.dmg" ]; then
+	python3 "$HERE/dmg.py" info "$ROOT/sysimage/rootfs.dmg" | tail -n 14 || fail=1
 else
-	echo "   skipped: ios165/rootfs.dmg is not here (run ios165/fetch.sh with KEEP=1)"
+	echo "   skipped: sysimage/rootfs.dmg is not here (run sysimage/fetch.sh with KEEP=1)"
 fi
 echo
 
 if [ -z "$IMAGE" ] || [ ! -f "$IMAGE" ]; then
 	echo "== 3, 4. skipped: no APFS image given"
-	echo "   unpack one with: tools/apfs/dmg.py extract ios165/rootfs.dmg OUT.apfs --apfs"
+	echo "   unpack one with: tools/apfs/dmg.py extract sysimage/rootfs.dmg OUT.apfs --apfs"
 	exit $fail
 fi
 
 echo "== 3. every entry in the volume against 7-Zip's listing"
-if [ -f "$ROOT/ios165/rootfs.slt" ]; then
-	python3 "$HERE/verify.py" listing "$IMAGE" "$ROOT/ios165/rootfs.slt" || fail=1
+if [ -f "$ROOT/sysimage/rootfs.slt" ]; then
+	python3 "$HERE/verify.py" listing "$IMAGE" "$ROOT/sysimage/rootfs.slt" || fail=1
 else
-	echo "   skipped: ios165/rootfs.slt is not here"
+	echo "   skipped: sysimage/rootfs.slt is not here"
 fi
 echo
 
 echo "== 4. file contents against what 7-Zip extracted"
-if [ -d "$ROOT/ios165/rootfs" ]; then
-	python3 "$HERE/verify.py" sample "$IMAGE" "$ROOT/ios165/rootfs" || fail=1
+if [ -d "$ROOT/sysimage/rootfs" ]; then
+	python3 "$HERE/verify.py" sample "$IMAGE" "$ROOT/sysimage/rootfs" || fail=1
 	echo "   (that is a sample of every kind; --all compares all of them)"
 else
-	echo "   skipped: ios165/rootfs is not here"
+	echo "   skipped: sysimage/rootfs is not here"
 fi
 echo
 

@@ -327,11 +327,11 @@ Apple2 家族的全部能力。
 不等于实际面板的光学测量。默认桌面继续使用此前验证的同步 CPU 复制路径。
 
 ```sh
-python3 tools/lemonade-usb.py run --kernel built --userland --display smmu --seconds 30
-python3 tools/lemonade-usb.py run --kernel built --userland --display flip --display-flips 1000 --seconds 60
-python3 tools/lemonade-usb.py run --kernel built --userland --display manual --display-flips 1000 --seconds 60
-python3 tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
-python3 tools/lemonade-check-display.py local/lemonade/INTERRUPTED-run-cp0.log --interrupted
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display smmu --seconds 30
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display flip --display-flips 1000 --seconds 60
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display manual --display-flips 1000 --seconds 60
+python3 devices/oneplus-9/tools/lemonade-check-display.py local/lemonade/RUN-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-check-display.py local/lemonade/INTERRUPTED-run-cp0.log --interrupted
 ```
 
 寄存器依据：[Linux v6.12 SM8350 设备树](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/qcom/sm8350.dtsi)、
@@ -410,10 +410,10 @@ FD660 GLES 三角形像素读回、26 项 drawable/IOSurface、15 项栅格和 9
 DPU 直接扫描完成通知、硬件缩放、零拷贝或完整显示电源管理。
 
 ```sh
-python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --display sync --display-fences --metrics --seconds 90
-python3 tools/lemonade-check-fences.py local/lemonade/RUN-run-cp0.log
-python3 tools/test-lemonade-display-fences.py
-python3 tools/test-lemonade-check-fences.py
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance --metal-system desktop --display sync --display-fences --metrics --seconds 90
+python3 devices/oneplus-9/tools/lemonade-check-fences.py local/lemonade/RUN-run-cp0.log
+python3 devices/oneplus-9/tools/test-lemonade-display-fences.py
+python3 devices/oneplus-9/tools/test-lemonade-check-fences.py
 ```
 
 ## 设备缓冲区的小偏移与小组件渲染
@@ -453,8 +453,8 @@ P95 32.429 ms、最大 263.889 ms，CPU 复制平均 3.165 ms；这些结果不�
 （`android-roundtrip-20261024T082333.json`）。
 
 ```sh
-python3 tools/lemonade-build-graphics-image.py --system-metal --widgets
-python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets --display sync --display-fences --metrics --seconds 90
+python3 devices/oneplus-9/tools/lemonade-build-graphics-image.py --system-metal --widgets
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets --display sync --display-fences --metrics --seconds 90
 ```
 
 ## DPU 硬件缩放诊断（2026-10-24，独立缓冲区）
@@ -490,10 +490,10 @@ python3 tools/lemonade-usb.py run --profile performance --metal-system desktop -
 分区哈希均与原始备份一致（`android-roundtrip-20261024T085541.json`）。
 
 ```sh
-python3 tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --seconds 8
-python3 tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --seconds 3
-python3 tools/lemonade-check-display.py local/lemonade/1792803194-run-cp0.log --interrupted
-python3 tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --display-flips 1000 --seconds 60
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --seconds 8
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --seconds 3
+python3 devices/oneplus-9/tools/lemonade-check-display.py local/lemonade/1792803194-run-cp0.log --interrupted
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display scale --display-pattern grid --display-flips 1000 --seconds 60
 ```
 
 `--display-pattern` 支持固定彩色、二维网格、列条纹和行条纹；仅用于独立诊断，不能与
@@ -507,17 +507,17 @@ GPU、CPU 档位、触控或多核桌面组合。主机实际 C 恢复测试、U
 
 ```sh
 AIR=1 tools/mk-mesa.sh
-tools/lemonade-build-metal-shaders.sh
-tools/lemonade-build-metal.sh
-python3 tools/lemonade-build-graphics-image.py
-tools/lemonade-build-kernel.sh
-python3 tools/test-lemonade-usb.py
-python3 tools/test-lemonade-display-stop.py
-python3 tools/test-lemonade-check-display.py
-python3 tools/test-lemonade-display-fences.py
-python3 tools/test-lemonade-check-fences.py
-python3 tools/test-lemonade-metal-lifetime.py
-python3 tools/lemonade-usb.py run --profile performance --metal-test --display sync --metrics --seconds 100
+devices/oneplus-9/tools/lemonade-build-metal-shaders.sh
+devices/oneplus-9/tools/lemonade-build-metal.sh
+python3 devices/oneplus-9/tools/lemonade-build-graphics-image.py
+devices/oneplus-9/tools/lemonade-build-kernel.sh
+python3 devices/oneplus-9/tools/test-lemonade-usb.py
+python3 devices/oneplus-9/tools/test-lemonade-display-stop.py
+python3 devices/oneplus-9/tools/test-lemonade-check-display.py
+python3 devices/oneplus-9/tools/test-lemonade-display-fences.py
+python3 devices/oneplus-9/tools/test-lemonade-check-fences.py
+python3 devices/oneplus-9/tools/test-lemonade-metal-lifetime.py
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance --metal-test --display sync --metrics --seconds 100
 ```
 
 系统发现镜像由 `lemonade-build-graphics-image.py --system-metal` 单独打包，添加 Metal bundle、
@@ -526,7 +526,7 @@ python3 tools/lemonade-usb.py run --profile performance --metal-test --display s
 逐提交 GPU 日志改为显式 `--gpu-trace`。普通性能测试保留帧与输入统计，避免 Metal 的大量
 小提交耗尽设备日志缓冲而掩盖较早的验收结果。
 
-五分钟复现使用 `common/devices/lemonade-metal-soak.rc.jobs` 临时替代系统测试 jobs，
+五分钟复现使用 `devices/oneplus-9/lemonade-metal-soak.rc.jobs` 临时替代系统测试 jobs，
 重新构建和归档系统镜像，运行 300 秒。结束后恢复普通 `lemonade-metal-system.rc.jobs`
 并重新构建；专用归档中保留该轮实际 jobs，避免把两种工作负载误认成相同测试。
 
@@ -614,10 +614,10 @@ GPU 温度读数 51.6/50.9°C。`present_and_wait` 包含映射、命令等待�
 复现：
 
 ```sh
-python3 tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets \
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance --metal-system desktop --metal-widgets \
   --display direct --display-fences --display-record --metrics --seconds 60
-python3 tools/lemonade-check-direct.py local/lemonade/1792804508-run-cp0.log
-python3 tools/lemonade-usb.py recording
+python3 devices/oneplus-9/tools/lemonade-check-direct.py local/lemonade/1792804508-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-usb.py recording
 ```
 
 本轮本地验收文件为 `graphics-20261024/direct-final-evidence.json`、

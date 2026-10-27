@@ -15,7 +15,7 @@ What "there at run time" means is the recipe, not what happens to be unpacked on
 two recipes differ. With the system image as the root, it is what select-system.py chose, and a daemon it
 left out as too big really is absent. With the iOS volume on the phone's flash as the root (build.sh
 FLASHBOOT=1), the root is Apple's whole volume: --root-volume names the technical listing of its image
-(ios165/rootfs.slt) and a program counts as there if Apple ships it. Seven jobs turn on that --
+(sysimage/rootfs.slt) and a program counts as there if Apple ships it. Seven jobs turn on that --
 fairplayd, identityservicesd, passd, assistantd, callservicesd, lskdd, searchpartyd -- and were being
 refused on a flash boot for a reason true only of the thinned copy here. (fairplayd now runs on the phone
 and is never missed from a lookup again, but it does not stay: it exits 0 the moment it starts, says nothing,

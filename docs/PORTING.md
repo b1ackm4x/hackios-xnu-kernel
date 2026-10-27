@@ -8,19 +8,19 @@ platform code carry over. Start with:
 common/new-device.sh <codename> path/to/device.dtb
 ```
 
-It writes `common/devices/<codename>.conf` (the profile `common/build.sh` and `common/run.sh` read) and
-`common/devices/<codename>.platform.c` (the loader's description of the SoC), filling in what the device tree says.
+It writes `devices/<codename>/device.conf` (the profile `common/build.sh` and `common/run.sh` read) and
+`devices/<codename>/platform.c` (the loader's description of the SoC), filling in what the device tree says.
 Get the device tree from the phone's `vendor_boot` image, or from a running Android: `adb pull /sys/firmware/fdt`.
 
 ## 1. The UEFI
 
 The phone needs a UEFI that our loader can run under. Port [Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium)
-the way `uefi/` ports redwood (it follows `lisa`, the same SoC package):
+the way `devices/poco-x5-pro/uefi/` ports redwood (it follows `lisa`, the same SoC package):
 
 - `Platforms/<Vendor>/<codename>Pkg`: memory map and driver list (copy the closest device of the same SoC);
 - `Binaries/<codename>`: the UEFI drivers of the phone's own firmware, extracted with
   [UEFIReader](https://github.com/WOA-Project/UEFIReader) from its `xbl.img`;
-- apply our two changes from `uefi/mu-silicium.patch`: the boot shim copies the "XNUP" container after the UEFI
+- apply our two changes from `devices/poco-x5-pro/uefi/mu-silicium.patch`: the boot shim copies the "XNUP" container after the UEFI
   image to `PAYLOAD_BASE`, and `BootManagerLib` starts the XNU loader from it instead of the menu.
 
 Put the addresses in the profile: `FD_BASE`, `FD_SIZE` (where the shim puts the UEFI image) and `PAYLOAD_BASE`
@@ -30,7 +30,7 @@ shim from your Mu-Silicium tree (`mkxnuimg.py` does it when `Mu-Silicium/` is th
 ## 2. The loader
 
 `xnuloader/loader.c` describes each device with a `struct platform` and picks it by the framebuffer base the UEFI
-reports. Paste `common/devices/<codename>.platform.c` next to `platform_redwood` and add it to `platforms[]`:
+reports. Paste `devices/<codename>/platform.c` next to `platform_redwood` and add it to `platforms[]`:
 
 | Field | Where it comes from |
 |---|---|

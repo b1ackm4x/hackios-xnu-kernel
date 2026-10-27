@@ -4,8 +4,8 @@
 # to the generator (or the parser) silently shifting the addresses a port would get.
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-dtb="$root/prebuilt/uefi/redwood.dtb"
-want="$root/common/devices/redwood.soc.args"
+dtb="$root/devices/poco-x5-pro/prebuilt/device-tree.dtb"
+want="$root/devices/poco-x5-pro/soc.args"
 got=$(python3 "$root/tools/soc-args.py" "$dtb")
 
 # the values the kernel carries as defaults (bsd/dev/redwood_mpss.c, redwood_ipa.c): the generator

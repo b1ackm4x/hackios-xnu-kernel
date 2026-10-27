@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'tools'))
+sys.path.insert(0, str(ROOT / 'devices/poco-x5-pro/tools'))
 import cellular_probe
 import modem_firmware
 
@@ -50,7 +50,7 @@ class UpstreamToolsTests(unittest.TestCase):
                 self.assertFalse(out.exists())
 
     def test_modem_firmware_bounds_without_phone(self):
-        dtb=ROOT/'prebuilt/uefi/redwood.dtb'
+        dtb=ROOT/'devices/poco-x5-pro/prebuilt/device-tree.dtb'
         nodes=cellular_probe.fdt_nodes(dtb.read_bytes())
         node=next(n for n in nodes if n['path'].endswith('/qcom,mss@4080000'))
         handle=node['properties']['memory-region']

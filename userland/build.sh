@@ -54,7 +54,7 @@
 #                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
 #                                   the kernel. adsp=1 needs none of it: the system image has the firmware in /fw.
 #   system.apfs      the system image, the root filesystem (the resident RAM disk, /dev/md0), an
-#                    APFS container: the part of iOS 16.5 chosen by ../ios165/select-system.py at
+#                    APFS container: the part of iOS 16.5 chosen by ../sysimage/select-system.py at
 #                    its real paths, the dyld shared cache, and src/stage0.c as /sbin/launchd (the
 #                    real one is /sbin/launchd.ios). 2.5 GB; upload once per loader session with
 #                    `xl ramdisk userland/system.apfs`. Rebuilt when missing, when its inputs
@@ -81,16 +81,16 @@ source ../xnu-env.sh
 CC="xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra"
 LD="-Wl,-e,_start -Wl,-pagezero_size,0x100000000"
 DYN="xnu-clang -arch arm64 -isysroot ${THEOS:-$HOME/theos}/sdks/iPhoneOS16.5.sdk -O1"
-IOS=../ios165
+IOS=../sysimage
 CACHE=$IOS/20F66__iPhone10,3_6
-# ios165/rootfs and ios165/cryptex must be this copy's own directories of hard links, the way
+# sysimage/rootfs and sysimage/cryptex must be this copy's own directories of hard links, the way
 # tools/new-workspace.sh makes them. A symlink to another copy's tree makes sysroot a symlink too, because
 # cp -a does not follow one, and then every rm -rf and mv below edits the shared extraction in place. That
 # happened on 19 October 2026: 491 LaunchDaemons, NanoLaunchDaemons, LaunchAngels, xpc/launchd.plist and
 # private/var went out of the main copy's tree, and only the hard links in the other copies still held them.
 for d in rootfs cryptex cryptex-app; do
 	[ -L $IOS/$d ] || continue
-	echo "build.sh: ios165/$d is a symlink to $(readlink $IOS/$d)" >&2
+	echo "build.sh: sysimage/$d is a symlink to $(readlink $IOS/$d)" >&2
 	echo "build.sh: it has to be a directory of this copy's own: rm it and cp -al the original over," >&2
 	echo "build.sh: as tools/new-workspace.sh does. Building against a link damages the shared tree." >&2
 	exit 1
@@ -718,11 +718,11 @@ fi
 if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	{ [ ! -f system.apfs ] || [ obj/stage0 -nt system.apfs ] || [ $IOS/system.manifest -nt system.apfs ] ||
 	  [ $IOS/cryptex -nt system.apfs ] || [ $IOS/cryptex-app -nt system.apfs ] || [ -n "$SYSTEM" ]; }; then
-	# what ios165/select-system.py has chosen since ios165/rootfs was extracted is not in it, and would not be
+	# what sysimage/select-system.py has chosen since sysimage/rootfs was extracted is not in it, and would not be
 	# in the image either (so it was once with the audio plug-ins and the system's sounds: iOS found no
 	# speaker and played nothing, though our device was there and the kernel's side worked)
 	if [ -f $IOS/.done-rootfs ] && [ $IOS/select-system.py -nt $IOS/.done-rootfs ]; then
-		echo "build.sh: ios165/select-system.py has changed since ios165/rootfs was extracted: run KEEP=1 ios165/fetch.sh" >&2
+		echo "build.sh: sysimage/select-system.py has changed since sysimage/rootfs was extracted: run KEEP=1 sysimage/fetch.sh" >&2
 		exit 1
 	fi
 	rm -rf sysroot
@@ -755,7 +755,7 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		: "${MODEM_DTB:?MODEM requires the target device DTB}"
 		: "${MODEM_NODE:?MODEM requires the target modem node}"
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../tools/modem_firmware.py --dtb "$MODEM_DTB" --firmware-dir ../fw-modem \
+		../devices/poco-x5-pro/tools/modem_firmware.py --dtb "$MODEM_DTB" --firmware-dir ../fw-modem \
 			--node "$MODEM_NODE" >/dev/null
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/

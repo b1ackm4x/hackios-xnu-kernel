@@ -58,14 +58,14 @@ Safari 原来将网页动画限制在 60 fps。base.4 关闭该默认策略并�
 | 路径 | 内容 |
 | --- | --- |
 | `xnu/files/` | 内核、GPU、显示、触控、Wi-Fi、蓝牙和电池驱动 |
-| `xnuloader/`、`uefi/` | RAM 加载器与设备启动支持 |
-| `userland/` | init、图形运行库和系统服务，属于独立用户空间仓库 |
-| `common/devices/lemonade*` | 机型配置与配套源码版本 |
-| `tools/lemonade-*` | 构建、打包、启动与开发验收工具 |
+| `xnuloader/`、`devices/*/uefi/` | RAM 加载器与设备启动支持 |
+| `userland/` | init、图形运行库和系统服务，与内核同仓维护 |
+| `devices/oneplus-9/lemonade*` | 机型配置与配套源码版本 |
+| `devices/oneplus-9/tools/lemonade-*` | 构建、打包、启动与开发验收工具 |
 | `docs/` | 移植记录、构建步骤和验收细节 |
 
-完整 base 的蓝牙、Sileo 与既有 120 Hz / Wi-Fi / 电池代码已合入两个仓库的 `main` 分支。普通 `git` 管理本仓库，`common/ugit` 管理配套的 [用户空间仓库](https://github.com/b1ackm4x/hackios-xnu-userland)；版本对应关系见 [lemonade.sources.json](common/devices/lemonade.sources.json)。
+内核、蓝牙、Sileo、120 Hz、Wi-Fi、电池和用户态现由一个仓库、一个 `main` 分支维护。一次 clone 即得到完整源码，使用普通 `git` 提交所有改动。目录采用上游的 `sysimage/` 和 `devices/<机型>/` 设计；构建入口见根目录 `Makefile`，历史与协作方式见 [单仓库说明](docs/REPOSITORY.md)，版本来源见 [sources.json](devices/oneplus-9/sources.json)。
 
 详细说明：[Base 与验收](docs/LEMONADE-BASE-120HZ.md) · [构建与移植](docs/LEMONADE.md) · [显示](docs/LEMONADE-DISPLAY.md) · [Wi-Fi](docs/WIFI-LEMONADE.md) · [仓库维护](docs/REPOSITORY.md)。
 
-保留原作者 OOSEX GANG 的归属、历史与许可；XNU 许可见 [LICENSE](LICENSE)，第三方声明见 [NOTICES](prebuilt/NOTICES.md)。Apple 系统文件、原机固件、凭据、构建产物和私有日志不提交。Redwood/QEMU 的使用方式见[上游文档](https://github.com/oosexgang/hackios-xnu-kernel#readme)。
+保留原作者 OOSEX GANG 的归属、历史与许可；XNU 许可见 [LICENSE](LICENSE)，用户态许可见 [MIT](licenses/userland-MIT.txt)，第三方声明见 [NOTICES](prebuilt/NOTICES.md)。Apple 系统文件、原机固件、凭据、构建产物和私有日志不提交。Redwood/QEMU 的使用方式见[上游文档](https://github.com/oosexgang/hackios-xnu-kernel#readme)。

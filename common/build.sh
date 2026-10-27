@@ -9,7 +9,7 @@
 #                                                                  otherwise prebuilt/ is used
 #   2. loader   xnuloader/build.sh                              -- only with clang + lld-link
 #   3. images   userland/build.sh (REST=1 and the profile's USERLAND_VARS)
-#                                                               -- needs ios165/fetch.sh to have run
+#                                                               -- needs sysimage/fetch.sh to have run
 #   4. boot     mkxnuimg.py -> out/<device>-boot.img             -- phones: the UEFI image for `fastboot boot`
 #
 #   SKIP="kernel loader images boot"   leave steps out
@@ -26,7 +26,7 @@ if ! skip kernel; then
 		[ "$WIFI_ATH11K" = 1 ] && [ ! -f xnu-deps/build/ath11k/out/ath11k.o ] && { tools/mk-ath11k.sh && tools/mk-wlfw.sh; }
 		# the export check fails after the kernel is linked, on purpose (xnu/README.md): judge by the file
 		touch out/.kernel-start
-		./xnu-build.sh -j"$(nproc)" -k > out/kernel-build.log 2>&1 || true
+		./xnu-build.sh -j"${JOBS:-$(getconf _NPROCESSORS_ONLN)}" -k > out/kernel-build.log 2>&1 || true
 		K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
 		[ -f $K ] && { [ $K -nt out/.kernel-start ] || ! grep -q "error:" out/kernel-build.log; } &&
 			echo "build: kernel $(stat -c %s $K) bytes" || die "kernel build failed, see out/kernel-build.log"
@@ -45,7 +45,7 @@ fi
 
 if ! skip images; then
 	have_userland
-	[ -d ios165/rootfs ] || die "no iOS files yet: run ios165/fetch.sh first (it downloads them from Apple to this machine)"
+	[ -d sysimage/rootfs ] || die "no iOS files yet: run sysimage/fetch.sh first (it downloads them from Apple to this machine)"
 	env REST=1 $USERLAND_VARS "$@" userland/build.sh
 fi
 
@@ -57,7 +57,7 @@ if ! skip boot && [ "$KIND" = phone ]; then
 		BOOT_HEADER_VERSION=${BOOT_HEADER_VERSION:-1} \
 		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img
 	if [ "$DEVICE" = lemonade ]; then
-		echo "build: out/$DEVICE-boot.img -- verify/package with tools/lemonade-pack.py, then use tools/lemonade-usb.py boot"
+		echo "build: out/$DEVICE-boot.img -- verify/package with devices/oneplus-9/tools/lemonade-pack.py, then use devices/oneplus-9/tools/lemonade-usb.py boot"
 	else
 		echo "build: out/$DEVICE-boot.img -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
 	fi

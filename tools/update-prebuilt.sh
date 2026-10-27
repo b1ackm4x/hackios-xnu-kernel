@@ -7,7 +7,7 @@ cd "$(dirname "$(readlink -f "$0")")/.."
 # KERNEL=... to take the kernel from a tree built elsewhere (xnu/apply.sh makes one anywhere)
 K=${KERNEL:-xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837}
 MU=Mu-Silicium
-mkdir -p prebuilt/userland prebuilt/uefi
+mkdir -p prebuilt/userland devices/poco-x5-pro/prebuilt
 cp $K prebuilt/mach.development.bcm2837
 cp xnuloader/loader.efi prebuilt/loader.efi
 cp userland/hello prebuilt/userland/
@@ -16,18 +16,19 @@ for f in init child stage0 hello_dyn svc_test surf_test rwtouch mg_test cpu_test
 	cp userland/obj/$f prebuilt/userland/
 done
 if [ -f $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd ]; then
-	cp $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd $MU/BootShim/BootShim.bin $MU/Resources/DTBs/redwood.dtb \
-		$MU/Resources/ramdisk $MU/Resources/Scripts/mkbootimg.py prebuilt/uefi/
+	cp $MU/Build/redwoodPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd $MU/BootShim/BootShim.bin \
+		$MU/Resources/ramdisk $MU/Resources/Scripts/mkbootimg.py devices/poco-x5-pro/prebuilt/
+	cp $MU/Resources/DTBs/redwood.dtb devices/poco-x5-pro/prebuilt/device-tree.dtb
 fi
-# one list per repository: hackios-xnu-kernel owns prebuilt/, hackios-xnu-userland prebuilt/userland/
+# Keep the existing checksum groups for kernel/loader and userland components.
 {
 	echo "Built $(date '+%Y-%m-%d %H:%M') from this tree."
 	echo
-	sha256sum prebuilt/mach.development.bcm2837 prebuilt/loader.efi prebuilt/uefi/* 2>/dev/null
+	sha256sum prebuilt/mach.development.bcm2837 prebuilt/loader.efi devices/poco-x5-pro/prebuilt/* 2>/dev/null
 } > prebuilt/SHA256SUMS
 {
 	echo "Built $(date '+%Y-%m-%d %H:%M') from this tree."
 	echo
 	sha256sum prebuilt/userland/* 2>/dev/null | grep -v SHA256SUMS
 } > prebuilt/userland/SHA256SUMS.new && mv prebuilt/userland/SHA256SUMS.new prebuilt/userland/SHA256SUMS
-ls -la prebuilt prebuilt/userland prebuilt/uefi
+ls -la prebuilt prebuilt/userland devices/poco-x5-pro/prebuilt

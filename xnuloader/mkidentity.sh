@@ -3,7 +3,7 @@
 # from the device tree in the IPSW (Firmware/all_flash/DeviceTree.d22ap.im4p) at build time, on
 # the builder's machine, from their own copy of the firmware. The header is not in the repository.
 #
-#   ios165/fetch-from-ipsw.py      the one file out of the IPSW on Apple's CDN (34 KB, HTTP ranges)
+#   sysimage/fetch-from-ipsw.py      the one file out of the IPSW on Apple's CDN (34 KB, HTTP ranges)
 #   xnuloader/im4p.py              its payload: an LZFSE stream
 #   lzfse(1) / compression_tool(1) / python3 -m lzfse / xnu-deps/host/bin/lzfse (built from the
 #                                  BSD-licensed github.com/lzfse/lzfse when nothing else is there)
@@ -26,7 +26,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/mkidentity.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 IM4P=${1:-$WORK/dt.im4p}
 if [ ! -f "$IM4P" ]; then
-	python3 "$TOP/ios165/fetch-from-ipsw.py" Firmware/all_flash/DeviceTree.d22ap.im4p "$IM4P"
+	python3 "$TOP/sysimage/fetch-from-ipsw.py" Firmware/all_flash/DeviceTree.d22ap.im4p "$IM4P"
 fi
 python3 "$HERE/im4p.py" "$IM4P" "$WORK/dt.lzfse"
 decode() {

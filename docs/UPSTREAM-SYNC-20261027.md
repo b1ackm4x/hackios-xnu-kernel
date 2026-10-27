@@ -1,3 +1,5 @@
+> 后续结构迁移：内核与用户态现已合成一个仓库，并采用上游 `sysimage/`、`devices/` 目录。下文的双仓库提交记录是合并前的来源证据；当前操作见 [单仓库说明](REPOSITORY.md)。
+
 # 2026-10-27 上游同步
 
 本次以 `oosexgang/hackios-xnu-kernel` 的 `88513176b1e96ecf0b764cd62c6f4e6ac71345e3` 为来源。

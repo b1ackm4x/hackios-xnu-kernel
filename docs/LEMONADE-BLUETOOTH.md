@@ -190,10 +190,10 @@ original Bluetooth setting. Cold hardware tests require Android Bluetooth off.
 Use the matching Linux build container/toolchain and a fresh output directory:
 
 ```sh
-bash tools/lemonade-build-kernel.sh
-bash tools/lemonade-build-bt-bootstrap.sh
-bash tools/lemonade-build-bt-compat.sh
-python3 tools/lemonade-build-bt-firmware.py \
+bash devices/oneplus-9/tools/lemonade-build-kernel.sh
+bash devices/oneplus-9/tools/lemonade-build-bt-bootstrap.sh
+bash devices/oneplus-9/tools/lemonade-build-bt-compat.sh
+python3 devices/oneplus-9/tools/lemonade-build-bt-firmware.py \
   --output out/lemonade-bt-native-clean-N \
   --native --board-bootstrap --board-compat
 ```
@@ -206,7 +206,7 @@ After the normal verified RAM loader boot and System upload, a bounded graphical
 session can use:
 
 ```sh
-python3 tools/lemonade-usb.py run --kernel built --userland \
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland \
   --bluetooth native --bluetooth-image out/lemonade-bt-native-clean-1 \
   --bluetooth-ui --gpu --touch on --display direct --display-fences \
   --display-hz 120 --seconds 180 --boot-cpu 7 --cpus 4
@@ -228,14 +228,14 @@ For the integrated base, use the complete candidate flow after building the
 production Bluetooth helpers and the diagnostic client/UI observer:
 
 ```sh
-python3 tools/lemonade-build-base.py --version VERSION
-python3 tools/lemonade-validate-base.py --version VERSION
+python3 devices/oneplus-9/tools/lemonade-build-base.py --version VERSION
+python3 devices/oneplus-9/tools/lemonade-validate-base.py --version VERSION
 python3 out/releases/lemonade-VERSION/launch.py android
-python3 tools/lemonade-validate-base-bluetooth.py --version VERSION
-python3 tools/lemonade-usb.py recording  # private inspection before the next boot
-python3 tools/lemonade-validate-base-runtime.py --version VERSION
+python3 devices/oneplus-9/tools/lemonade-validate-base-bluetooth.py --version VERSION
+python3 devices/oneplus-9/tools/lemonade-usb.py recording  # private inspection before the next boot
+python3 devices/oneplus-9/tools/lemonade-validate-base-runtime.py --version VERSION
 python3 out/releases/lemonade-VERSION/launch.py android
-python3 tools/lemonade-verify-android.py
+python3 devices/oneplus-9/tools/lemonade-verify-android.py
 ```
 
 Each step must pass before continuing. Settings validation starts from Android;

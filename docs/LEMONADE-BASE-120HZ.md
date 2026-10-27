@@ -36,7 +36,7 @@ Wi-Fi、原生蓝牙与电池服务。`/redwood/bin` 只包含 `metal-enable` �
 
 基于前一版完整 base 加入原生蓝牙 H4 控制器、固件启动服务与原生主机兼容。
 内核 SHA-256：`22206252397d69c037632b7ef695ead42c4e64a790210f0b624a30cd1e96dd6a`；root：`b8b686fbf49b51167826a36b4856e4d07bc6aa5d0d9b10811b4390c4df4e0929`。
-对应用户态提交固定在 `common/devices/lemonade.sources.json`。正式包不包含蓝牙测试客户端、追踪库、UI 观察器或自动设置页面启动。
+对应用户态提交固定在 `devices/oneplus-9/sources.json`。正式包不包含蓝牙测试客户端、追踪库、UI 观察器或自动设置页面启动。
 
 - 当前内核重新通过真实 DMA 防护；180 秒联合验收覆盖显示 36 项、网络 61 项、Metal 103 项、MPS 2 项、Core Animation 4 项，完成 2773 次 DPU 传输，零回退和失败。
 - Wi-Fi 验证关联、DHCP、DNS、三次 HTTP 请求和受控重连；蓝牙保持真实已开启/可用状态，14 次采样全部通过；电池有 13 个日志样本和 10 次不同更新的原生接口对照。
@@ -266,47 +266,47 @@ backboardd SIGSEGV，内核与显示／网络硬件恢复正常，返回结果�
 ## 构建与验收
 
 两个源码仓库使用 `main`；具体配对提交和 base 标签见
-[`lemonade.sources.json`](../common/devices/lemonade.sources.json)。既有环境中的构建步骤：
+[`lemonade.sources.json`](../devices/oneplus-9/sources.json)。既有环境中的构建步骤：
 
 ```sh
 # 在配置好 THEOS 的构建容器中
-tools/lemonade-build-kernel.sh
+devices/oneplus-9/tools/lemonade-build-kernel.sh
 AIR=1 bash tools/mk-mesa.sh
-bash tools/lemonade-build-metal.sh
-bash tools/lemonade-build-base-runtime.sh
-bash tools/lemonade-build-bt-bootstrap.sh
-bash tools/lemonade-build-bt-compat.sh
-bash tools/lemonade-build-bt-client.sh
-bash tools/lemonade-build-bt-ui-trace.sh
-bash tools/lemonade-build-battery-test.sh
+bash devices/oneplus-9/tools/lemonade-build-metal.sh
+bash devices/oneplus-9/tools/lemonade-build-base-runtime.sh
+bash devices/oneplus-9/tools/lemonade-build-bt-bootstrap.sh
+bash devices/oneplus-9/tools/lemonade-build-bt-compat.sh
+bash devices/oneplus-9/tools/lemonade-build-bt-client.sh
+bash devices/oneplus-9/tools/lemonade-build-bt-ui-trace.sh
+bash devices/oneplus-9/tools/lemonade-build-battery-test.sh
 
 # 宿主：先持有该手机的 Device Hub 租约，核对 Android USB 目标与面板
-python3 tools/lemonade-usb.py panel
-python3 tools/test-lemonade-base.py
-python3 tools/test-lemonade-metal-lifetime.py
-python3 tools/test-lemonade-metal-completion.py
-python3 tools/test-lemonade-display-fences.py
-python3 tools/test-lemonade-display-composite.py
-python3 tools/test-lemonade-display-pipeline.py
-python3 tools/test-lemonade-gpu-return.py
-python3 tools/test-lemonade-display-resume.py
-python3 tools/test-lemonade-check-direct.py
+python3 devices/oneplus-9/tools/lemonade-usb.py panel
+python3 devices/oneplus-9/tools/test-lemonade-base.py
+python3 devices/oneplus-9/tools/test-lemonade-metal-lifetime.py
+python3 devices/oneplus-9/tools/test-lemonade-metal-completion.py
+python3 devices/oneplus-9/tools/test-lemonade-display-fences.py
+python3 devices/oneplus-9/tools/test-lemonade-display-composite.py
+python3 devices/oneplus-9/tools/test-lemonade-display-pipeline.py
+python3 devices/oneplus-9/tools/test-lemonade-gpu-return.py
+python3 devices/oneplus-9/tools/test-lemonade-display-resume.py
+python3 devices/oneplus-9/tools/test-lemonade-check-direct.py
 # 选择尚未存在的新版本；以下名称仅为模板。
 BASE_CANDIDATE='2026.10.27-base.3-candidate.1'
-python3 tools/lemonade-build-base.py --version "$BASE_CANDIDATE"
-python3 tools/lemonade-validate-base.py --version "$BASE_CANDIDATE"
+python3 devices/oneplus-9/tools/lemonade-build-base.py --version "$BASE_CANDIDATE"
+python3 devices/oneplus-9/tools/lemonade-validate-base.py --version "$BASE_CANDIDATE"
 python3 "out/releases/lemonade-$BASE_CANDIDATE/launch.py" android
-python3 tools/lemonade-validate-base-bluetooth.py --version "$BASE_CANDIDATE"
-python3 tools/lemonade-validate-base-runtime.py --version "$BASE_CANDIDATE"
+python3 devices/oneplus-9/tools/lemonade-validate-base-bluetooth.py --version "$BASE_CANDIDATE"
+python3 devices/oneplus-9/tools/lemonade-validate-base-runtime.py --version "$BASE_CANDIDATE"
 python3 "out/releases/lemonade-$BASE_CANDIDATE/launch.py" android
-python3 tools/lemonade-verify-android.py
+python3 devices/oneplus-9/tools/lemonade-verify-android.py
 ```
 
 构建与验收工具当前默认版本为 `2026.10.27-base.2`；构建器拒绝覆盖已有版本目录。
 为当前源码生成新候选时，必须向构建器和三个验收器传入相同且尚未使用的 `--version`。联合验收使用一次性副本
 加入图形、网络、电池和蓝牙负载，正式 `root.apfs` 不变。验证结束删除临时网络输入；留存日志先脱敏。
 随后使用包内启动器原样运行干净镜像，确认默认模式、持续运行及主动退出恢复。
-最后返回 Android，运行 `tools/lemonade-verify-android.py` 核对五个关键分区哈希。
+最后返回 Android，运行 `devices/oneplus-9/tools/lemonade-verify-android.py` 核对五个关键分区哈希。
 
 ## base.1 历史证据范围
 

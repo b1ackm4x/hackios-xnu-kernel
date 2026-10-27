@@ -36,8 +36,8 @@ System 与 Boot 镜像在复制完成后直接应用这份权限清单，避免�
 
 ```sh
 python3 userland/tests/test_jb_setid_manifest.py
-python3 tools/test-lemonade-base.py
-python3 tools/test-lemonade-ci.py
+python3 devices/oneplus-9/tools/test-lemonade-base.py
+python3 devices/oneplus-9/tools/test-lemonade-ci.py
 bash -n tools/mk-jb.sh userland/build.sh
 ```
 

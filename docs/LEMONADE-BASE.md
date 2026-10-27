@@ -67,7 +67,7 @@ fastboot 接口不能据此断言手机掉线。启动镜像被接收后还须�
 `rc.jobs`、调试录制、详细性能采样或定时退出参数。网络密码、账号与既有网络
 输入不会打入包内。原生系统服务来自本机已有且校验过的 System 镜像。
 
-`tools/lemonade-validate-base.py` 可从干净镜像生成一次性的验证副本，临时加入
+`devices/oneplus-9/tools/lemonade-validate-base.py` 可从干净镜像生成一次性的验证副本，临时加入
 网络和图形验收程序；它不改发布镜像。网络输入只放入权限受限的临时目录，
 结束或异常退出均清理；留存日志先脱敏。真机验证必须持有这台手机的 Device Hub 租约。
 
@@ -76,19 +76,19 @@ fastboot 接口不能据此断言手机掉线。启动镜像被接收后还须�
 在既有、已配置 `THEOS` 的构建容器中：
 
 ```sh
-tools/lemonade-build-kernel.sh
-bash tools/lemonade-build-base-runtime.sh
+devices/oneplus-9/tools/lemonade-build-kernel.sh
+bash devices/oneplus-9/tools/lemonade-build-base-runtime.sh
 ```
 
 主机上使用已验证的 Metal 构建、原机固件及本地 System 镜像：
 
 ```sh
-python3 tools/test-lemonade-base.py
-python3 tools/lemonade-build-base.py --version 2026.10.24-base.1
+python3 devices/oneplus-9/tools/test-lemonade-base.py
+python3 devices/oneplus-9/tools/lemonade-build-base.py --version 2026.10.24-base.1
 # Android 在线、目标身份和租约已核实后：
-python3 tools/lemonade-validate-base.py
+python3 devices/oneplus-9/tools/lemonade-validate-base.py
 # 联合验收通过后，使用包内启动器观察未经扩展的运行镜像：
-python3 tools/lemonade-validate-base-runtime.py
+python3 devices/oneplus-9/tools/lemonade-validate-base-runtime.py
 ```
 
 同一个版本目录不能被构建器覆盖。发布前须核对：当前内核的 DMA guard、

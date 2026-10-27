@@ -1,99 +1,52 @@
-# 仓库与机型分支维护
+# 单仓库协作
 
-当前适配目标是 OnePlus 9（LE2110，`lemonade`）。我们仍将内核和用户空间两个仓库叠放在同一个工作目录。
-上游在 2026-10-26 前后合并为单仓并重写历史；我们按功能同步，保留自己的双仓结构和已验证实现。
-最近一次同步与保留范围见 [2026-10-27 上游同步](UPSTREAM-SYNC-20261027.md)。
-
-| 内容 | 我们的仓库 | 上游 |
-| --- | --- | --- |
-| 内核、loader、机型配置和测试工具 | `b1ackm4x/hackios-xnu-kernel` | `oosexgang/hackios-xnu-kernel` |
-| 用户空间、GLES 桥接、Mesa 和镜像构建 | `b1ackm4x/hackios-xnu-userland` | `oosexgang/hackios-xnu-kernel`（旧 userland 仓库现为迁移指针） |
-
-两个仓库均为公开的独立派生仓库，不属于 GitHub 的 Fork 网络；
-原许可证、作者和完整上游提交历史全部保留。
-
-## 分支与远端
-
-- `main` 是两个仓库的当前集成分支，已包含一加 9 的完整 base 改动；引入时的上游基线由 `lemonade.sources.json` 中的 `upstream_base` 保留。
-- `origin` 指向自己的仓库；`upstream` 指向对应的上游。推送默认使用 `origin`。
-- 以后新增机型，从适当的共同基线创建 `device/<codename>`，把机型参数和驱动保持隔离。
-- 通用改进使用短期 `feature/<topic>` 或 `fix/<topic>` 分支，验证后合入 `main`；机型专用实验仍可使用机型分支。
-
-当前默认 120 Hz 基线 `2026.10.25-base.1` 在两个仓库均有标签 `base-2026.10.25-1`。
-后续高刷、合成、退出和 Safari 修复已继续集成到 `main`；正式 base 标签以整包验收为准。
-`ci-lemonade-<commit>` 标签用于主机测试与编译通过的通用组件实验版，不代表完整运行包已通过真机验收。
-旧的 60 Hz 标签 `base-2026.10.24-1` 保留不变。配套提交见 `common/devices/lemonade.sources.json`，
-验收记录见 [LEMONADE-BASE-120HZ.md](LEMONADE-BASE-120HZ.md)。
-
-## 重新取出项目
-
-本节是开发者的源码准备流程。普通用户入口见 [复现指南](LEMONADE-REPRODUCE.md)：编译和发布验收由维护者完成，用户只准备本机必要文件与指定 Apple 系统。目前 CI 仅交付组件实验版，普通用户本地准备与组包入口尚未接通。
-
-克隆公开源码无需登录；推送前通过 `gh auth login` 配置访问权限，不要把令牌放进远端 URL。
+内核、加载器、用户态、镜像工具和设备支持现在由一个 Git 仓库、一个 `main` 分支维护。仓库地址继续使用 `https://github.com/b1ackm4x/hackios-xnu-kernel`，名称中的 `kernel` 不再表示只含内核。
 
 ```sh
-git clone --branch main https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
+git clone https://github.com/b1ackm4x/hackios-xnu-kernel.git hackios
 cd hackios
 common/setup.sh
-git remote add upstream https://github.com/oosexgang/hackios-xnu-kernel.git
-common/ugit remote add upstream https://github.com/oosexgang/hackios-xnu-userland.git
-git config remote.pushDefault origin
-common/ugit config remote.pushDefault origin
+make
 ```
 
-`common/setup.sh` 初次取出用户空间时默认使用 `main`；已有工作区更新当前分支，如需跟随集成分支先运行 `common/ugit switch main`。
-`common/devices/lemonade.sources.json` 记录配套用户空间提交、base 标签及两边的上游基线。
-需要复现该组合时，可用 `common/ugit switch --detach <userland.commit>` 切到记录的提交；
-继续开发前用 `common/ugit switch main` 回到当前集成分支。
+一次 clone 已包含用户态，不需要第二次 clone、子模块或独立 userland 提交。普通 `git status`、`git diff`、`git commit` 处理全部源码。`common/ugit` 只为旧命令提供转发，执行的是同一个根仓库的 Git。
 
-这只取回可维护的源代码。设备原始备份、原机固件、Apple 系统文件、SDK、私有验证日志与新增构建产物
-不写入 Git。公开的通用构建产物通过 GitHub Releases 下载，范围与校验方法见 [CI 说明](LEMONADE-CI.md)；
-维护者准备本地系统与设备文件、继续构建的记录见 [LEMONADE.md](LEMONADE.md)。它依赖已配置的开发环境，不是普通用户从零复现教程。
+## 与上游一致的目录职责
 
-## 日常提交
+| 路径 | 内容 |
+| --- | --- |
+| `xnu/`、`xnu-deps/`、`xnu-build.sh` | 内核补丁、驱动、依赖与构建 |
+| `xnuloader/`、`mkxnuimg.py` | 通用加载器和启动镜像组装 |
+| `userland/` | init、运行库、服务和根镜像构建 |
+| `sysimage/` | iOS 系统文件的本地提取工具；提取内容不进入 Git |
+| `devices/oneplus-9/` | OnePlus 9 配置、服务清单、UEFI 输入、设备工具与测试 |
+| `devices/poco-x5-pro/` | 上游 POCO 配置、SoC 参数、UEFI 和公开预编译文件 |
+| `devices/qemu-virt/` | QEMU 设备配置 |
+| `tools/`、`qemu/`、`prebuilt/` | 共享开发工具、模拟器与公共组件 |
+| `common/` | 保留的跨设备构建、运行和开发工作区辅助脚本 |
 
-普通 `git` 管内核仓库；`common/ugit` 管同目录下的用户空间仓库（Git 数据位于 `.userland.git`）。
-不要在 `userland/` 中再执行 `git init`，也不要把 `.userland.git` 当作源码提交。
+目录使用上游的产品名；已有运行时 codename `lemonade`、`redwood` 仍可用于 `common/build.sh`。`make` 默认显示帮助，默认设备是 `oneplus-9`。设备参数仍经过原有校验，一加不会使用 POCO 的 UEFI、DTB 或 modem 默认参数。
+
+## 构建与版本
+
+`make components` 在 Linux 中运行完整公共组件构建，要求准备 workflow 列出的主机依赖并设置 `THEOS`。它不需要手机、系统镜像或私有设备文件。详细流程见 [CI 文档](LEMONADE-CI.md)。
+
+`make images` 使用当前设备配置，要求已准备本地系统文件。`make phone BASE=/absolute/path/to/sealed-base` 调用已封装 OnePlus base 中的启动器；源码编译成功不自动构成新版本的实机验收。
+
+CI 只 checkout 一次。包内 `sources/source.tar.gz` 是完整源码；`manifest.json` 使用唯一的 `source_commit`，不再维护活动的 kernel/userland 提交配对。[设备来源清单](../devices/oneplus-9/sources.json) 保留上游基线、旧仓库导入点和已验收 base 的历史提交组合。
+
+## 提交与历史
+
+合并保留两个仓库的完整祖先历史：内核导入点 `3b45ed6879676eb9f844f38746f04ee15904e2a0`，用户态导入点 `f86a705e549ec1f8caca8e0bdd3b37450634dbd1`。两者都是合并提交的父历史，用户态文件保持原 Git mode 和内容导入。目录重组作为随后独立提交，便于查看改名和回溯。
+
+根目录 `LICENSE` 保留原内核许可，用户态原 MIT 许可保存在 `licenses/userland-MIT.txt`。作者归属和旧提交不重写；旧用户态远端继续保留原历史，不再是构建依赖。
+
+新增文件按明确路径添加：
 
 ```sh
-git status --short
-common/ugit status --short
 git diff --check
-common/ugit diff --check
-python3 tools/test-lemonade-usb.py
-cc -Wall -Wextra -Werror -I xnu/files/bsd/dev tools/test-lemonade-touch.c -o /tmp/lemonade-touch-test
-/tmp/lemonade-touch-test
-
-# 按文件归属分别检查、暂存和提交；不批量强制添加被忽略的目录。
-git add <kernel-paths>
-git commit -m 'Describe the kernel or device change'
-common/ugit add -u -- <tracked-userland-paths>
-common/ugit commit -m 'Describe the userland change'
-git push origin HEAD
-common/ugit push origin HEAD
+git add -- <source-files>
+git commit -m 'Describe the integrated change'
 ```
 
-两边同时修改时，先提交用户空间，再更新内核仓库内的 `lemonade.sources.json`，记录配套的用户空间提交。
-推送 kernel 仓库 `main` 会触发 CI；仅推送 userland 不会自动更新配套版本或触发内核发布。
-真实设备测试的通过范围、性能数据和未完成项写入 `LEMONADE.md`，不要把构建成功写成硬件验收成功。
-两个仓库共用内核的 `.gitignore`；新增用户空间源文件可能被顶层白名单隐藏，需要先检查内容，
-再用 `common/ugit add -f -- <exact-new-source-file>` 精确添加，禁止对目录使用强制添加。
-
-## 合并上游
-
-```sh
-git fetch upstream main
-# 上次同步 SHA；下一次同步后更新记录。
-git log --oneline 88513176b1e96ecf0b764cd62c6f4e6ac71345e3..upstream/main
-```
-
-工作区干净后，在双仓短期同步分支上，以 `common/upstream/` 记录的最近同步 SHA 比较上游单仓差异，
-按来源路径分别移植到 kernel 与 userland。不能直接合并不相关历史，也不能把旧 userland 仓库的迁移指针当成源码更新。
-保留我们的机型、Metal 和构建实现，运行主机回归与编译，再合入 `main`；需要新运行包时另做对应设备验收。
-不要用 `reset --hard upstream/main` 覆盖我们的机型适配。
-
-## 留在本地的资料
-
-`local/`、`out/`、`logs/`、`fw-*/`、系统镜像、设备身份、配对信息、密钥与凭据均不提交。
-上游已公开的源码和随历史附带的预构建文件仍保留；新增的本机专用镜像与固件不上传。
-源码仓库公开；CI 使用明确的产物清单向 Release 发布通用组件，本地 base 压缩包及以上私有资料不随之发布。
+根目录使用白名单忽略规则。`local/`、`out/`、`fw-*`、系统提取缓存、私有 DTB/固件、身份头和密钥不得进入源码提交。`python3 tools/ci/check-source.py` 检查单仓库布局和关键忽略规则；需要添加被忽略的新源码时，检查内容后只对确切文件使用 `git add -f -- <file>`。

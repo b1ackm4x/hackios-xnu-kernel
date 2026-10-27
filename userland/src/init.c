@@ -838,7 +838,7 @@ mount_writable(void)
 	}
 	check(ok, "mount a memory filesystem on /private/var");
 
-	/* the directories of the data volume, as listed in the template that ships with iOS (ios165/mkvarskel.py) */
+	/* the directories of the data volume, as listed in the template that ships with iOS (sysimage/mkvarskel.py) */
 	read_whole(in_image("/etc/var.skel"), skeleton, sizeof(skeleton));
 	for (char *line = skeleton; ok && *line;) {
 		char *end = strchr(line, '\n'), *f[6];

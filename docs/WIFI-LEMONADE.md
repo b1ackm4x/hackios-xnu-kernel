@@ -39,10 +39,10 @@ SID、PCIe 和引脚/时钟状态。RPMh 电源请求的完整所有权管理仍
 | --- | --- | --- |
 | 误入 SM7325 初始化，或未上电就访问 PCIe 寄存器 | 平台隔离；把 rails、domain、clocks、resets、controller、PHY、link 拆成有界阶段 | [板级驱动](../xnu/files/bsd/dev/lemonade_wifi.c)、[redwood 平台检查](../xnu/files/bsd/dev/redwood_wifi.c)；分阶段正常返回记录见下文 |
 | PCIe 初始化顺序、PIPE mux 和 PHY 时钟不匹配 | 按本机设备树请求 L6 1200 mV / L5 880 mV；修正 PARF 顺序、PIPE mux `0x6b054`、板级 PHY 表，PHY ready 后才读 DBI | 板级驱动；根控制器 `17cb:010c` 和端点 `17cb:1103` 实际读回，链路训练及恢复通过 |
-| 把 SMMU 格式位当 fault，或用不支持的 ATOS 宣称 DMA 可用 | 使用明确的寄存器访问指令、检查 ATOSNS 能力、故障掩码 `0xc00001fe`；软件页表与真实越界 DMA 分开验收 | 板级驱动、[验收器](../tools/lemonade-check-wifi.py)；实际 FAR/SID 匹配的保护页拦截两次通过 |
+| 把 SMMU 格式位当 fault，或用不支持的 ATOS 宣称 DMA 可用 | 使用明确的寄存器访问指令、检查 ATOSNS 能力、故障掩码 `0xc00001fe`；软件页表与真实越界 DMA 分开验收 | 板级驱动、[验收器](../devices/oneplus-9/tools/lemonade-check-wifi.py)；实际 FAR/SID 匹配的保护页拦截两次通过 |
 | MHI 环布局及 MSI 初始化不完整 | 使用 44 字节 context、16 字节 TRE；按端点 32 位 MSI 能力配置四个消息到自有 mailbox，再轮询事件 | [协议定义](../xnu/files/bsd/dev/lemonade_mhi_protocol.h)、板级驱动；实际 M0、mission EE 和 IPCR 消息通过 |
 | QMI 提前查询能力失败，固件内存交接出现 SYSTEM_ERROR | 先登记和声明主机能力，再响应内存请求、等待 memory-ready；完整驱动 DMA 池扩为 64 MiB，地址按覆盖申请大小的二次幂对齐 | [兼容层 DMA 分配](../wifi/lx/src/lx_base.c)、[兼容总线层](../wifi/lx/src/lx_bus.c)、板级驱动；成功完成 WLFW 内存、regdb/board、M3 及运行模式握手；仅 16 KiB 对齐的失败版本保留作对照 |
-| PCI ID 相同却被当作已支持的 major 2 | 新增独立 QCA6490 major 1 profile，保留上游版本编号，host/target CE2 上限均为 3200 字节 | [profile 生成器](../tools/lemonade-ath11k-profile.py)；实际 major 1 芯片完成 ath11k 启动与扫描 |
+| PCI ID 相同却被当作已支持的 major 2 | 新增独立 QCA6490 major 1 profile，保留上游版本编号，host/target CE2 上限均为 3200 字节 | [profile 生成器](../devices/oneplus-9/tools/lemonade-ath11k-profile.py)；实际 major 1 芯片完成 ath11k 启动与扫描 |
 | CE 访问错误偏移，HTC/WMI 无法完成启动 | PCIe 分支设置 `ab->mem_ce = ab->mem`，CE 寄存器相对 BAR0 访问 | [兼容总线层](../wifi/lx/src/lx_bus.c)；修复后收到真实 unified-ready，阶段 22 通过 |
 | 驱动 ready 尚未形成 iOS 网络接口 | 增加 station 生命周期和系统无线接口桥接，交由 Apple80211/configd 完成关联及 DHCP | [无线接口桥](../wifi/lx/src/lx_80211.c)；en0、有效 IPv4、DNS、六次 HTTP 和主动重连通过 |
 | 退出时设备仍可能访问已释放 DMA 内存 | 停止驱动/线程和端点后再拆映射，核对 Bus Master、MSI、BAR、SMMU/SID 清理；无法安全释放时保留 DMA 页 | 板级驱动与兼容总线层；正常退出和原 Android 恢复有独立日志，不声称任意故障时序均已覆盖 |
@@ -141,7 +141,7 @@ MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execu
 
 虚拟化层可能不允许闲置 context 的 CBAR 从 stage-1 类型恢复到 reset 的 stage-2 类型；这不是完整逐位恢复。释放验收要求 SMR/S2CR、SCTLR、TTBR/TCR/MAIR 等翻译寄存器恢复，context 禁用且没有流指向它，类型位可能保留到 Android 重启。原厂驱动的 context 销毁路径也禁用 SCTLR 而不复位 CBAR。
 
-`tools/lemonade-build-wifi-image.py` 从已校验的正常 APFS 镜像提取文件，独立重建并逐文件比较内容、权限和符号链接；仅新增 `fw/amss.bin`。正常 `userland/root.apfs`、`system.apfs` 均保持原哈希。固件与生成镜像被 Git 忽略，不进入提交。
+`devices/oneplus-9/tools/lemonade-build-wifi-image.py` 从已校验的正常 APFS 镜像提取文件，独立重建并逐文件比较内容、权限和符号链接；仅新增 `fw/amss.bin`。正常 `userland/root.apfs`、`system.apfs` 均保持原哈希。固件与生成镜像被 Git 忽略，不进入提交。
 
 21:47 最终恢复 Android 后，USB 身份、启动完成、B 槽、五个启动分区哈希均通过核验。`cnss_pci` 恢复 5 GT/s x1，`wlan0` 为 up，向当前 Wi-Fi 网关的三次探测均收到响应；电池 32.9°C。
 
@@ -180,7 +180,7 @@ MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execu
 
 2026-10-24 的内核 `fbc1f929a818d09973ce3e30102c3348e7853f53ab498f8f9d04d1e27b9f4c9a` 新增 `station`（24）。同内核 guard 日志 `1792771598` 通过；接口测试日志 `1792771726` 通过阶段 24，en0 已附着，STA interface 添加成功，驱动保持运行至 90 秒定时结束。正常停止先退出 station/ath11k，再停止 MHI 工作线程并恢复 MSI、Bus Master、BAR、SMMU 和 SID；未进入紧急复位后保留 DMA 页的回退路径。
 
-`tools/lemonade-net-test.m` 是单独编译、仅装入测试根镜像的用户态程序，通过 iOS Apple80211 发起关联，然后请求 configd DHCP，排除链路本地 IPv4，再解析域名并完成三次绑定 en0 的 HTTP 请求。每次都要求 HTTP 200、非空数据和预期响应内容；随后主动断开并重复关联和网络请求。编译和合成测试不替代实际运行证据。构建入口为 `bash tools/lemonade-build-net-test.sh`，会记录可执行文件与源码哈希；镜像构建拒绝与记录不符的程序。
+`devices/oneplus-9/tools/lemonade-net-test.m` 是单独编译、仅装入测试根镜像的用户态程序，通过 iOS Apple80211 发起关联，然后请求 configd DHCP，排除链路本地 IPv4，再解析域名并完成三次绑定 en0 的 HTTP 请求。每次都要求 HTTP 200、非空数据和预期响应内容；随后主动断开并重复关联和网络请求。编译和合成测试不替代实际运行证据。构建入口为 `bash devices/oneplus-9/tools/lemonade-build-net-test.sh`，会记录可执行文件与源码哈希；镜像构建拒绝与记录不符的程序。
 
 `--connect-current` 只用于用户明确批准的凭据转送：在核对 USB 目标后，从当前 Android Wi-Fi 配置中选择唯一匹配网络；临时文件权限 0600。`--network-test` 与私有网络镜像必须同时选择，上传后的合成载荷会删除，测试日志去除网络名、密码和 MAC 地址，进程退出时删除含凭据的 APFS。普通固件、扫描和 station 测试不读取密码。该入口仅在用户明确授权后使用。离线集成使用虚构凭据通过了 3 项测试：APFS 只改变指定固件、程序、私有输入和启动项及其权限，模拟传送后的日志脱敏与临时文件清理，以及上传失败时的清理；这些测试没有运行任何真实设备命令。
 
@@ -206,18 +206,18 @@ MHI/BHI 的可读性已验证：BHI offset `0x100`，BHIE offset `0x224`，execu
 
 ```sh
 # 在已配置 THEOS 的构建容器内执行：
-bash tools/lemonade-build-net-test.sh
+bash devices/oneplus-9/tools/lemonade-build-net-test.sh
 # 在持有精确设备租约的宿主机上，Android 仍在线时执行：
-python3 tools/lemonade-build-wifi-image.py --driver-files --connect-current
-python3 tools/lemonade-usb.py boot
-python3 tools/lemonade-usb.py ramdisk
+python3 devices/oneplus-9/tools/lemonade-build-wifi-image.py --driver-files --connect-current
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk
 # 同一内核须已有通过的真实 DMA guard 记录。
-python3 tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi station --network-test --seconds 240
-python3 tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
-python3 tools/lemonade-usb.py reboot
-python3 tools/lemonade-verify-android.py
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi station --network-test --seconds 240
+python3 devices/oneplus-9/tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-usb.py reboot
+python3 devices/oneplus-9/tools/lemonade-verify-android.py
 # 恢复不含网络输入的普通固件测试镜像：
-python3 tools/lemonade-build-wifi-image.py --driver-files
+python3 devices/oneplus-9/tools/lemonade-build-wifi-image.py --driver-files
 ```
 
 该轮已验证范围是当前 5 GHz WPA2 网络上的基本 STA。WPA3-only、企业认证、休眠、漫游和峰值速度尚未验收。随后与 GPU、桌面和触控同时运行的验收，以及不带测试程序的 RAM 运行包，见 [OnePlus 9 base](LEMONADE-BASE.md)；仍未安装到手机分区。
@@ -228,17 +228,17 @@ python3 tools/lemonade-build-wifi-image.py --driver-files
 
 详情页对应日志 `1792777417` 的 61 项检查全部通过，首次连接及重连各 3/3 次 HTTP 请求成功。上一轮列表截图日志 `1792776886` 中重连后的第一次 DNS 查询失败，其余两次 HTTP 成功，不能计为该轮完整重连验收通过；两轮均正常退出。设置里的 Wi-Fi 地址目前仍来自加载器设备树占位值，不能当作无线芯片的真实地址；这不影响截图中 DHCP 地址和数据传输的实测记录。
 
-截图辅助程序 `tools/lemonade-wifi-ui.c` 只调用系统打开页面的接口及已有的虚拟触控入口，不提供假界面或修改显示值。设置页面的软件渲染需等待约 3–5 分钟；一次打开请求的返回值不替代屏幕证据。编译后，在已授权同机网络输入的临时镜像中启用：
+截图辅助程序 `devices/oneplus-9/tools/lemonade-wifi-ui.c` 只调用系统打开页面的接口及已有的虚拟触控入口，不提供假界面或修改显示值。设置页面的软件渲染需等待约 3–5 分钟；一次打开请求的返回值不替代屏幕证据。编译后，在已授权同机网络输入的临时镜像中启用：
 
 ```sh
 # 在已配置 THEOS 的构建容器内：
-bash tools/lemonade-build-wifi-ui.sh
+bash devices/oneplus-9/tools/lemonade-build-wifi-ui.sh
 # Android 在线且持有租约时，选其一：
-python3 tools/lemonade-build-wifi-image.py --driver-files --connect-current --show-wifi-settings
-python3 tools/lemonade-build-wifi-image.py --driver-files --connect-current --wifi-settings-details
+python3 devices/oneplus-9/tools/lemonade-build-wifi-image.py --driver-files --connect-current --show-wifi-settings
+python3 devices/oneplus-9/tools/lemonade-build-wifi-image.py --driver-files --connect-current --wifi-settings-details
 # 启动、上传系统镜像后，使用同一已验证内核运行 300 秒；
 # 运行中或正常返回加载器后读取实际画面：
-python3 tools/lemonade-usb.py screenshot
+python3 devices/oneplus-9/tools/lemonade-usb.py screenshot
 ```
 
 `--wifi-settings-details` 中的信息按钮坐标来自这台手机的上述实际截图，只适用于该布局。采集完成后仍须按前文清理私有输入并恢复 Android。
@@ -258,24 +258,24 @@ python3 tools/lemonade-usb.py screenshot
 只读探测的复现入口如下；应先持有精确目标的 Device Hub 租约。Fastboot 在 macOS 上需要能访问 USB 的执行环境。
 
 ```sh
-python3 tools/lemonade-wifi-collect.py
-python3 tools/lemonade-verify-android.py --timeout 30
-python3 tools/lemonade-usb.py boot
-python3 tools/lemonade-usb.py ramdisk
-python3 tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi inspect --seconds 30
-python3 tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-wifi-collect.py
+python3 devices/oneplus-9/tools/lemonade-verify-android.py --timeout 30
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi inspect --seconds 30
+python3 devices/oneplus-9/tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
 ```
 
 复现 BHI 首段测试时，先用同一个已构建内核运行并记录真实 DMA guard 验收，再生成私有固件镜像：
 
 ```sh
-python3 tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi dma-fault --seconds 25
-python3 tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log --record-guard
-python3 tools/lemonade-build-wifi-image.py
-python3 tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi bhi --seconds 30
-python3 tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
-python3 tools/lemonade-usb.py reboot
-python3 tools/lemonade-verify-android.py
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi dma-fault --seconds 25
+python3 devices/oneplus-9/tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log --record-guard
+python3 devices/oneplus-9/tools/lemonade-build-wifi-image.py
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 1 --userland --wifi bhi --seconds 30
+python3 devices/oneplus-9/tools/lemonade-check-wifi.py local/lemonade/<本次时间戳>-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-usb.py reboot
+python3 devices/oneplus-9/tools/lemonade-verify-android.py
 ```
 
 内核变化后，旧 guard 记录不再满足前置条件。`bhi` 使用单独的 `out/lemonade-wifi/root.apfs`；正常镜像仍保留原哈希。

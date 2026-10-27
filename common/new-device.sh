@@ -3,7 +3,7 @@
 #
 # usage: common/new-device.sh <codename> [path/to/device.dtb]
 #
-# Writes common/devices/<codename>.conf (from _template.conf) and common/devices/<codename>.platform.c,
+# Writes devices/<codename>/device.conf (from devices/_template) and devices/<codename>/platform.c,
 # a `struct platform` for xnuloader/loader.c. Given the phone's device tree (from its vendor_boot, or
 # `adb pull /sys/firmware/fdt`), it fills in what can be read from it: the GIC addresses, the number of
 # CPU cores and how MPIDR numbers them, and which cores are the small ones. What it cannot read is left
@@ -12,11 +12,12 @@
 CODE=$1; DTB=$2
 [ -n "$CODE" ] || die "usage: common/new-device.sh <codename> [device.dtb]"
 [[ "$CODE" =~ ^[a-z0-9_-]+$ ]] || die "codename: lower-case letters, digits, - and _ only"
-CONF=common/devices/$CODE.conf PLATC=common/devices/$CODE.platform.c
-[ -e "$CONF" ] && die "$CONF exists already"
+CONF=devices/$CODE/device.conf PLATC=devices/$CODE/platform.c
+[ -e "devices/$CODE" ] && die "devices/$CODE exists already"
+mkdir -p "devices/$CODE"
 
 sed -e "s/^NAME=.*/NAME=\"TODO vendor model ($CODE)\"/" -e "s/^UEFI_TARGET=.*/UEFI_TARGET=$CODE/" \
-	common/devices/_template.conf > "$CONF"
+	devices/_template/device.conf > "$CONF"
 [ -n "$DTB" ] && sed -i "s|^DTB=.*|DTB=$(readlink -f "$DTB")|" "$CONF"
 
 GIC_DIST=TODO GIC_REDIST=TODO CORES=8 SHIFT=8 SMALL=0x0

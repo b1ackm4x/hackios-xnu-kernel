@@ -25,7 +25,7 @@
 # usage: texdecl.sh [FILE.metallib ...]
 set -u
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
-IOS=${IOS:-$ROOT/ios165}
+IOS=${IOS:-$ROOT/sysimage}
 TEST=${AIR_METAL_TEST:-$ROOT/build/mesa-host/build/src/gallium/drivers/freedreno/air_metal_test}
 [ -x "$TEST" ] || { echo "texdecl.sh: run tools/air/mk-host.sh first"; exit 1; }
 

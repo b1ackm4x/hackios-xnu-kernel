@@ -12,4 +12,4 @@ remain. Optional modem firmware staging requires explicit target DTB and node in
 The original Redwood symbols, paths and libraries remain our ABI. Upstream's removal of Metal/AIR,
 its tests and related image content was not imported. This source sync is host-tested and compiled;
 it does not extend the hardware acceptance of the previously sealed `2026.10.27-base.2` runtime.
-The paired kernel commit is recorded by that repository's `common/devices/lemonade.sources.json`.
+The paired kernel commit is recorded by that repository's `devices/oneplus-9/sources.json`.

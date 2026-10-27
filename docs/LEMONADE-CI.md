@@ -7,7 +7,7 @@
 
 普通用户请先阅读 [复现指南](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-REPRODUCE.md)。编译和实机验收由维护者在发布前完成；用户只准备自己的必要设备文件与指定 Apple 系统，本地工具负责校验、组装和启动。用户不需要运行验收程序。
 
-`main` 每次更新都会运行主机测试、从固定 userland 提交编译，并在全部成功后发布 `ci-lemonade-<commit>` 实验版。PR 运行相同测试、编译和组包校验，不发布 Release；也可以在 Actions 手动运行。
+`main` 每次更新都会运行主机测试、从同一个源码提交编译内核与用户态，并在全部成功后发布 `ci-lemonade-<commit>` 实验版。PR 运行相同测试、编译和组包校验，不发布 Release；也可以在 Actions 手动运行。
 
 当前公开交付的是 **供维护者集成的通用内核与驱动组件包**。系统镜像、原机固件和设备启动文件仍需在开发工作区准备；下载包不能直接启动手机。面向普通用户的预编译启动组件、本地准备工具和已验收公开运行版本尚未交付，不能把这份 CI 说明当作完整用户安装教程。
 
@@ -43,7 +43,7 @@ shasum -a 256 -c SHA256SUMS
 tar -xzf lemonade-ci-*.tar.gz
 ```
 
-这是供本地集成的组件包，**不包含可直接启动或刷入手机的镜像**。源码提交在 `manifest.json` 中；包内 `sources/kernel.tar.gz` 和 `sources/userland.tar.gz` 是配套源码。现有开发环境先切换到相应提交，再使用这些构建产物；保留旧产物与运行包以便回退。
+这是供本地集成的组件包，**不包含可直接启动或刷入手机的镜像**。源码提交在 `manifest.json` 中；包内 `sources/source.tar.gz` 是同一提交的完整源码（旧版双仓库组件包仍保留其原有两个归档）。现有开发环境先切换到相应提交，再使用这些构建产物；保留旧产物与运行包以便回退。
 
 | 包内路径 | 用途 |
 | --- | --- |
@@ -59,7 +59,7 @@ tar -xzf lemonade-ci-*.tar.gz
 
 本节面向构建和验收发布版的维护者，不属于普通用户操作。除 `loader/` 外，产物目录结构与源码树相同。维护者将所需文件导入对应源码树后，按 [设备准备与本地构建](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE.md) 准备测试设备基线、脱敏 DTB、Mu-Silicium UEFI / BootShim、GPU / Wi-Fi 固件和本地系统镜像，再按 [base 构建说明](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-BASE.md) 组包。这些脚本依赖既有开发环境，并非从空目录开始的用户安装器。
 
-现有开发工具使用设备专属 loader 身份，由 `tools/lemonade-pack.py` 重新编译并打包；不能直接用包内通用 EFI 替换设备绑定的 loader。当前 base 启动器仍要求候选内核的 DMA guard 和对应镜像的联合验收记录；这是维护者候选流程的现状，**不是要求每位用户执行测试**。不得复制旧验收记录或修改标志来绕过检查。
+现有开发工具使用设备专属 loader 身份，由 `devices/oneplus-9/tools/lemonade-pack.py` 重新编译并打包；不能直接用包内通用 EFI 替换设备绑定的 loader。当前 base 启动器仍要求候选内核的 DMA guard 和对应镜像的联合验收记录；这是维护者候选流程的现状，**不是要求每位用户执行测试**。不得复制旧验收记录或修改标志来绕过检查。
 
 发布给普通用户前，维护者应完成确切版本的整机验收，提供预编译启动组件和本地准备工具，并让启动器认可已验收的发布组件及支持范围。用户工具只做本机兼容性、设备身份与文件完整性检查；GPU、DMA、显示和联网验收由发布方承担。CI 自动实验版不会因一次旧 base 验收而自动成为普通用户版本。具体交付缺口见 [复现指南](https://github.com/b1ackm4x/hackios-xnu-kernel/blob/main/docs/LEMONADE-REPRODUCE.md)。
 
@@ -73,7 +73,7 @@ tar -xzf lemonade-ci-*.tar.gz
 
 Wi-Fi 驱动已经编入内核；芯片运行固件与板级配置（例如 `amss.bin`、`m3.bin`、`board.bin`、`regdb.bin`）是另一类运行输入，按当前分发方案在本地准备。这些固件文件与家庭 Wi-Fi 的 SSID、密码及连接历史不是同一种数据。
 
-`manifest.json` 记录内核与 userland 提交、文件大小、SHA-256 和构建链接。每个提交有独立 Release；上传到草稿后，校验服务端的全部文件与哈希再公开。重跑不会覆盖已经完整发布的版本。产物直接上传 Release，不占用额外 Actions artifact 存储。
+新版 `manifest.json` 以 `source_commit` 记录唯一源码提交、文件大小、SHA-256 和构建链接。每个提交有独立 Release；上传到草稿后，校验服务端的全部文件与哈希再公开。重跑不会覆盖已经完整发布的版本。产物直接上传 Release，不占用额外 Actions artifact 存储。
 
 ## 验证边界
 
@@ -87,7 +87,7 @@ CI 不操作手机，不能替代维护者的发布前真机验收；每个自�
 
 编译使用 `ubuntu-24.04-arm`、4 核、16 GB 内存，无需 GPU。Metal 主机测试使用 `macos-14`。公开仓库的标准 GitHub runner 免费，规格以 [GitHub runner 文档](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) 为准。本地建议 ARM64 Linux、4 核以上、16 GB 内存、至少 15 GB 可用磁盘；主要耗时在下载源码与编译。
 
-流水线为 `.github/workflows/lemonade-ci.yml`。工具链与 SDK 版本/哈希在 `tools/ci/dependencies.json`，userland 固定版本在 `common/devices/lemonade.sources.json`。userland 独立更新不会自动改变构建输入，需要更新 kernel 仓库里的固定提交。无需配置个人 GitHub token；发布 job 使用本仓库临时 `GITHUB_TOKEN`，PR 没有发布权限。
+流水线为 `.github/workflows/lemonade-ci.yml`。工具链与 SDK 版本/哈希在 `tools/ci/dependencies.json`；内核与 userland 已同仓，同一次 checkout 提供全部构建输入。`devices/oneplus-9/sources.json` 保留历史来源和已验收版本记录。无需配置个人 GitHub token；发布 job 使用本仓库临时 `GITHUB_TOKEN`，PR 没有发布权限。
 
 | 触发方式 | 执行结果 |
 | --- | --- |
@@ -96,8 +96,8 @@ CI 不操作手机，不能替代维护者的发布前真机验收；每个自�
 | Actions → OnePlus 9 build → Run workflow，选择本仓库 `main` | 与 `main` 自动触发相同；重跑已完整发布的提交时保留原附件 |
 | 手动选择其他分支 | 运行测试与编译校验，不发布 Release |
 
-自动发布限定在 `b1ackm4x/hackios-xnu-kernel` 的 `main`。同一分支的新运行会取消尚未结束的旧运行。仅修改 userland 时，应先推送该仓库，再更新 kernel 仓库的配套提交并推送 `main`。
+自动发布限定在 `b1ackm4x/hackios-xnu-kernel` 的 `main`。同一分支的新运行会取消尚未结束的旧运行。仅修改 userland 也直接提交到同一个仓库，由同一流水线验证。
 
 发布脚本 `tools/ci/publish-release.py` 先检查本地产物的 `SHA256SUMS`，再创建草稿，直接使用创建接口返回的 Release ID 上传附件、核对服务端文件清单与 SHA-256，最后公开。创建草稿后不依赖标签或列表查询立即可见；上传失败会保留未公开草稿供检查或重跑。只有测试、编译、组包、上传和公开都成功，才能把一次完整流水线记为成功。
 
-从干净 kernel checkout 复现：安装 workflow 中的依赖，执行 `python3 tools/ci/checkout-userland.py`，指定一个尚不存在的 `THEOS` 路径，再运行 `bash tools/ci/build-lemonade.sh`。输出为 `out/ci-release/`。源码归档、构建时间等会影响文件哈希；这里保证输入配套与产物完整性，不宣称跨机器逐字节可复现。
+从干净单仓库 checkout 复现：安装 workflow 中的依赖，执行 `python3 tools/ci/check-source.py`，指定一个尚不存在的 `THEOS` 路径，再运行 `bash tools/ci/build-lemonade.sh`。输出为 `out/ci-release/`。源码归档、构建时间等会影响文件哈希；这里保证输入配套与产物完整性，不宣称跨机器逐字节可复现。

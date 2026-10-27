@@ -24,7 +24,7 @@ Wi-Fi 的实际关联、DHCP、DNS、HTTP 和主动断开重连均有设备证�
 
 - [HackiOS kernel](https://github.com/oosexgang/hackios-xnu-kernel): `8e61187098f2c26c5daee8f9f72b6416aa64b9ab`
 - [HackiOS userland](https://github.com/oosexgang/hackios-xnu-userland): `906425b75e02b4f99eb5d7bb1ef7c9583472d772`
-- [Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium): `e51cd877e31c8fbb322032dc4cb6715e83d25ad3`，与 `uefi/BASE` 一致。
+- [Mu-Silicium](https://github.com/Project-Silicium/Mu-Silicium): `e51cd877e31c8fbb322032dc4cb6715e83d25ad3`，与 `devices/poco-x5-pro/uefi/BASE` 一致。
 - 上游入口：[移植说明](https://github.com/oosexgang/hackios-xnu-kernel/blob/main/docs/PORTING.md)。HackiOS 目前公布的是 redwood 和 QEMU 路线；lemonade 需实际移植和设备验证。
 
 ## 实机基线（2026-10-22）
@@ -49,14 +49,14 @@ Wi-Fi 的实际关联、DHCP、DNS、HTTP 和主动断开重连均有设备证�
 
 ## 初期启动移植实现
 
-- `common/devices/lemonade.conf`：SM8350 的早期启动参数，Android boot header v3。
+- `devices/oneplus-9/device.conf`：SM8350 的早期启动参数，Android boot header v3。
 - `xnuloader/loader.c`：lemonade platform；只有原 redwood 路径允许持久化日志，lemonade 日志留在 RAM/USB。
-- `tools/lemonade-prepare.py`：在固定 Mu-Silicium 基线上应用 XNUP shim/loader 钩子，保留 `0xF0000000..0xF4000000`，禁用 lemonade stage-0 分区日志，去除 live FDT 的 `/chosen` 和 `__symbols__` 后生成启动用 DTB。
+- `devices/oneplus-9/tools/lemonade-prepare.py`：在固定 Mu-Silicium 基线上应用 XNUP shim/loader 钩子，保留 `0xF0000000..0xF4000000`，禁用 lemonade stage-0 分区日志，去除 live FDT 的 `/chosen` 和 `__symbols__` 后生成启动用 DTB。
 - `mkxnuimg.py`：支持 profile 指定 header 版本；拒绝为 lemonade 回退到 redwood 的 shim/UEFI。
 - `common/run.sh`：暂时拒绝 lemonade，避免上游 `xl` 的未指定设备命令和 redwood 默认值影响多设备环境。
-- `tools/lemonade-collect.py`：只读采集与按文件哈希校验备份，需要先取得 Device Hub 租约。
-- `tools/lemonade-pack.py`：编译 loader，检查 Android v3 header、shim、lemonade UEFI、脱敏 DTB 和 XNUP 内容；生成 SHA-256 清单。boot 镜像只进入 loader；返回路径自检使用独立 payload。
-- `tools/lemonade-usb.py`：依据已采集的硬件序列号哈希选择 USB 设备，跨重启使用派生的 loader USB 标识；提供临时启动、RAM 镜像上传、定时 XNU/用户空间运行、屏幕读取、诊断、自检和重启。不会选择 Wi-Fi ADB 或列表中的第一台手机。
+- `devices/oneplus-9/tools/lemonade-collect.py`：只读采集与按文件哈希校验备份，需要先取得 Device Hub 租约。
+- `devices/oneplus-9/tools/lemonade-pack.py`：编译 loader，检查 Android v3 header、shim、lemonade UEFI、脱敏 DTB 和 XNUP 内容；生成 SHA-256 清单。boot 镜像只进入 loader；返回路径自检使用独立 payload。
+- `devices/oneplus-9/tools/lemonade-usb.py`：依据已采集的硬件序列号哈希选择 USB 设备，跨重启使用派生的 loader USB 标识；提供临时启动、RAM 镜像上传、定时 XNU/用户空间运行、屏幕读取、诊断、自检和重启。不会选择 Wi-Fi ADB 或列表中的第一台手机。
 - USB 路径同时识别 `usb:<path>` 和新 libusb 后端的 `2-1.1` 格式。macOS 沙箱内可能看不到 fastboot，实际设备操作需使用获准的 USB 执行环境；不要把沙箱枚举为空当作线已断开。
 - loader 的 USB 状态/屏幕尺寸回复独立于日志缓冲区；USB 模式不把完整内核日志再次挤入 32 KiB loader 日志；`oem log` 保留最后一次完整内核日志。
 - `userland/build.sh`：允许预编译产物缺少可选 `drawable_test`；没有 systemd/timedatectl 的构建容器优先使用 `TZ`，否则回落 UTC。
@@ -78,11 +78,11 @@ Wi-Fi 的实际关联、DHCP、DNS、HTTP 和主动断开重连均有设备证�
 
 ## 本地继续构建
 
-工作目录为本仓库。`tools/lemonade-build.Dockerfile` 提供 Ubuntu 24.04 ARM64 编译环境；本轮实际使用的容器保留为 `hackios-lemonade-env`，源码挂载点为 `/work`，Python 虚拟环境在 `/tmp/hackios-venv`。
+工作目录为本仓库。`devices/oneplus-9/tools/lemonade-build.Dockerfile` 提供 Ubuntu 24.04 ARM64 编译环境；本轮实际使用的容器保留为 `hackios-lemonade-env`，源码挂载点为 `/work`，Python 虚拟环境在 `/tmp/hackios-venv`。
 
 ```sh
 # 修改 lemonade 的 Mu 接入后，重新应用幂等准备脚本：
-python3 tools/lemonade-prepare.py
+python3 devices/oneplus-9/tools/lemonade-prepare.py
 
 # 继续本轮保留的环境（容器停止时先启动）：
 docker start hackios-lemonade-env
@@ -90,8 +90,8 @@ docker exec hackios-lemonade-env bash -lc \
   'export PATH=/tmp/hackios-venv/bin:$PATH; cd Mu-Silicium; python3 build_uefi.py -d lemonade -r RELEASE'
 
 # Mac 上打包；需要 clang、lld-link、llvm-objcopy、dtc：
-python3 tools/lemonade-pack.py
-python3 tools/test-lemonade-usb.py -v
+python3 devices/oneplus-9/tools/lemonade-pack.py
+python3 devices/oneplus-9/tools/test-lemonade-usb.py -v
 
 # 已提取 Apple 文件后重建 APFS：
 docker exec hackios-lemonade-env bash -lc \
@@ -100,16 +100,16 @@ docker exec hackios-lemonade-env bash -lc \
   'tools/apfs/check-image.sh userland/root.apfs userland/root && xnu-deps/build/apfsprogs/apfsck/apfsck -cw userland/system.apfs'
 ```
 
-新建环境需从 `uefi/BASE` 指定提交检出 Mu-Silicium，初始化顶层 submodules，安装 `Mu-Silicium/pip-requirements.txt`，并先运行 `lemonade-prepare.py`。`Mu_Basecore` 只初始化实际所需的 Brotli（两个目录）、oniguruma、libfdt、mipisyst，避免拉取未参与此目标构建的 libspdm 单元测试依赖。ARM64 容器中，将 `/usr/bin/{nasm,ndisasm}` 链接到 `Mu_Basecore/BaseTools/Bin/mu_nasm_extdep/Linux-ARM-64/`，`extdep_state.yaml` 设为 `version: 20016.1.1`；随后运行 lemonade `DeviceBuild.py --setup`、`--update` 和 `build_uefi.py`。保留的容器已完成这些步骤。
+新建环境需从 `devices/poco-x5-pro/uefi/BASE` 指定提交检出 Mu-Silicium，初始化顶层 submodules，安装 `Mu-Silicium/pip-requirements.txt`，并先运行 `lemonade-prepare.py`。`Mu_Basecore` 只初始化实际所需的 Brotli（两个目录）、oniguruma、libfdt、mipisyst，避免拉取未参与此目标构建的 libspdm 单元测试依赖。ARM64 容器中，将 `/usr/bin/{nasm,ndisasm}` 链接到 `Mu_Basecore/BaseTools/Bin/mu_nasm_extdep/Linux-ARM-64/`，`extdep_state.yaml` 设为 `version: 20016.1.1`；随后运行 lemonade `DeviceBuild.py --setup`、`--update` 和 `build_uefi.py`。保留的容器已完成这些步骤。
 
 Mu submodule 的工作树在容器内初始化，部分 `.git` 指向 `/work`；检查它们时使用 `docker exec`，不要因宿主机找不到 `/work` 而重置工作树。
 
 ## 验收顺序
 
 1. USB 直连 Mac，核对设备身份哈希和 fastboot product，确认仍为已解锁设备。
-2. 运行 `python3 tools/lemonade-usb.py status`，确认本机 USB；再运行 `python3 tools/lemonade-usb.py boot`，它在校验 manifest 后使用指定设备的 `fastboot boot` 临时启动。
+2. 运行 `python3 devices/oneplus-9/tools/lemonade-usb.py status`，确认本机 USB；再运行 `python3 devices/oneplus-9/tools/lemonade-usb.py boot`，它在校验 manifest 后使用指定设备的 `fastboot boot` 临时启动。
 3. 验证 UEFI/loader 的显示、`product: xnuloader`、USB 日志、GOP 地址、RAM map；保存本地证据。
-4. 使用 `python3 tools/lemonade-usb.py memmap` 保存内存图，然后用 `selftest` 上传专门的自检 payload。必须收到 `result: selftest-ok` 且读回日志，不能把 `oem selftest` 的发送成功当作通过。之后再安排单核、纯 RAM、未移植外设关闭的 XNU 启动；返回 Android 后核对 `sys.boot_completed=1`、原槽和启动分区哈希。
+4. 使用 `python3 devices/oneplus-9/tools/lemonade-usb.py memmap` 保存内存图，然后用 `selftest` 上传专门的自检 payload。必须收到 `result: selftest-ok` 且读回日志，不能把 `oem selftest` 的发送成功当作通过。之后再安排单核、纯 RAM、未移植外设关闭的 XNU 启动；返回 Android 后核对 `sys.boot_completed=1`、原槽和启动分区哈希。
 5. XNU 稳定后再试 iOS launchd / backboardd / SpringBoard；最后分别移植 S6SY792 触控、按键和其他外设。
 
 不要使用 `common/run.sh redwood` 或直接执行上游 `xl enter` 来启动这台手机。上游 POCO 的触控、GPU、Wi-Fi、音频、UFS native、CPU 调频和 watchdog 不能因为都属于高通就当作已经适配。
@@ -130,10 +130,10 @@ Mu submodule 的工作树在容器内初始化，部分 `.git` 指向 `/work`；
 继续用户空间验证的已实现入口：
 
 ```sh
-python3 tools/lemonade-usb.py ramdisk               # 每次 loader 重启后上传一次 system.apfs
-python3 tools/lemonade-usb.py run --userland --seconds 120
-python3 tools/lemonade-usb.py screenshot
-python3 tools/lemonade-usb.py reboot                # 返回 Android，随后验证启动完成和槽位
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk               # 每次 loader 重启后上传一次 system.apfs
+python3 devices/oneplus-9/tools/lemonade-usb.py run --userland --seconds 120
+python3 devices/oneplus-9/tools/lemonade-usb.py screenshot
+python3 devices/oneplus-9/tools/lemonade-usb.py reboot                # 返回 Android，随后验证启动完成和槽位
 ```
 
 `run --userland` 会从运行参数中去掉 `-v`，避免内核屏幕日志覆盖 iOS 绘图；完整日志仍从 USB 获取。`run --checkpoint N` 用于早期分段验证，不需上传 system APFS。每次成功返回的运行会保存日志及对应的 payload/参数清单。
@@ -163,16 +163,16 @@ python3 tools/lemonade-usb.py reboot                # 返回 Android，随后验
 
 ```sh
 docker exec -e THEOS=/work/local/lemonade/toolchain/theos hackios-lemonade-env \
-  bash tools/lemonade-build-kernel.sh
+  bash devices/oneplus-9/tools/lemonade-build-kernel.sh
 docker exec -e THEOS=/work/local/lemonade/toolchain/theos hackios-lemonade-env \
-  bash tools/lemonade-build-images.sh
+  bash devices/oneplus-9/tools/lemonade-build-images.sh
 
 # 先取得目标手机租约；每次 loader 重启后重新上传 system.apfs。
-python3 tools/lemonade-usb.py boot
-python3 tools/lemonade-usb.py ramdisk
-python3 tools/lemonade-usb.py run --kernel built --gpu --userland --seconds 120
-python3 tools/lemonade-usb.py screenshot
-python3 tools/lemonade-usb.py reboot
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --gpu --userland --seconds 120
+python3 devices/oneplus-9/tools/lemonade-usb.py screenshot
+python3 devices/oneplus-9/tools/lemonade-usb.py reboot
 ```
 
 `lemonade-build-images.sh` 校验原机固件、构建 GLES bridge 和诊断程序，以 `GL=1` 加入 root APFS，执行 APFS 检查及逐项读回，然后更新镜像清单。通用 `common/build.sh lemonade` 仍保留 GPU 关闭的启动基线；要生成 GPU 用户空间请使用专用脚本。
@@ -186,7 +186,7 @@ python3 tools/lemonade-usb.py reboot
 - GPU 核心实测约 315 MHz；command processor 的 fault/protection/interrupt 状态均为 0。
 - 命令写回 `0x600dc0de`；2D GPU 绘制的三色画面读回分别为 BGRA `00 80 ff ff`、`ff ff ff ff`、`ff 80 00 ff`，缓存完成标记一致。
 
-详细记录在 `local/lemonade/gpu-validation.json` 与各次运行的日志和 manifest。完整桌面/GLES 验收由 `tools/lemonade-check-gpu.py LOG --output REPORT` 独立检查：必须同时满足精确 kernel/run manifest、日志哈希、36 项 init 检查、CoreAnimation 的 FD660 上下文、三角形 shader 像素回读和完成的 GPU fence。只启动 GPU 或只显示桌面均不通过。
+详细记录在 `local/lemonade/gpu-validation.json` 与各次运行的日志和 manifest。完整桌面/GLES 验收由 `devices/oneplus-9/tools/lemonade-check-gpu.py LOG --output REPORT` 独立检查：必须同时满足精确 kernel/run manifest、日志哈希、36 项 init 检查、CoreAnimation 的 FD660 上下文、三角形 shader 像素回读和完成的 GPU fence。只启动 GPU 或只显示桌面均不通过。
 
 参考实现：[Linux v6.12 a6xx GPU](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/msm/adreno/a6xx_gpu.c)、[SM8350 GPUCC](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/qcom/gpucc-sm8350.c)、[OnePlus SM8350 内核](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/tree/oneplus/SM8350_R_11.0)。
 
@@ -218,18 +218,18 @@ python3 tools/lemonade-usb.py reboot
 
 实机只读频率表：`1792711142-run-cp0.log`；请求及三组原值恢复：`1792711173-run-cp0.log`。寄存器布局参考 [Linux/Android EPSS 驱动](https://android.googlesource.com/kernel/common/+/refs/tags/android14-5.15-2024-11_r10/drivers/cpufreq/qcom-cpufreq-hw.c) 和原机 FDT。
 
-性能工作负载为 `common/devices/lemonade-perf.rc.jobs` 的 24 次固定虚拟手势。`--metrics` 使用 `touch_lat=2`（保留输入、GPU 绘制和呈现时间，不启用 SpringBoard 每次主循环的 `tl: a` 日志），在 X1 启动模式下每 10 秒从常驻 loader 保存一次日志，防止内核环形日志覆盖中段动画。`tools/lemonade-perf-report.py` 校验这些日志的 SHA-256 后去重合并，统计按下到松开后 600 ms 的固定窗口；所有超过 100 ms 的间隔均保留，同时单独报告手指按下期间的间隔。记录的是帧缓冲完成时间，不是光学测得的面板扫描时刻。`queue_and_gpu` 包括呈现排队，不能把它全部解释为 GPU 执行时间。
+性能工作负载为 `devices/oneplus-9/lemonade-perf.rc.jobs` 的 24 次固定虚拟手势。`--metrics` 使用 `touch_lat=2`（保留输入、GPU 绘制和呈现时间，不启用 SpringBoard 每次主循环的 `tl: a` 日志），在 X1 启动模式下每 10 秒从常驻 loader 保存一次日志，防止内核环形日志覆盖中段动画。`devices/oneplus-9/tools/lemonade-perf-report.py` 校验这些日志的 SHA-256 后去重合并，统计按下到松开后 600 ms 的固定窗口；所有超过 100 ms 的间隔均保留，同时单独报告手指按下期间的间隔。记录的是帧缓冲完成时间，不是光学测得的面板扫描时刻。`queue_and_gpu` 包括呈现排队，不能把它全部解释为 GPU 执行时间。
 
 ```sh
 # 构建固定手势测试镜像：
 docker exec -e THEOS=/work/local/lemonade/toolchain/theos \
-  -e LEMONADE_JOBS=../common/devices/lemonade-perf.rc.jobs \
-  hackios-lemonade-env bash tools/lemonade-build-images.sh
+  -e LEMONADE_JOBS=../devices/oneplus-9/lemonade-perf.rc.jobs \
+  hackios-lemonade-env bash devices/oneplus-9/tools/lemonade-build-images.sh
 
 # 先按前述步骤 boot + ramdisk，再执行：
-python3 tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 7 \
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --boot-cpu 7 --cpus 7 \
   --cpu-policy balanced --gpu --userland --metrics --seconds 170
-python3 tools/lemonade-perf-report.py local/lemonade/RUN-run-cp0.log --output REPORT.json
+python3 devices/oneplus-9/tools/lemonade-perf-report.py local/lemonade/RUN-run-cp0.log --output REPORT.json
 ```
 
 ### 最终实测结果（2026-10-23 07:52）
@@ -259,13 +259,13 @@ GLES bridge 的整帧导出现在会临时关闭 `GL_SCISSOR_TEST`，完成 `glB
 
 ```sh
 # 先取得目标手机租约；从原 Android 开始：
-python3 tools/lemonade-usb.py boot
-python3 tools/lemonade-usb.py ramdisk
-python3 tools/lemonade-usb.py run --profile performance
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance
 # 默认运行 300 秒并返回 loader；可加 --seconds 90 缩短。
-python3 tools/lemonade-usb.py screenshot
-python3 tools/lemonade-usb.py reboot
-python3 tools/lemonade-verify-android.py
+python3 devices/oneplus-9/tools/lemonade-usb.py screenshot
+python3 devices/oneplus-9/tools/lemonade-usb.py reboot
+python3 devices/oneplus-9/tools/lemonade-verify-android.py
 ```
 
 此配置展开为已适配内核、`bootcpu=7 cpus=4 cpufreq=1 gpu=1` 和用户空间，并保留 UFS 写入等关闭状态。内核校验、CPU 策略能力标记、镜像校验和设备身份仍须通过；它不能与不匹配的手动 CPU/内核参数混用。返回核验脚本只选择身份哈希匹配的 USB 设备，等待 Android 启动完成，再核对机型、原槽、解锁状态和五个活动启动分区哈希，不覆写原始基线。核验完成后才释放租约。这组性能基准使用虚拟输入。后续已完成的 S6SY792 基础实体触控见文末触控适配章节；其他外设和完整电源管理仍待移植。
@@ -340,14 +340,14 @@ DPU 的 QSEED 参数和 PP0 完成判断、图层合成与双缓冲所有权，�
 | S6SY792 原始事件不能直接交给 iOS | [协议解码](../xnu/files/bsd/dev/lemonade_touch_protocol.h)处理触点编号、坐标及按下/移动/抬起，接入 `/dev/redwood-touch` 与 backboardd HID 桥；实体单指操作证据见下文 |
 
 ```bash
-python3 tools/lemonade-usb.py boot
-python3 tools/lemonade-usb.py ramdisk
-python3 tools/lemonade-usb.py run --profile performance --touch on --metrics
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance --touch on --metrics
 ```
 
 当前实机证据：`1792713763-run-cp0.log` 的只读探测通过；`1792714060-run-cp0.log` 读回 ID `53 45 37`、应用模式 `20`、完整性 `80`、固件 `28240121`，扫描开启后无 I²C 错误。随后五分钟 GPU 联调完成：实测 3 次实体按下、101 个移动采样、3 次抬手，最后无残留触点，I²C 错误和异常数据包均为 0。真实点击打开了“设置”，继续操作后到达“通知”页面，帧缓冲截图已人工查看。触控检查器与 GPU 的 10 项检查均通过。最高 GPU 温度 52.3°C，退出后 CPU 策略行恢复为 12/0/0。证据为 `local/lemonade/touch-validation.json` 和 `1792714390-run-cp0.log`。多指、底部返回手势、睡眠唤醒尚未单独验收，主观手感仍待用户反馈。
 
-协议边界检查位于 `tools/test-lemonade-touch.c`；USB 选择及能力保护共 23 项主机测试通过。硬件摘要和固定版本源码清单位于私有目录的 `touch-hardware-summary.json`、`touch-references/sources.json`。
+协议边界检查位于 `devices/oneplus-9/tools/test-lemonade-touch.c`；USB 选择及能力保护共 23 项主机测试通过。硬件摘要和固定版本源码清单位于私有目录的 `touch-hardware-summary.json`、`touch-references/sources.json`。
 
 协议参考：[OnePlus S6SY792 驱动](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/13ca08fdf0979fdd61d5e8991661874bb2d19150/techpack/oneplus/input/OneplusTouchScreen/samsung/s6sy792/sec_drivers_s6sy792.c)、[事件布局](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8350/blob/13ca08fdf0979fdd61d5e8991661874bb2d19150/techpack/oneplus/input/OneplusTouchScreen/samsung/s6sy792/sec_drivers_s6sy792.h)、同版本 `pinctrl-lahaina.c`、`gcc-lahaina.c` 和 `rpmh-rsc.c`。
 

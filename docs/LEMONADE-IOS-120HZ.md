@@ -61,30 +61,30 @@ iOS 16.5 的系统显示模式、UIKit 帧回调和实际变化画面的 DPU 输
 先按 [移植环境](LEMONADE.md) 配置本机基线、Docker 工具链、Metal/AIR 依赖与合法取得的
 iOS 16.5 镜像。下面是在既有环境中使用本分支的命令；不会替换原 base 发布包。
 两个仓库均使用 `codex/lemonade-120hz`，配对版本见
-[`lemonade.sources.json`](../common/devices/lemonade.sources.json)。新建配套 checkout 时显式设置
+[`lemonade.sources.json`](../devices/oneplus-9/sources.json)。新建配套 checkout 时显式设置
 `USERLAND_REF=codex/lemonade-120hz`，`common/setup.sh` 的默认值仍是 `main`。
 
 ```sh
 docker exec hackios-lemonade-env bash -lc \
-  'cd /work && JOBS=8 tools/lemonade-build-kernel.sh'
+  'cd /work && JOBS=8 devices/oneplus-9/tools/lemonade-build-kernel.sh'
 docker exec -e THEOS=/work/local/lemonade/toolchain/theos hackios-lemonade-env bash -lc \
-  'cd /work && bash tools/lemonade-build-metal.sh && bash tools/lemonade-build-refresh-app.sh'
-python3 tools/lemonade-build-graphics-image.py --system-metal
-python3 tools/lemonade-build-refresh-image.py
+  'cd /work && bash devices/oneplus-9/tools/lemonade-build-metal.sh && bash devices/oneplus-9/tools/lemonade-build-refresh-app.sh'
+python3 devices/oneplus-9/tools/lemonade-build-graphics-image.py --system-metal
+python3 devices/oneplus-9/tools/lemonade-build-refresh-image.py
 ```
 
 取得设备独占租约，在原 Android 中核对面板后从 RAM 启动加载器。工具要求宿主直接访问 USB。
 
 ```sh
-python3 tools/lemonade-usb.py panel
-python3 tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py panel
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
 # 等 USB 加载器枚举完成，status 应显示 xnuloader
-python3 tools/lemonade-usb.py status
-python3 tools/lemonade-usb.py ramdisk --refresh-test
-python3 tools/lemonade-usb.py run --profile performance \
+python3 devices/oneplus-9/tools/lemonade-usb.py status
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk --refresh-test
+python3 devices/oneplus-9/tools/lemonade-usb.py run --profile performance \
   --display direct --display-hz 120 --display-fences --metal-system desktop \
   --refresh-test --metrics --touch on --seconds 100
-python3 tools/lemonade-check-ios-refresh.py local/lemonade/<运行编号>-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-check-ios-refresh.py local/lemonade/<运行编号>-run-cp0.log
 ```
 
 此验收入口会自动打开 Refresh 应用，完成两阶段动画，然后回到 SpringBoard 做滑动。
@@ -97,8 +97,8 @@ python3 tools/lemonade-check-ios-refresh.py local/lemonade/<运行编号>-run-cp
 为准。返回 Android 后再核对：
 
 ```sh
-python3 tools/lemonade-usb.py reboot
-python3 tools/lemonade-verify-android.py
+python3 devices/oneplus-9/tools/lemonade-usb.py reboot
+python3 devices/oneplus-9/tools/lemonade-verify-android.py
 ```
 
 ## 验证与边界

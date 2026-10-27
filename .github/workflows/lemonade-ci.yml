@@ -24,8 +24,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Fetch pinned userland
-        run: python3 tools/ci/checkout-userland.py
+      - name: Verify monorepo checkout
+        run: python3 tools/ci/check-source.py
       - name: Install sanitizer runtime
         run: |
           sudo apt-get update
@@ -34,23 +34,23 @@ jobs:
         run: |
           set -euo pipefail
           for suite in display-composite display-pipeline display-fences display-resume display-stop gpu-return dma-pool refresh base usb wifi check-direct check-display check-fences check-ios-refresh check-refresh network verify-android; do
-            python3 "tools/test-lemonade-${suite}.py"
+            python3 "devices/oneplus-9/tools/test-lemonade-${suite}.py"
           done
-          python3 tools/test-lemonade-ci.py
+          python3 devices/oneplus-9/tools/test-lemonade-ci.py
           python3 tools/test-upstream-net.py
           bash tools/qmi-test/run.sh
           bash tools/qmi-test/run-nas.sh
           bash tools/soc-args-test.sh
           python3 tools/test-upstream-tools.py
-          bash tools/test-lemonade-bluetooth.sh
+          bash devices/oneplus-9/tools/test-lemonade-bluetooth.sh
           python3 userland/tests/test_jb_setid_manifest.py
-          clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-touch.c -o /tmp/touch-test
+          clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev devices/oneplus-9/tools/test-lemonade-touch.c -o /tmp/touch-test
           /tmp/touch-test
-          clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev tools/test-lemonade-mhi.c -o /tmp/mhi-test
+          clang -Wall -Wextra -Werror -Ixnu/files/bsd/dev devices/oneplus-9/tools/test-lemonade-mhi.c -o /tmp/mhi-test
           /tmp/mhi-test
-          clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined tools/test-lemonade-battery.c xnuloader/lemonade_battery.c -o /tmp/battery-test
+          clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined devices/oneplus-9/tools/test-lemonade-battery.c xnuloader/lemonade_battery.c -o /tmp/battery-test
           /tmp/battery-test
-          python3 tools/test-lemonade-battery-service.py
+          python3 devices/oneplus-9/tools/test-lemonade-battery-service.py
 
   metal-tests:
     runs-on: macos-14
@@ -59,13 +59,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Fetch pinned userland
-        run: python3 tools/ci/checkout-userland.py
+      - name: Verify monorepo checkout
+        run: python3 tools/ci/check-source.py
       - name: Test Metal ownership and asynchronous completion
         run: |
-          python3 tools/test-lemonade-metal-lifetime.py
-          python3 tools/test-lemonade-metal-completion.py
-          bash tools/test-lemonade-bluetooth.sh
+          python3 devices/oneplus-9/tools/test-lemonade-metal-lifetime.py
+          python3 devices/oneplus-9/tools/test-lemonade-metal-completion.py
+          bash devices/oneplus-9/tools/test-lemonade-bluetooth.sh
 
   build:
     needs: [linux-tests, metal-tests]
@@ -84,8 +84,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang lld llvm uuid-dev liblz4-dev pkg-config cmake rsync unzip git ca-certificates gawk flex bison m4 autoconf automake libtool libxml2-dev libssl-dev libncurses-dev zlib1g-dev libzstd-dev python3-venv python3-dev python3-setuptools meson ninja-build curl xz-utils patch
-      - name: Fetch pinned userland
-        run: python3 tools/ci/checkout-userland.py
+      - name: Verify monorepo checkout
+        run: python3 tools/ci/check-source.py
       - name: Compile and package generic components
         run: bash tools/ci/build-lemonade.sh
 
@@ -108,8 +108,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang lld llvm uuid-dev liblz4-dev pkg-config cmake rsync unzip git ca-certificates gawk flex bison m4 autoconf automake libtool libxml2-dev libssl-dev libncurses-dev zlib1g-dev libzstd-dev python3-venv python3-dev python3-setuptools meson ninja-build curl xz-utils patch
-      - name: Fetch pinned userland
-        run: python3 tools/ci/checkout-userland.py
+      - name: Verify monorepo checkout
+        run: python3 tools/ci/check-source.py
       - name: Compile and package generic components
         run: bash tools/ci/build-lemonade.sh
       - name: Publish commit-specific prerelease

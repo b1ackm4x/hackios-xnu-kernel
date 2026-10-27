@@ -20,7 +20,7 @@
 | [`lemonade_battery.h`](../xnu/files/bsd/sys/lemonade_battery.h) | 固定版本/长度、成功采样序号、generation、时间戳、逐字段有效性；保留零电量/零循环；错误或重复样本不能延长有效期 |
 | [`bsd/dev/lemonade_battery.c`](../xnu/files/bsd/dev/lemonade_battery.c) | 仅 lemonade 且显式启用时消费缓存；校验平台、地址、协议和读数；15 秒过期；提供 `kern.lemonade_battery.*` 诊断 |
 | [`RedwoodBattery.cpp`](../xnu/files/iokit/Kernel/RedwoodBattery.cpp) | 复用原生电源服务类，注册名为 `LemonadeBattery`；清除缺失/过期属性并通知订阅者；恢复后更新同一服务；保留 Redwood 原路径 |
-| [`lemonade-usb.py`](../tools/lemonade-usb.py) | 增加 `battery` 单次查询和显式 `run --battery`；要求适配内核与非零启动核，保留 core 0 的固件上下文 |
+| [`lemonade-usb.py`](../devices/oneplus-9/tools/lemonade-usb.py) | 增加 `battery` 单次查询和显式 `run --battery`；要求适配内核与非零启动核，保留 core 0 的固件上下文 |
 
 唯一的 gauge 命令数据写入是 `Control(DEVICE_TYPE)`（`0x00` / `0x0001`）查询；正常采样只有标准寄存器读。没有 unseal、复位、校准、数据闪存、充电启停或快充命令。型号不符时停止，不继续尝试其他地址或总线。充电状态由 `ChargerEx` 的外接电源查询与 BQ28Z610 的只读 `BatteryStatus()`（`0x0a`）共同提供；净电流仅作遥测，不用其正负抖动判断充电。
 
@@ -37,22 +37,22 @@
 已通过的本地主机验证：
 
 ```sh
-python3 tools/check-lemonade-battery-firmware.py
+python3 devices/oneplus-9/tools/check-lemonade-battery-firmware.py
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  tools/test-lemonade-battery.c xnuloader/lemonade_battery.c -o /tmp/lemonade-battery-test
+  devices/oneplus-9/tools/test-lemonade-battery.c xnuloader/lemonade_battery.c -o /tmp/lemonade-battery-test
 /tmp/lemonade-battery-test
-python3 tools/test-lemonade-battery-service.py
-python3 tools/test-lemonade-usb.py
-python3 tools/test-lemonade-ci.py
+python3 devices/oneplus-9/tools/test-lemonade-battery-service.py
+python3 devices/oneplus-9/tools/test-lemonade-usb.py
+python3 devices/oneplus-9/tools/test-lemonade-ci.py
 ```
 
 前两个电池测试直接执行生产采集模块和生产 IOKit 适配代码，替代的是硬件/IOKit 环境；覆盖异常、单位、失效、属性删除、通知和恢复，**不验证真实芯片、powerd 或 SpringBoard**。测试已加入 CI 配置；这里记录的是本地执行结果。loader、内核与个人设备的 loader-only Android v3 镜像均已构建，产物在 `out/`。随后已在这台手机上执行 RAM 启动验证，未刷写分区。
 
-本轮 Android 实机核对了 `6-0055` 的 `bq27541-battery` 绑定、`i2c@988000` 路径和原厂日志中的 `DEVICE_TYPE=0xffa5`，基准电量为 98%。临时 loader 查询回同一型号与 98% SOC，整包电压约 8.67 V。iOS 运行中读数贯通原生服务；诊断程序 [`lemonade-battery-test.c`](../tools/lemonade-battery-test.c) 只读取白名单电源属性，不操作充电器。
+本轮 Android 实机核对了 `6-0055` 的 `bq27541-battery` 绑定、`i2c@988000` 路径和原厂日志中的 `DEVICE_TYPE=0xffa5`，基准电量为 98%。临时 loader 查询回同一型号与 98% SOC，整包电压约 8.67 V。iOS 运行中读数贯通原生服务；诊断程序 [`lemonade-battery-test.c`](../devices/oneplus-9/tools/lemonade-battery-test.c) 只读取白名单电源属性，不操作充电器。
 
 实机联调修复了两项问题：首次地址 NACK 只重试型号查询，最多三次；UEFI 的 PE 重定位可能使缓存地址仅按 4 KiB 对齐，内核按实际 4 KiB 地址校验并映射包含它的 16 KiB 页面。对应异常和实际地址均补入回归测试。
 
-维护者可用 `python3 tools/lemonade-usb.py battery` 单次查询；`run --kernel built --boot-cpu 7 --cpus 1 --battery --seconds 90` 启用有时限的内核采集。在活动的电量会话中，`battery --battery-sampling pause` / `resume` 只暂停或恢复 RAM 中的采样调度，用来验证 15 秒过期和恢复，不修改电量计或充电器。
+维护者可用 `python3 devices/oneplus-9/tools/lemonade-usb.py battery` 单次查询；`run --kernel built --boot-cpu 7 --cpus 1 --battery --seconds 90` 启用有时限的内核采集。在活动的电量会话中，`battery --battery-sampling pause` / `resume` 只暂停或恢复 RAM 中的采样调度，用来验证 15 秒过期和恢复，不修改电量计或充电器。
 
 ### 本轮真机验收与边界
 
@@ -90,7 +90,7 @@ python3 tools/test-lemonade-ci.py
 | 配套用户空间 | `dc773d94ce482d9b544accd62d82a5d1f8457e44` | `powerd` 启动配置、原生电池界面、维护者诊断程序 | 本机 `powerd` 已收到有效电池数据 |
 | HackiOS 内核上游 | `d82c64a3a31cd27a0a0afbf6e213e467e44b1b4c` | Redwood 的 UEFI 缓存、ADSP 电池查询、IOKit 服务 | Redwood 的寄存器、协议布局适用于一加 9 |
 | HackiOS 用户空间上游 | `a79ff0772a3454fd1ef127e181e5b3bce6c9ce18` | 电池展示和诊断入口 | 存在可直接安装的一加 9 电池驱动 |
-| Mu-Silicium | `e51cd877e31c8fbb322032dc4cb6715e83d25ad3`，见 `uefi/BASE` | lemonade 配置已列入 I²C、PMIC GLINK、Charger DXE 模块 | 协议已在本次运行中发布，或其电量值真实、持续更新 |
+| Mu-Silicium | `e51cd877e31c8fbb322032dc4cb6715e83d25ad3`，见 `devices/poco-x5-pro/uefi/BASE` | lemonade 配置已列入 I²C、PMIC GLINK、Charger DXE 模块 | 协议已在本次运行中发布，或其电量值真实、持续更新 |
 | OnePlus 原厂内核 | `13ca08fdf0979fdd61d5e8991661874bb2d19150` | 对应 SM8350 的电量计、充电模块、设备树 | 与本机当前 Android 固件完全相同；Linux 驱动可直接由 XNU 加载 |
 
 本机完整运行状态以 [README](../README.md) 和 [base 验收记录](LEMONADE-BASE-120HZ.md) 为准。早期 [日常使用路线图](DAILY-USE-ROADMAP.md) 中的显示、Wi-Fi 状态是历史快照。
@@ -248,7 +248,7 @@ flowchart LR
 | 拟 `xnu/files/bsd/dev/lemonade_i2c.c` | 确需直接读 gauge 时增加总线实现、互斥、超时与恢复 |
 | `xnu/files/bsd/dev/redwood_battery.c` | 分离采样源与公共上报；修正来源被固定写成 DSP 的问题 |
 | `xnu/files/iokit/Kernel/RedwoodBattery.cpp` | 逐字段有效性、未知/过期/零值、充满与外接电源语义 |
-| `common/devices/lemonade.conf`、base 构建与启动工具 | 通过能力检查后启用电池；未通过的固件路径不进入默认运行包 |
+| `devices/oneplus-9/device.conf`、base 构建与启动工具 | 通过能力检查后启用电池；未通过的固件路径不进入默认运行包 |
 | `userland/src/battery_test.c` 与维护者测试配置 | 观察 IOPS/IORegistry/数据源；与普通用户包分离 |
 | 后续 SM8350 ADSP/GLINK 模块 | 在阶段 C 确有需要时拆分实现；不把 Redwood 地址改名后直接复用 |
 

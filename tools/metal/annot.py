@@ -29,7 +29,7 @@ import subprocess
 import sys
 
 CACHE = os.environ.get(
-    "DSC", os.path.join(os.path.dirname(__file__), "..", "..", "ios165",
+    "DSC", os.path.join(os.path.dirname(__file__), "..", "..", "sysimage",
                         "20F66__iPhone10,3_6", "dyld_shared_cache_arm64"))
 MEMO = os.environ.get("ANNOT_CACHE", "/tmp/claude-1000/annot-memo.json")
 

@@ -1,6 +1,4 @@
-# A whitelist: the working tree also holds gigabytes of downloads, build output, logs, third-party
-# clones, files of iOS and the hackios-xnu-userland checkout (common/setup.sh), none of which belongs
-# in this repository. Nothing is tracked unless it is named here.
+# Source whitelist; downloads, device files and build products stay local.
 /*
 !/.gitignore
 !/README.md
@@ -16,7 +14,7 @@
 !/tools/
 !/xnu/
 !/xnu-deps/
-!/uefi/
+!/devices/poco-x5-pro/uefi/
 !/prebuilt/
 !/wifi/
 !/.github/
@@ -25,21 +23,6 @@ __pycache__/
 *~
 *.orig
 *.rej
-
-# hackios-xnu-userland's files share this working tree (common/setup.sh)
-/docs/air.md
-/docs/air-report.md
-/prebuilt/userland/
-/tools/apfs/
-/tools/air/
-/tools/mesa/
-/tools/metal/
-/tools/mk-mesa.sh
-/tools/mk-jb.sh
-/tools/jb-preinstall.py
-/tools/jb-setid-manifest.py
-/tools/font_trim.py
-/tools/metallib.py
 
 /xnuloader/*
 !/xnuloader/build.sh
@@ -92,9 +75,9 @@ __pycache__/
 /out/
 /logs/
 /fw-*/
-/ios165/rootfs/
-/ios165/*.ipsw
-/ios165/*.dmg
+/sysimage/rootfs/
+/sysimage/*.ipsw
+/sysimage/*.dmg
 /userland/root/
 /userland/obj/
 /userland/*.apfs
@@ -103,3 +86,22 @@ __pycache__/
 !.env.example
 *.pem
 *.key
+
+# System extraction and userland outputs are never implicitly tracked.
+/sysimage/*
+!/sysimage/fetch.sh
+!/sysimage/*.py
+/userland/*
+!/userland/build.sh
+!/userland/*.py
+!/userland/rc.*
+!/userland/com.redwood.*.plist
+!/userland/src/
+!/userland/libmini/
+!/userland/var/
+!/userland/tests/
+!/userland/UPSTREAM-SYNC.md
+/devices/oneplus-9/prebuilt/
+/devices/*/local/
+/devices/*/out/
+/devices/*/uefi/Mu-Silicium/

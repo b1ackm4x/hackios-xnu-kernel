@@ -85,21 +85,21 @@ UIKit 和 Core Animation 真机验证，当前使用方法见 [默认 120 Hz bas
 确保宿主能直接访问 USB fastboot。`panel` 仅保留面板名和哈希，不保存原始命令行。
 
 ```sh
-python3 tools/lemonade-usb.py panel
-docker exec hackios-lemonade-env bash -lc 'cd /work && JOBS=8 tools/lemonade-build-kernel.sh'
-python3 tools/lemonade-usb.py boot
+python3 devices/oneplus-9/tools/lemonade-usb.py panel
+docker exec hackios-lemonade-env bash -lc 'cd /work && JOBS=8 devices/oneplus-9/tools/lemonade-build-kernel.sh'
+python3 devices/oneplus-9/tools/lemonade-usb.py boot
 # 等加载器 USB 枚举完成；status 应显示 xnuloader
-python3 tools/lemonade-usb.py status
-python3 tools/lemonade-usb.py ramdisk
-python3 tools/lemonade-usb.py run --kernel built --userland --display manual \
+python3 devices/oneplus-9/tools/lemonade-usb.py status
+python3 devices/oneplus-9/tools/lemonade-usb.py ramdisk
+python3 devices/oneplus-9/tools/lemonade-usb.py run --kernel built --userland --display manual \
   --display-hz 120 --display-flips 1000 --seconds 20
-python3 tools/lemonade-check-refresh.py local/lemonade/<运行编号>-run-cp0.log
+python3 devices/oneplus-9/tools/lemonade-check-refresh.py local/lemonade/<运行编号>-run-cp0.log
 ```
 
 首次调试可省略 `--display-flips 1000`，运行 64 帧短测；验收器要求完整的 1000 帧。
 回滚测试另加 `--display-return-test --seconds 6`，检查器另加 `--interrupted`。
 随后在同一加载器运行 `--display irq --seconds 12` 复测 60 Hz，再用 `reboot` 返回 Android，
-运行 `tools/lemonade-verify-android.py` 核对关键分区。
+运行 `devices/oneplus-9/tools/lemonade-verify-android.py` 核对关键分区。
 
 主机验证包括 51 项 USB 范围与身份检查、17 组原显示恢复测试、5 组真实 C 的 DSI FIFO／
 超时／中断恢复模拟，以及 5 项帧率证据反例检查。C 测试使用 ASan/UBSan；内核已实际编译。

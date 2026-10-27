@@ -70,7 +70,7 @@ fi
 W=$ROOT/wifi/lx
 ATH_SOURCE=src
 if [ "${LEMONADE_WIFI:-0}" = 1 ]; then
-	python3 "$ROOT/tools/lemonade-ath11k-profile.py" "$B/src" "$B/src-lemonade"
+	python3 "$ROOT/devices/oneplus-9/tools/lemonade-ath11k-profile.py" "$B/src" "$B/src-lemonade"
 	ATH_SOURCE=src-lemonade
 fi
 

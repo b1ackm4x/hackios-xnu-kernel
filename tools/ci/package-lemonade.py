@@ -75,9 +75,8 @@ def check_outputs(root):
         raise ValueError('Loader must be generic, without a per-phone USB identity')
 
 
-def git(*args, userland=False):
-    prefix = ['git'] if not userland else ['bash', 'common/ugit']
-    return subprocess.check_output(prefix + list(args), cwd=ROOT, text=True).strip()
+def git(*args):
+    return subprocess.check_output(['git', *args], cwd=ROOT, text=True).strip()
 
 
 
@@ -90,16 +89,12 @@ def module(name, path):
 
 def main():
     check_outputs(ROOT)
-    kernel = git('rev-parse', 'HEAD')
-    userland = git('rev-parse', 'HEAD', userland=True)
-    paired = json.loads((ROOT / 'common/devices/lemonade.sources.json').read_text())
-    if userland != paired['userland']['commit']:
-        raise SystemExit('The userland checkout is not the pinned revision')
-    if git('status', '--porcelain', '--untracked-files=no') or git('status', '--porcelain', '--untracked-files=no', userland=True):
+    source = git('rev-parse', 'HEAD')
+    if git('status', '--porcelain', '--untracked-files=no'):
         raise SystemExit('Refusing to label modified tracked sources with a clean commit SHA')
     output = ROOT / 'out/ci-release'
     output.mkdir(parents=True, exist_ok=True)
-    name = 'lemonade-ci-' + kernel[:12]
+    name = 'lemonade-ci-' + source[:12]
     folder = output / name
     folder.mkdir(exist_ok=False)
     for relative in FILES:
@@ -111,12 +106,12 @@ def main():
     (folder / 'loader').mkdir()
     shutil.copyfile(ROOT / 'xnuloader/loader.efi', folder / 'loader/loader.efi')
     (folder / 'sources').mkdir()
-    for label, command in (('kernel', ['git']), ('userland', ['bash', 'common/ugit'])):
-        subprocess.run(command + ['archive', '--format=tar.gz', '-o',
-                       str(folder / 'sources' / (label + '.tar.gz')), 'HEAD'], cwd=ROOT, check=True)
+    subprocess.run(['git', 'archive', '--format=tar.gz', '-o',
+                    str(folder / 'sources/source.tar.gz'), 'HEAD'], cwd=ROOT, check=True)
     (folder / 'licenses').mkdir()
     for source, target in (
         ('LICENSE', 'project.txt'),
+        ('licenses/userland-MIT.txt', 'userland-MIT.txt'),
         ('xnu-src/xnu-8796.121.2/APPLE_LICENSE', 'xnu-apple.txt'),
         ('xnu-deps/build/ath11k/freebsd/COPYRIGHT', 'freebsd.txt'),
         ('xnu-deps/build/mesa/mesa-25.0.7/docs/license.rst', 'mesa.txt'),
@@ -128,7 +123,8 @@ def main():
     files = {p.relative_to(folder).as_posix(): {'sha256': digest(p), 'bytes': p.stat().st_size}
              for p in sorted(folder.rglob('*')) if p.is_file()}
     manifest = {
-        'profile': 'lemonade-public-build-v1', 'kernel_commit': kernel, 'userland_commit': userland,
+        'profile': 'lemonade-public-build-v2', 'source_commit': source,
+        'source_layout': 'monorepo',
         'target': 'OnePlus 9 lemonade / ARM64 components', 'build_host': platform.machine(),
         'run_url': os.environ.get('LEMONADE_CI_RUN_URL', ''),
         'hardware_verified': False, 'bootable_image_included': False,

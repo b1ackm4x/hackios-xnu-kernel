@@ -61,7 +61,7 @@ AIR2NIR = os.environ.get(
 IR3 = os.environ.get(
     "IR3", os.path.join(ROOT, "build/mesa-host/build/src/gallium/drivers/freedreno/ir3_compiler"))
 CHIP_ID = os.environ.get("AIR_CHIP_ID", "0x007506030500")
-IOS = os.environ.get("IOS", os.path.join(ROOT, "ios165"))
+IOS = os.environ.get("IOS", os.path.join(ROOT, "sysimage"))
 QUARTZCORE = os.path.join(
     IOS, "rootfs/System/Library/Frameworks/QuartzCore.framework/default.metallib")
 

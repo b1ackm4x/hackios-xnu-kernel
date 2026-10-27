@@ -44,10 +44,10 @@ AIR_RUN = os.environ.get(
     os.path.join(ROOT, "build/mesa-host/build/src/gallium/drivers/freedreno/air_run"))
 
 LIBS = [
-    "ios165/rootfs/System/Library/VideoDecoders/AV1SW.metallib",
-    "ios165/rootfs/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib",
-    "ios165/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/default.metallib",
-    "ios165/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/portrait_filters.metallib",
+    "sysimage/rootfs/System/Library/VideoDecoders/AV1SW.metallib",
+    "sysimage/rootfs/System/Library/Extensions/AppleMetalGLRenderer.bundle/default.metallib",
+    "sysimage/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/default.metallib",
+    "sysimage/rootfs/System/Library/CoreImage/PortraitFilters.cifilter/portrait_filters.metallib",
 ]
 
 # One row per cause, in the order a reader wants them: what works, then what is
