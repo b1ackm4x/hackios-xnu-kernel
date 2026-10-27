@@ -1,0 +1,16 @@
+Preserve shared/scanout/coherent flags for buffer resources as well as images.
+The conditional operator must be parenthesized before OR-ing additional flags;
+otherwise a small shared buffer is suballocated and cannot be exported as a
+texture view for GPU buffer-to-texture transfers.
+
+--- a/src/gallium/drivers/freedreno/freedreno_resource.c
++++ b/src/gallium/drivers/freedreno/freedreno_resource.c
+@@ -190,7 +190,7 @@
+    struct pipe_resource *prsc = &rsc->b.b;
+    struct fd_screen *screen = fd_screen(prsc->screen);
+    uint32_t flags =
+-      (prsc->target == PIPE_BUFFER) ? FD_BO_HINT_BUFFER : FD_BO_HINT_IMAGE |
++      ((prsc->target == PIPE_BUFFER) ? FD_BO_HINT_BUFFER : FD_BO_HINT_IMAGE) |
+       COND(rsc->layout.tile_mode, FD_BO_NOMAP) |
+       COND((prsc->usage & PIPE_USAGE_STAGING) &&
+            (prsc->flags & PIPE_RESOURCE_FLAG_MAP_COHERENT),
