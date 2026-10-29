@@ -58,6 +58,12 @@ static void views(UIView *view, unsigned depth, unsigned *budget) {
     (*budget)--;
     say("bt-ui: view depth=%u class=%s hidden=%d size=%.0fx%.0f\n", depth,
         NSStringFromClass(view.class).UTF8String, view.hidden, view.bounds.size.width, view.bounds.size.height);
+    /* A controlled BLE fixture is visible in Settings without a classic
+     * BluetoothManager discovery notification. Match only our public test name;
+     * do not print arbitrary view text or nearby device identities. */
+    if ([view isKindOfClass:UILabel.class] && !view.hidden && view.alpha > 0 && view.window &&
+            [((UILabel *)view).text isEqualToString:@"Lemonade Test"])
+        say("bt-ui: controlled_ble_fixture_visible=1\n");
     if ([view isKindOfClass:UITableView.class]) {
         UITableView *table = (UITableView *)view;
         NSInteger sections = table.numberOfSections;

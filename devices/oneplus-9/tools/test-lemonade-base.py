@@ -418,6 +418,15 @@ class BasePolicy(unittest.TestCase):
                'wifi-lemonade: station offered to iOS; runtime kept until normal stop\n')
         ready+=''.join(f'bt-client: state tick={i} powered=1 available=1 discovery_reports=1\n' for i in range(14))
         self.assertTrue(validator.discovery_evidence(ready)['passed'])
+        ble=ready.replace('discovery_reports=1','discovery_reports=0')
+        fixture='bt-ui: controlled_ble_fixture_visible=1\n'
+        self.assertTrue(validator.discovery_evidence(ble+fixture)['passed'])
+        for text in (ble+'bt-ui: controlled_ble_fixture_visible=0\n',
+                     ble.replace('rows=1','rows=0')+fixture,
+                     ble.replace('BTSDevicesController','OtherController')+fixture,
+                     ble.replace('state=0','state=2')+fixture,
+                     ble.replace('powered=1','powered=0')+fixture):
+            with self.subTest(text=text):self.assertFalse(validator.discovery_evidence(text)['passed'])
         for before, after in (('rows=1','rows=0'),('discovery_reports=1','discovery_reports=0'),
                               ('powered=1','powered=0'),('clean=1','clean=0'),
                               ('BTSDevicesController','OtherController'),('state=0','state=2'),

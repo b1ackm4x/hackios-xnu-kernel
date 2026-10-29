@@ -23,18 +23,21 @@ build, launch = validation.build, validation.launch
 
 def discovery_evidence(text):
     bluetooth = validation.bluetooth_evidence(text)
+    classic = bool(re.search(r'bt-client: state tick=\d+ powered=1 available=1 discovery_reports=[1-9]\d*', text))
+    fixture = 'bt-ui: controlled_ble_fixture_visible=1\n' in text
     checks = dict(bluetooth['checks'])
     checks.update({
         'original_settings_controller': 'class=BTSDevicesController loaded=1' in text,
         'settings_foreground': bool(re.search(r'bt-ui: main queue tick=\d+ state=0 scenes=1', text)),
         'visible_device_row': bool(re.search(r'bt-ui: table section=1 rows=[1-9]\d*', text)),
-        'native_discovery_notification': bool(re.search(r'bt-client: state tick=\d+ powered=1 available=1 discovery_reports=[1-9]\d*', text)),
+        'native_discovery_observed': classic or fixture,
         'wifi_station_enabled': 'wifi-lemonade: stage 24 passed;' in text and
             'wifi-lemonade: station offered to iOS; runtime kept until normal stop' in text,
         'native_service_stable': not re.search(r'com.apple.bluetoothd.*exited', text),
         'no_kernel_panic': not re.search(r'panic\(cpu|Debugger called: <panic>|Debugger message:\s*panic', text),
     })
-    return {'passed': all(checks.values()), 'checks': checks}
+    return {'passed': all(checks.values()), 'checks': checks,
+            'discovery_paths': {'classic_notification': classic, 'controlled_ble_fixture_in_settings': fixture}}
 
 
 def main():
