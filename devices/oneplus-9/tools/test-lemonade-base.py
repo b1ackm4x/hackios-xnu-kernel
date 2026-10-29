@@ -223,7 +223,7 @@ class BasePolicy(unittest.TestCase):
         for action,user in (('bootstrap','root'),('install','mobile')):
             label='org.lemonade.apps-'+action
             job={'Label':label,'UserName':user,'ProgramArguments':['/redwood/bin/lemonade-apps','--'+action],
-                 'RunAtLoad':True,'ProcessType':'Interactive'}
+                 'RunAtLoad':True,'ProcessType':'Interactive','EnableTransactions':True}
             tree['LaunchDaemons/'+label+'.plist']=(0o100644,0,0,plistlib.dumps(job))
         mode,uid,gid,data=tree['etc/inject.conf']
         tree['etc/inject.conf']=(mode,uid,gid,data+b'/redwood/lib/apps.dylib TrollApps Delta\n')
@@ -233,6 +233,10 @@ class BasePolicy(unittest.TestCase):
             with self.subTest(name=name),self.assertRaises(ValueError):base.validate_tree(broken)
         broken=dict(tree);name='LaunchDaemons/org.lemonade.apps-install.plist'
         mode,uid,gid,data=broken[name];job=plistlib.loads(data);job['ProgramArguments'][-1]='--open'
+        broken[name]=(mode,uid,gid,plistlib.dumps(job))
+        with self.assertRaises(ValueError):base.validate_tree(broken)
+        broken=dict(tree);mode,uid,gid,data=broken[name];job=plistlib.loads(data)
+        job['EnableTransactions']=False
         broken[name]=(mode,uid,gid,plistlib.dumps(job))
         with self.assertRaises(ValueError):base.validate_tree(broken)
 

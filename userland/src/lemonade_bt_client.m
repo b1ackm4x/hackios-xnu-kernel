@@ -68,7 +68,7 @@ static void open_bluetooth_settings(void) {
     [open invoke]; BOOL result = NO; [open getReturnValue:&result];
     printf("bt-client: native Bluetooth Settings launch requested result=%u\n", result);
 }
-int main(int argc, char **argv) {
+static int observe(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     char args[2048] = {0}; size_t length = sizeof(args);
     if (sysctlbyname("kern.bootargs", args, &length, NULL, 0)) return 1;
@@ -146,4 +146,14 @@ int main(int argc, char **argv) {
         puts("bt-client: bounded native client ended; Settings acceptance remains separate");
     }
     return 0;
+}
+
+extern void xpc_transaction_begin(void);
+extern void xpc_transaction_end(void);
+int main(int argc, char **argv) {
+    // Timed observations are active work even while the run loop is waiting.
+    xpc_transaction_begin();
+    int result=observe(argc,argv);
+    xpc_transaction_end();
+    return result;
 }

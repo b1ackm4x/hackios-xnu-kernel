@@ -15,6 +15,8 @@ extern char **environ;
 extern int posix_spawnattr_set_persona_np(const posix_spawnattr_t *, uid_t, uint32_t);
 extern int posix_spawnattr_set_persona_uid_np(const posix_spawnattr_t *, uid_t);
 extern int posix_spawnattr_set_persona_gid_np(const posix_spawnattr_t *, uid_t);
+extern void xpc_transaction_begin(void);
+extern void xpc_transaction_end(void);
 
 static NSString *const assets=@"/usr/share/lemonade-apps";
 static NSString *const stage=@"/private/var/tmp/lemonade-apps-stage";
@@ -141,8 +143,15 @@ int main(int argc,char **argv) {
         NSDictionary *config=[NSDictionary dictionaryWithContentsOfFile:[assets stringByAppendingPathComponent:@"manifest.plist"]];
         if(![config[@"profile"] isEqual:@"lemonade-private-apps-v1"])return 81;
         dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices",RTLD_NOW);
-        if(!strcmp(argv[1],"--bootstrap"))return bootstrap(config);
-        if(!strcmp(argv[1],"--install"))return applications(config);
-        return 82;
+        // File copying and child waits are real work outside an XPC handler.
+        // Keep the native transaction active until all installation/cleanup
+        // completes, so idle-exit cannot reap either supervising process.
+        xpc_transaction_begin();
+        int result=82;
+        if(!strcmp(argv[1],"--bootstrap"))result=bootstrap(config);
+        else if(!strcmp(argv[1],"--install"))result=applications(config);
+        printf("apps-restore: worker=%s result=%d\n",argv[1],result);
+        xpc_transaction_end();
+        return result;
     }
 }

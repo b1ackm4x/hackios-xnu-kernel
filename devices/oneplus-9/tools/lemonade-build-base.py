@@ -187,6 +187,7 @@ def validate_tree(tree):
                     apps_job=(applications and job.get('Label')==label and job.get('UserName')==user and
                         job.get('ProgramArguments')==['/redwood/bin/lemonade-apps','--'+action] and
                         job.get('RunAtLoad') is True and job.get('ProcessType')=='Interactive' and
+                        job.get('EnableTransactions') is True and
                         not any(key in job for key in ('MachServices','KeepAlive','EnvironmentVariables')))
                     if not apps_job:raise ValueError('Invalid offline app restore job')
             if program.startswith('/redwood/') and not (bootstrap_job or keyboard_job or apps_job):
@@ -283,7 +284,8 @@ def application_runtime(tree, directory):
     for action,user in (('bootstrap','root'),('install','mobile')):
         label='org.lemonade.apps-'+action
         job={'Label':label,'UserName':user,'ProgramArguments':['/redwood/bin/lemonade-apps','--'+action],
-             'RunAtLoad':True,'ProcessType':'Interactive','StandardOutPath':'/dev/console','StandardErrorPath':'/dev/console'}
+             'RunAtLoad':True,'ProcessType':'Interactive','EnableTransactions':True,
+             'StandardOutPath':'/dev/console','StandardErrorPath':'/dev/console'}
         tree['LaunchDaemons/'+label+'.plist']=(0o100644,0,0,plistlib.dumps(job))
     mode,uid,gid,data=tree['etc/inject.conf']
     tree['etc/inject.conf']=(mode,uid,gid,data.rstrip(b'\n')+b'\n/redwood/lib/apps.dylib TrollApps Delta\n')

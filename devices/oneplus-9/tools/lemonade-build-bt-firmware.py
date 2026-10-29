@@ -192,6 +192,7 @@ def runtime_entries(before, system, identity, args):
         entries['bin/lemonade-bt-client'] = (0o100755, 0, 0, (client_dir / 'lemonade-bt-client').read_bytes())
         job = {'Label': 'org.lemonade.bluetooth-client', 'UserName': 'mobile',
                'ProgramArguments': ['/redwood/bin/lemonade-bt-client'], 'RunAtLoad': True,
+               'EnableTransactions': True,
                'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
         if args.settings_launch:
             job['ProgramArguments'].append('--settings-only')

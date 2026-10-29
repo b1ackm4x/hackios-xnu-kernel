@@ -150,6 +150,7 @@ def main():
     os.umask(0o077)
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version',default=launch.BASE_VERSION)
+    parser.add_argument('--reuse-guard',action='store_true',help='revalidate saved DMA-fault evidence for the identical kernel')
     options=parser.parse_args()
     if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}',options.version):parser.error('Invalid release version')
     folder=ROOT/'out/releases'/('lemonade-'+options.version)
@@ -158,6 +159,8 @@ def main():
     manifest=json.loads((folder/'manifest.json').read_text())
     if build.digest(folder/'kernel')!=build.digest(ROOT/'out/lemonade-kernel'):
         raise SystemExit('Candidate and current diagnostic kernel differ')
+    if options.reuse_guard:
+        build.usb.verified_firmware_overlay(manifest['files']['kernel']['sha256'])
     runtime=build.base.contents(folder/'root.apfs');build.validate_tree(runtime)
     net_info=json.loads((ROOT/'out/lemonade-net-test.manifest.json').read_text())
     if (net_info['sha256']!=build.digest(ROOT/'out/lemonade-net-test') or
@@ -192,7 +195,7 @@ def main():
         for name, expected in receipt['sources'].items():
             if build.digest(ROOT/name)!=expected:raise SystemExit('Bluetooth validator source changed')
         tree['bin/lemonade-bt-client']=(0o100755,0,0,(client/'lemonade-bt-client').read_bytes())
-        btjob={'Label':'org.lemonade.bluetooth-client','UserName':'mobile','RunAtLoad':True,
+        btjob={'Label':'org.lemonade.bluetooth-client','UserName':'mobile','RunAtLoad':True,'EnableTransactions':True,
                'ProgramArguments':['/redwood/bin/lemonade-bt-client'],
                'StandardOutPath':'/dev/console','StandardErrorPath':'/dev/console'}
         tree['LaunchDaemons/org.lemonade.bluetooth-client.plist']=(0o100600,0,0,plistlib.dumps(btjob))
@@ -217,15 +220,16 @@ def main():
         run(['python3','devices/oneplus-9/tools/lemonade-usb.py','boot'],evidence/'loader-boot.log')
         print('Boot image accepted; waiting for the RAM loader USB interface.',flush=True)
         wait_for_loader(manifest)
-        print('RAM loader identity verified; uploading System.',flush=True)
-        run(['python3','devices/oneplus-9/tools/lemonade-usb.py','ramdisk'],evidence/'system-upload.log')
-        before=set((ROOT/'local/lemonade').glob('*-run-cp0.manifest.json'))
-        run(['python3','devices/oneplus-9/tools/lemonade-usb.py','run','--kernel','built','--boot-cpu','7','--cpus','1',
-             '--userland','--wifi','dma-fault','--seconds','25'],evidence/'guard-run.log')
-        after=set((ROOT/'local/lemonade').glob('*-run-cp0.manifest.json'))-before
-        if len(after)!=1:raise SystemExit('Ambiguous guard record')
-        guard_log=next(iter(after)).with_suffix('').with_suffix('.log')
-        run(['python3','devices/oneplus-9/tools/lemonade-check-wifi.py',str(guard_log),'--record-guard'],evidence/'guard-evidence.json')
+        if not options.reuse_guard:
+            print('RAM loader identity verified; uploading System.',flush=True)
+            run(['python3','devices/oneplus-9/tools/lemonade-usb.py','ramdisk'],evidence/'system-upload.log')
+            before=set((ROOT/'local/lemonade').glob('*-run-cp0.manifest.json'))
+            run(['python3','devices/oneplus-9/tools/lemonade-usb.py','run','--kernel','built','--boot-cpu','7','--cpus','1',
+                 '--userland','--wifi','dma-fault','--seconds','25'],evidence/'guard-run.log')
+            after=set((ROOT/'local/lemonade').glob('*-run-cp0.manifest.json'))-before
+            if len(after)!=1:raise SystemExit('Ambiguous guard record')
+            guard_log=next(iter(after)).with_suffix('').with_suffix('.log')
+            run(['python3','devices/oneplus-9/tools/lemonade-check-wifi.py',str(guard_log),'--record-guard'],evidence/'guard-evidence.json')
         guard=json.loads((ROOT/'local/lemonade/wifi/dma-guard-verified.json').read_text())
         if guard['kernel_sha256']!=manifest['files']['kernel']['sha256']:raise SystemExit('Guard kernel mismatch')
         # Reload host metadata: verification can take minutes, during which a
@@ -239,7 +243,7 @@ def main():
         (folder/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');build.checksums(folder)
         print('Exact-kernel DMA guard passed; starting combined GPU/display/touch/Wi-Fi validation.',flush=True)
         serial=launch.loader(manifest)
-        if manifest.get('applications'):
+        if manifest.get('applications') or options.reuse_guard:
             # The DMA guard above uses the established diagnostic System. The
             # integrated run must use this candidate's exact offline-app System.
             launch.fb(serial,'oem','ramdisk')

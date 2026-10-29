@@ -16,6 +16,7 @@
 - 开机离线恢复 TrollStore 2.1.1、TrollApps 2.3、Delta 1.7.1 和 B站 8.89.0。
   使用只读 System 镜像内的已校验安装包，不依赖临时 LAN 服务或在线下载。
   安装返回码、LaunchServices 版本及临时区卸载共同参与验收；完成后保留桌面。
+  安装、等待子进程和清理全过程持有原生 XPC 活动事务，避免被当作空闲任务回收。
 - TrollApps 首次打开保留已有源并加入选定的 7 个公开源。Delta 首次打开选择现有 Metal 路径，
   通过应用原有导入接口添加作者免费发布的 Vulkanon。
 - CI 编译并打包键盘服务与适配库，公开组件包仍不包含 Apple 系统、手机固件、
@@ -34,7 +35,9 @@
 实机验收记录位于本机 `local/lemonade/release-2026.10.30-base.1/`。
 必须完成此内核的 DMA guard、显示/Metal/联网/电池/蓝牙/离线应用联合验收、
 原生蓝牙设置发现、正式包默认启动及主动退出，并回到 Android 核对五个启动分区基线。
-未经通过的候选由启动器拒绝正常启动。
+未经通过的候选由启动器拒绝正常启动。若仅修改用户态，可用 `--reuse-guard`
+重新校验同一内核的原始 DMA 故障日志与哈希；内核哈希不同会拒绝复用，联合验收仍重新运行。
+活动事务使用 Apple 的 [xpc_transaction_begin/end 契约](https://developer.apple.com/documentation/xpc/xpc_transaction_begin())。
 
 ## 使用和已知限制
 
