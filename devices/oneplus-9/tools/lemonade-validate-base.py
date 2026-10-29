@@ -130,6 +130,22 @@ def bluetooth_evidence(text):
     return {'passed': all(checks.values()), 'checks': checks, 'samples': len(states)}
 
 
+def applications_evidence(text, applications):
+    if not applications:
+        return {'passed':True,'included':False}
+    expected=applications['system']['applications']
+    checks={
+        'stores_registered':'apps-restore: stores_registered=1 offline=1' in text,
+        'applications_registered':all(
+            f"apps-restore: app={app['identifier']} helper=0 registered=1" in text for app in expected),
+        'restoration_complete':'apps-restore: complete=1 foreground_unchanged=1' in text,
+        'scratch_released':'apps-restore: scratch_unmounted=1' in text,
+    }
+    return {'passed':all(checks.values()),'included':True,'checks':checks,
+            'versions':{a['identifier']:a['version'] for a in expected},
+            'ui_and_playback_verified':False}
+
+
 def main():
     os.umask(0o077)
     parser=argparse.ArgumentParser(description=__doc__)
@@ -223,8 +239,13 @@ def main():
         (folder/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');build.checksums(folder)
         print('Exact-kernel DMA guard passed; starting combined GPU/display/touch/Wi-Fi validation.',flush=True)
         serial=launch.loader(manifest)
+        if manifest.get('applications'):
+            # The DMA guard above uses the established diagnostic System. The
+            # integrated run must use this candidate's exact offline-app System.
+            launch.fb(serial,'oem','ramdisk')
+            launch.fb(serial,'stage',folder/'system.apfs',timeout=300)
         seconds=180
-        args=launch.BASE_ARGUMENTS+[f'loader_return_after={seconds}',f'epoch={int(time.time())}',
+        args=manifest['boot_arguments']+[f'loader_return_after={seconds}',f'epoch={int(time.time())}',
             'touch_lat=2','cpuload=500',f'rec_secs={seconds}','rec_mb=64','rec_ring=1','rec_step=3']
         payload=work/'boot.bin'
         run(['python3','xnuloader/mkpayload.py','-o',str(payload),'kernel='+str(folder/'kernel'),
@@ -238,6 +259,7 @@ def main():
                 'gpu_return_call_drain':manifest.get('gpu_return_call_drain',False),
                 'display_hz_requested':120,
                 'base_root_sha256':manifest['files']['root.apfs']['sha256'],'validation_root_sha256':build.digest(image),
+                'system_sha256':manifest['files']['system.apfs']['sha256'],
                 'validation_added_paths':changed,'live_logs':[],'network_identity_redacted':True,
                 'battery_validator':battery_info,'bluetooth_validator':receipt}
         launch.fb(serial,'stage',payload,timeout=60)
@@ -274,11 +296,13 @@ def main():
                       for name,count in (('feature',103),('MPS',2),('CA',4))}
         battery=battery_evidence(text)
         bluetooth=bluetooth_evidence(text)
+        applications=applications_evidence(text,manifest.get('applications'))
         acceptance={'passed':d['passed'] and w['passed'] and all(metal_checks.values()) and battery['passed'] and bluetooth['passed'] and
+                    applications['passed'] and
                     'init: runtime setup complete; failures=0' in text and '=== 36 checks' not in text,
                     'kernel_sha256':record['kernel_sha256'],'base_root_sha256':record['base_root_sha256'],
                     'metal_checks':metal_checks,'direct_passed':d['passed'],'wifi_passed':w['passed'], 'battery':battery,
-                    'bluetooth':bluetooth,
+                    'bluetooth':bluetooth,'applications':applications,'system_sha256':record['system_sha256'],
                     'manifest_path':str(path.with_suffix('.manifest.json').relative_to(ROOT)),
                     'manifest_sha256':build.digest(path.with_suffix('.manifest.json'))}
         (evidence/'combined-acceptance.json').write_text(json.dumps(acceptance,indent=2)+'\n')
@@ -286,6 +310,7 @@ def main():
                           'wifi_passed':w['passed'],'networking_verified':w['networking_verified'],
                           'battery_passed':battery['passed'],
                           'bluetooth_passed':bluetooth['passed'],
+                          'applications_passed':applications['passed'],
                           'runtime_setup_complete':'init: runtime setup complete; failures=0' in text,
                           'runtime_boot_self_tests_absent':'=== 36 checks' not in text},indent=2),flush=True)
         if not acceptance['passed']:
@@ -296,9 +321,13 @@ def main():
                 raise SystemExit('Runtime package changed before recording acceptance')
         current.update(integration_verified=True,integration_display_hz=120,integration_kernel_sha256=record['kernel_sha256'],
                        integration_root_sha256=record['base_root_sha256'],
+                       integration_system_sha256=record['system_sha256'],
                        bluetooth_coexistence_verified=True,bluetooth_kernel_sha256=record['kernel_sha256'],
                        bluetooth_root_sha256=record['base_root_sha256'],
                        integration_evidence_sha256=build.digest(evidence/'combined-acceptance.json'))
+        if current.get('applications'):
+            current['applications'].update(verified=True,root_sha256=record['base_root_sha256'],
+                system_sha256=record['system_sha256'],kernel_sha256=record['kernel_sha256'],evidence=applications)
         (folder/'manifest.json').write_text(json.dumps(current,indent=2)+'\n');build.checksums(folder)
     print('Disposable overlay and network input removed; release package contains neither.',flush=True)
 

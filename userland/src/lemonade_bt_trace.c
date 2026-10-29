@@ -38,7 +38,7 @@ struct ctl_info { uint32_t ctl_id; char ctl_name[MAX_KCTL_NAME]; };
 #define CTLIOCGINFO _IOWR('N', 3, struct ctl_info)
 _Static_assert(sizeof(struct ctl_info) == 100, "kernel-control query ABI");
 
-#define TRACE_LIMIT 1600u
+#define TRACE_LIMIT 4000u
 #define FD_LIMIT 4096
 #define FD_CONTROL 1
 #define FD_BLUETOOTH 2
@@ -50,9 +50,10 @@ static const uint8_t *literal_sections[2];
 static unsigned long literal_sizes[2];
 static const struct mach_header_64 *main_header;
 static pthread_mutex_t hci_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct lemonade_bt_parser hci_observer;
+static struct lemonade_bt_parser hci_observer, hci_transmit_observer;
 static int hci_fd = -1;
 static unsigned hci_events, hci_inquiries, hci_legacy_reports, hci_le_reports;
+static unsigned hci_acl_rx, hci_acl_tx;
 
 static void say(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void say(const char *format, ...)
@@ -77,12 +78,74 @@ static void say(const char *format, ...)
     errno = saved;
 }
 
+/* Log protocol metadata only. In particular, dynamic-channel contents may be
+ * keyboard input, SDP strings or pairing material and must never be printed. */
+static void observe_acl(const char *direction, const uint8_t *p, size_t size) {
+    if (size < 5 || p[0] != 2) return;
+    unsigned header = lemonade_bt_le16(p + 1), boundary = (header >> 12) & 3;
+    unsigned *count = !strcmp(direction, "RX") ? &hci_acl_rx : &hci_acl_tx;
+    (*count)++;
+    if (*count > 120 && *count % 100) return;
+    say("real HCI ACL %s count=%u handle=%#x boundary=%u bytes=%zu", direction,
+        *count, header & 0xfff, boundary, size - 5);
+    if (boundary != 0 && boundary != 2) return;
+    if (size < 9) return;
+    unsigned length = lemonade_bt_le16(p + 5), cid = lemonade_bt_le16(p + 7);
+    say("real L2CAP %s cid=%#x declared_bytes=%u fragment_bytes=%zu", direction, cid, length, size - 9);
+    if (cid != 1 || length > size - 9) return;
+    size_t end = 9 + length;
+    for (size_t offset = 9; offset + 4 <= end;) {
+        unsigned code = p[offset], bytes = lemonade_bt_le16(p + offset + 2);
+        if (bytes > end - offset - 4) return;
+        const uint8_t *data = p + offset + 4;
+        say("real L2CAP signal %s code=%#x bytes=%u", direction, code, bytes);
+        if (code == 2 && bytes == 4)
+            say("real L2CAP connection request %s psm=%#x scid=%#x", direction,
+                lemonade_bt_le16(data), lemonade_bt_le16(data + 2));
+        else if (code == 3 && bytes == 8)
+            say("real L2CAP connection response %s dcid=%#x scid=%#x result=%u status=%u", direction,
+                lemonade_bt_le16(data), lemonade_bt_le16(data + 2),
+                lemonade_bt_le16(data + 4), lemonade_bt_le16(data + 6));
+        else if (code == 5 && bytes >= 6)
+            say("real L2CAP configuration response %s scid=%#x result=%u", direction,
+                lemonade_bt_le16(data), lemonade_bt_le16(data + 4));
+        offset += 4 + bytes;
+    }
+}
+static int observe_transmit(void *context, const uint8_t *p, size_t size) {
+    (void)context;
+    if (size >= 4 && p[0] == 1)
+        say("real HCI command TX opcode=%#x parameter_bytes=%u", lemonade_bt_le16(p + 1), p[3]);
+    observe_acl("TX", p, size);
+    return 0;
+}
+
 /* Observe the same complete H4 events delivered to the native daemon. Never
  * alter them or emit addresses, names, keys, or advertising bytes. */
 static int observe_hci(void *context, const uint8_t *p, size_t size) {
     (void)context;
+    observe_acl("RX", p, size);
     if (size < 3 || p[0] != 4) return 0;
     hci_events++;
+    if (size >= 7 && p[1] == 0x0e)
+        say("real HCI command complete opcode=%#x status=%u", lemonade_bt_le16(p+4), p[6]);
+    if (size == 14 && p[1] == 3)
+        say("real HCI connection complete status=%u handle=%#x link_type=%u encrypted=%u",
+            p[3], lemonade_bt_le16(p+4), p[12], p[13]);
+    if (size == 7 && p[1] == 5)
+        say("real HCI disconnection status=%u handle=%#x reason=%#x", p[3], lemonade_bt_le16(p+4), p[6]);
+    if (size == 6 && (p[1] == 6 || p[1] == 0x30))
+        say("real HCI security event=%#x status=%u handle=%#x", p[1], p[3], lemonade_bt_le16(p+4));
+    if (size == 7 && p[1] == 8)
+        say("real HCI encryption status=%u handle=%#x enabled=%u", p[3], lemonade_bt_le16(p+4), p[6]);
+    if ((size == 9 && (p[1] == 0x16 || p[1] == 0x17 || p[1] == 0x31 || p[1] == 0x34)) ||
+        (size == 26 && p[1] == 0x18) || (size == 12 && p[1] == 0x32) ||
+        (size == 13 && (p[1] == 0x33 || p[1] == 0x3b)))
+        say("real HCI pairing event=%#x; identity and security data omitted", p[1]);
+    if (size == 10 && p[1] == 0x36)
+        say("real HCI simple pairing complete status=%u", p[3]);
+    if (size >= 4 && p[1] == 0x3e && (p[3] == 1 || p[3] == 0x0a) && size >= 7)
+        say("real HCI LE connection subevent=%#x status=%u handle=%#x", p[3], p[4], lemonade_bt_le16(p+5));
     if (size == 7 && p[1] == 0x0f)
         say("real HCI command status opcode=%#x status=%u", lemonade_bt_le16(p+5), p[3]);
     if (size == 4 && p[1] == 1) {
@@ -91,7 +154,8 @@ static int observe_hci(void *context, const uint8_t *p, size_t size) {
     }
     if (size >= 4 && (p[1] == 2 || p[1] == 0x22 || p[1] == 0x2f)) {
         hci_legacy_reports += p[3];
-        say("real HCI inquiry reports event=%#x total=%u", p[1], hci_legacy_reports);
+        if (hci_legacy_reports <= 20 || hci_legacy_reports % 100 == 0)
+            say("real HCI inquiry reports event=%#x total=%u", p[1], hci_legacy_reports);
     }
     if (size >= 5 && p[1] == 0x3e && (p[3] == 2 || p[3] == 0x0d))
         hci_le_reports += p[4];
@@ -141,7 +205,10 @@ static void static_log_format(os_log_type_t type, const char *format, const uint
         size_t remaining = literal_sizes[i] - (p - begin);
         size_t count = strnlen(format, remaining < 200 ? remaining : 200);
         if (count == remaining || count >= 200) return;
-        if (type >= OS_LOG_TYPE_ERROR || strstr(format, "Unknown") || strstr(format, "initializ"))
+        if (type >= OS_LOG_TYPE_ERROR || strstr(format, "Unknown") || strstr(format, "initializ") ||
+            strcasestr(format, "pair") || strcasestr(format, "connect") ||
+            strcasestr(format, "encrypt") || strcasestr(format, "auth") ||
+            strstr(format, "HID") || strstr(format, "L2CAP"))
             say("native log format only: %s", format);
         /* The observed native OI failure record has one static description
          * followed by one 32-bit status. Decode ONLY that exact typed record;
@@ -427,7 +494,9 @@ static int trace_connect(int fd, const struct sockaddr *address, socklen_t lengt
         pthread_mutex_lock(&hci_lock);
         hci_fd = fd;
         hci_events = hci_inquiries = hci_legacy_reports = hci_le_reports = 0;
+        hci_acl_rx = hci_acl_tx = 0;
         lemonade_bt_parser_init(&hci_observer, LEMONADE_BT_FROM_CONTROLLER, 0);
+        lemonade_bt_parser_init(&hci_transmit_observer, LEMONADE_BT_FROM_HOST, 0);
         pthread_mutex_unlock(&hci_lock);
     }
     if (kind(fd)) say("connect fd=%d family=%d len=%u result=%d errno=%d", fd,
@@ -457,8 +526,14 @@ static int trace_setopt(int fd, int level, int name, const void *value, socklen_
 static ssize_t trace_write(int fd, const void *buffer, size_t length)
 {
     ssize_t r = write(fd, buffer, length); int saved = errno;
-    if (!logging && kind(fd) == FD_BLUETOOTH)
+    if (!logging && kind(fd) == FD_BLUETOOTH) {
+        pthread_mutex_lock(&hci_lock);
+        if (fd == hci_fd && r > 0 && !hci_transmit_observer.error &&
+                lemonade_bt_parse(&hci_transmit_observer, buffer, (size_t)r, observe_transmit, NULL, NULL))
+            say("H4 TX observation framing error=%u; native bytes unchanged", hci_transmit_observer.error);
+        pthread_mutex_unlock(&hci_lock);
         say("write fd=%d bytes=%zu result=%zd errno=%d", fd, length, r, r < 0 ? saved : 0);
+    }
     errno = saved;
     return r;
 }

@@ -28,7 +28,7 @@ paths = ['bsd/dev/redwood_cell.c', 'bsd/dev/redwood_ipa.c', 'bsd/dev/redwood_mps
          'bsd/dev/lemonade_wifi.c', 'bsd/dev/lemonade_mhi_protocol.h', 'bsd/dev/redwood_wifi.c', 'bsd/dev/redwood_goodix.c',
          'bsd/dev/redwood_lx.c', 'bsd/sys/redwood_lx.h', 'bsd/sys/redwood_qrtr.h', 'bsd/sys/lemonade_wifi.h',
          'bsd/dev/redwood_buttons.c', 'bsd/dev/redwood_input.c', 'bsd/sys/redwood_input.h',
-         'osfmk/arm64/loader_return.c']
+         'osfmk/arm64/loader_return.c', 'bsd/miscfs/ramfs/ramfs.c']
 inputs = {}
 for relative in paths:
     source = Path('xnu/files') / relative

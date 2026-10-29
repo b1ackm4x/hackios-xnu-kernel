@@ -36,4 +36,5 @@ RUNTIME_ONLY=1 bash devices/oneplus-9/tools/lemonade-build-metal.sh
 bash devices/oneplus-9/tools/lemonade-build-gl.sh
 bash devices/oneplus-9/tools/lemonade-build-base-runtime.sh
 bash tools/ci/build-bluetooth.sh
+bash devices/oneplus-9/tools/lemonade-build-apps-runtime.sh
 python3 tools/ci/package-lemonade.py

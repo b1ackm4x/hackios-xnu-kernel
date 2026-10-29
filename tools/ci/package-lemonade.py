@@ -20,6 +20,9 @@ FILES = (
     'out/lemonade-base-runtime/libredwood-sb.dylib', 'out/lemonade-base-runtime/build.json',
     'out/lemonade-bt-runtime/lemonade-bt-bootstrap',
     'out/lemonade-bt-runtime/liblemonade-bt-compat.dylib', 'out/lemonade-bt-runtime/build.json',
+    'out/lemonade-bt-runtime/lemonade-bt-hid', 'out/lemonade-bt-runtime/liblemonade-bt-hid.dylib',
+    'out/lemonade-apps-runtime/lemonade-apps', 'out/lemonade-apps-runtime/apps.dylib',
+    'out/lemonade-apps-runtime/build.json',
     'out/lemonade-metal/libredwoodmetal.dylib', 'out/lemonade-metal/libredwoodair.dylib',
     'out/lemonade-metal/libredwood.dylib', 'out/lemonade-metal/RedwoodMetal.bundle/RedwoodMetal',
     'out/lemonade-metal/RedwoodMetal.bundle/Info.plist', 'out/lemonade-metal/build.json',
@@ -62,7 +65,8 @@ def check_outputs(root):
     for name, expected in json.loads((root / 'out/lemonade-build-inputs.json').read_text()).items():
         if digest(checked_file(root, 'xnu/files/' + name)) != expected:
             raise ValueError('Kernel source differs from build: ' + name)
-    for relative in ('out/lemonade-metal', 'out/lemonade-base-runtime', 'out/lemonade-bt-runtime'):
+    for relative in ('out/lemonade-metal', 'out/lemonade-base-runtime', 'out/lemonade-bt-runtime',
+                     'out/lemonade-apps-runtime'):
         check_receipt(root, relative)
     for relative in FILES:
         if relative.endswith(('.json', '.plist')):

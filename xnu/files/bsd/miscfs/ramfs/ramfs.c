@@ -1715,7 +1715,7 @@ const struct vnodeopv_desc ramfs_vnodeop_opv_desc = {
 
 /* mount(2) with no arguments: an empty filesystem appears. */
 static int
-ramfs_mount(mount_t mp, __unused vnode_t devvp, __unused user_addr_t data, __unused vfs_context_t ctx)
+ramfs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, __unused vfs_context_t ctx)
 {
 	struct ramfs_mount *rm;
 	struct vfsstatfs *sp;
@@ -1723,12 +1723,25 @@ ramfs_mount(mount_t mp, __unused vnode_t devvp, __unused user_addr_t data, __unu
 	if (vfs_isupdate(mp)) {
 		return 0;
 	}
+	/* Explicit, root-only scratch mounts may need room for both an app and its
+	 * signing copy. Keep ordinary data volumes at the original quarter-memory
+	 * limit; cap an opted-in scratch volume at half of physical memory. */
+	uint64_t max_pages = (max_mem / 4) / PAGE_SIZE;
+	if (data != USER_ADDR_NULL) {
+		struct { uint32_t magic, version; uint64_t max_bytes; } options;
+		int error = copyin(data, &options, sizeof(options));
+		if (error) return error;
+		if (options.magic != 0x52414d46 || options.version != 1 ||
+		    options.max_bytes < PAGE_SIZE || options.max_bytes > max_mem / 2 ||
+		    (options.max_bytes & PAGE_MASK)) return EINVAL;
+		max_pages = options.max_bytes / PAGE_SIZE;
+	}
 	rm = kalloc_type(struct ramfs_mount, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	lck_mtx_init(&rm->rm_lock, &ramfs_lck_grp, LCK_ATTR_NULL);
 	rm->rm_mp = mp;
 	rm->rm_next_ino = RAMFS_ROOT_INO + 1;
 	/* a runaway writer must not be able to take the whole machine: a quarter of memory at most */
-	rm->rm_max_pages = (max_mem / 4) / PAGE_SIZE;
+	rm->rm_max_pages = max_pages;
 
 	rm->rm_hash = kalloc_type(struct ramfs_node *, RAMFS_HASH_SIZE, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	rm->rm_root = ramfs_node_alloc(rm, VDIR, NULL);

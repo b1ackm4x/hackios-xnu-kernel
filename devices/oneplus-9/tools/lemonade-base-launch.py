@@ -11,7 +11,7 @@ import tempfile
 import time
 
 HERE = Path(__file__).resolve().parent
-BASE_VERSION = '2026.10.27-base.2'
+BASE_VERSION = '2026.10.30-base.1'
 BATTERY_TELEMETRY = 'bq28z610-uefi-cache-v2'
 # Keep the iPhone X userland's native 120 Hz CADisplayTimer. Forced driver
 # notifications lose frames after asynchronous Metal submission; DPU TE and
@@ -38,7 +38,9 @@ def verify(folder=HERE, require_acceptance=True):
     manifest = json.loads((folder / 'manifest.json').read_text())
     if manifest.get('profile') != 'lemonade-base-v1':
         raise SystemExit('不是 OnePlus 9 base 发布包')
-    if manifest.get('boot_arguments') != BASE_ARGUMENTS:
+    keyboard = manifest.get('bluetooth', {}).get('board_hid')
+    expected_arguments = BASE_ARGUMENTS + (['lemonade_bt_hid=1'] if keyboard else [])
+    if manifest.get('boot_arguments') != expected_arguments:
         raise SystemExit('启动配置与此 RAM base 不匹配')
     if manifest.get('battery_telemetry_supported') != BATTERY_TELEMETRY:
         raise SystemExit('此 base 缺少匹配的电池与充电状态协议')
@@ -68,6 +70,12 @@ def verify(folder=HERE, require_acceptance=True):
             manifest.get('integration_kernel_sha256') != manifest['files']['kernel']['sha256'] or
             manifest.get('integration_root_sha256') != manifest['files']['root.apfs']['sha256']):
         raise SystemExit('此候选尚未通过 GPU、显示与 Wi-Fi 联合验收')
+    applications=manifest.get('applications')
+    if applications and (not applications.get('verified') or
+            applications.get('root_sha256')!=manifest['files']['root.apfs']['sha256'] or
+            applications.get('system_sha256')!=manifest['files']['system.apfs']['sha256'] or
+            applications.get('kernel_sha256')!=manifest['files']['kernel']['sha256']):
+        raise SystemExit('此候选尚未通过对应镜像的离线应用恢复验收')
     bluetooth = manifest.get('bluetooth', {})
     if (bluetooth.get('native_h4_contract') != 'H4:POSIX:com.apple.uart.bluetooth,115200' or
             not bluetooth.get('board_bootstrap') or not bluetooth.get('board_compat') or

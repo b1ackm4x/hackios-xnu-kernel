@@ -6,6 +6,59 @@ original iOS Settings page displays a real nearby Mac while the Wi-Fi station,
 graphics and battery services are enabled. Pairing, audio, peripheral data, sleep,
 repeated on/off behavior and long-term stability remain unverified.
 
+## K380 keyboard adaptation (2026-10-28)
+
+Live K380 pairing exposed a separate input-layer gap: authentication and link
+encryption succeeded, both HID control/interrupt L2CAP channels completed, and
+the native daemon then logged `Failed to create HID device` and disconnected.
+This kernel has no `IOHIDResource`, which the native `IOHIDUserDevice` path needs.
+
+The opt-in `lemonade_bt_hid.c` adapter preserves the native pairing, encryption,
+SDP and HID profile. It tries the original API first, then accepts supported
+Bluetooth keyboard descriptors only. A dedicated root helper registers the real
+virtual service with the existing HID event server; the proxy returns a device
+only after `DeviceOpenedByEventSystem` is confirmed. The original mobile-user
+daemon cannot itself create that virtual service. The third development image
+created and opened the service. On 2026-10-28 the user confirmed actual text
+entry, Shift, backspace and arrow keys, then automatic reconnection and continued
+typing after switching to the Mac slot and back. The retained log records 64
+input reports and 59 dispatched events. It also records 3 rejected reports whose
+causes were not classified; no key payloads were captured. USB unplug/replug
+interrupted host capture, so the reconnection result is user-observed evidence.
+
+The helper uses a mode-0600 local socket and checks peer credentials plus the
+executable path in both directions. One connection owns one keyboard service;
+EOF or an explicit close releases held keys before removing it. Reports and
+descriptors remain in memory. Logs contain status and aggregate counts, never
+key contents, device addresses or pairing material. The bounded parser handles
+keyboard modifiers, consumer controls, independent report IDs, rollover and
+dispatch retries. Scheduling get/set-report callbacks is independent of input
+delivery: cached input can arrive before the native schedule call.
+
+Build with `devices/oneplus-9/tools/lemonade-build-bt-hid.sh`. Both helper and
+library are recorded with their source hashes in `out/lemonade-bt-hid/build.json`.
+Runtime activation additionally requires `lemonade_bt_hid=1`, the exact board
+service and the expected process name. Host ASan/UBSan tests exercise the real CF
+runtime with a deterministic event server, input before scheduling, normal and
+abrupt IPC closure, malformed frames, modifier release and descriptor bounds.
+These host tests are separate from the physical typing result above. Physical
+LED output, arbitrary HID devices, audio and general Bluetooth profile coverage
+remain unverified. The adapter currently returns unsupported for LED output.
+
+`lemonade-build-base.py --version VERSION --keyboard` includes the helper and
+adapter in a new base candidate and adds the bound `lemonade_bt_hid=1` argument.
+The regular integration and runtime validators use that candidate's arguments;
+they do not reuse the previous root image's acceptance. CI compiles both keyboard
+components and includes them in the public component archive. The Bluetooth
+suite and 30 base tests passed locally. Further physical keyboard tests remain
+stopped as requested; the 2026.10.30 integration validates the complete base
+and native discovery without repeating pairing or typing tests. All production
+runtime build receipts have been refreshed for the unified source layout. See
+[the new base record](LEMONADE-BASE-20261030.md) for package acceptance.
+
+Private captures and disposable image preparation are under
+`local/lemonade/k380*-20261028/`. The sealed `2026.10.27-base.2` is unchanged.
+
 ## Complete-base acceptance
 
 Kernel SHA-256: `22206252397d69c037632b7ef695ead42c4e64a790210f0b624a30cd1e96dd6a`.

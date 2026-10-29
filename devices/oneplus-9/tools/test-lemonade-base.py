@@ -216,6 +216,101 @@ class BasePolicy(unittest.TestCase):
     def test_clean_runtime(self):
         base.validate_tree(self.tree())
 
+    def test_apps_require_complete_offline_runtime_and_no_foreground_job(self):
+        tree=self.tree()
+        tree['bin/lemonade-apps']=(0o100755,0,0,b'program')
+        tree['lib/apps.dylib']=(0o100755,0,0,b'library')
+        for action,user in (('bootstrap','root'),('install','mobile')):
+            label='org.lemonade.apps-'+action
+            job={'Label':label,'UserName':user,'ProgramArguments':['/redwood/bin/lemonade-apps','--'+action],
+                 'RunAtLoad':True,'ProcessType':'Interactive'}
+            tree['LaunchDaemons/'+label+'.plist']=(0o100644,0,0,plistlib.dumps(job))
+        mode,uid,gid,data=tree['etc/inject.conf']
+        tree['etc/inject.conf']=(mode,uid,gid,data+b'/redwood/lib/apps.dylib TrollApps Delta\n')
+        base.validate_tree(tree)
+        for name in ('bin/lemonade-apps','lib/apps.dylib','LaunchDaemons/org.lemonade.apps-install.plist'):
+            broken=dict(tree);del broken[name]
+            with self.subTest(name=name),self.assertRaises(ValueError):base.validate_tree(broken)
+        broken=dict(tree);name='LaunchDaemons/org.lemonade.apps-install.plist'
+        mode,uid,gid,data=broken[name];job=plistlib.loads(data);job['ProgramArguments'][-1]='--open'
+        broken[name]=(mode,uid,gid,plistlib.dumps(job))
+        with self.assertRaises(ValueError):base.validate_tree(broken)
+
+    def test_offline_apps_evidence_requires_both_registration_and_scratch_release(self):
+        validator=base.module('apps_acceptance','lemonade-validate-base.py')
+        applications={'system':{'applications':[{'identifier':'example.app','version':'1'}]}}
+        lines=['apps-restore: stores_registered=1 offline=1',
+               'apps-restore: app=example.app helper=0 registered=1',
+               'apps-restore: complete=1 foreground_unchanged=1','apps-restore: scratch_unmounted=1']
+        self.assertTrue(validator.applications_evidence('\n'.join(lines),applications)['passed'])
+        for i in range(len(lines)):
+            with self.subTest(missing=i):
+                self.assertFalse(validator.applications_evidence('\n'.join(lines[:i]+lines[i+1:]),applications)['passed'])
+        self.assertFalse(validator.applications_evidence('\n'.join(lines).replace('helper=0','helper=1'),applications)['passed'])
+
+    def test_app_acceptance_is_bound_to_all_runtime_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory);manifest=self.package(folder)
+            manifest['applications']={'verified':True,**{name+'_sha256':manifest['files'][file]['sha256']
+                for name,file in [('root','root.apfs'),('system','system.apfs'),('kernel','kernel')]}}
+            (folder/'manifest.json').write_text(json.dumps(manifest));base.launch.verify(folder)
+            for key in ('root_sha256','system_sha256','kernel_sha256','verified'):
+                changed=copy.deepcopy(manifest);changed['applications'][key]=False if key=='verified' else '0'*64
+                (folder/'manifest.json').write_text(json.dumps(changed))
+                with self.subTest(key=key),self.assertRaises(SystemExit):base.launch.verify(folder)
+
+    def test_injection_config_reserves_both_sysctl_terminators(self):
+        prefix = b'/redwood/lib/example.dylib '
+        allowed = prefix + b'A' * (510 - len(prefix))
+        base.validate_injection_config(allowed + b' \n')
+        for rejected in (allowed + b'A', allowed + b'\n/redwood/lib/extra.dylib Delta',
+                         b'/redwood/lib/a.dylib App\0Hidden', b' ' * 4096):
+            with self.subTest(length=len(rejected)), self.assertRaises(ValueError):
+                base.validate_injection_config(rejected)
+
+    def test_pack_rejects_injection_overflow_before_building_an_image(self):
+        tree = self.tree()
+        tree['etc/inject.conf'] = (0o100644, 0, 0, b'x' * 515 + b'\n')
+        with tempfile.TemporaryDirectory() as directory, patch.object(base.subprocess, 'run') as run:
+            destination = Path(directory) / 'root.apfs'
+            with self.assertRaisesRegex(ValueError, 'kernel limit'):
+                base.pack_tree(tree, destination)
+            run.assert_not_called()
+            self.assertFalse(destination.exists())
+
+    def test_keyboard_requires_complete_service_and_exact_job(self):
+        tree = self.tree()
+        tree['bin/lemonade-bt-hid'] = (0o100755, 0, 0, b'helper')
+        tree['lib/liblemonade-bt-hid.dylib'] = (0o100755, 0, 0, b'adapter')
+        job = {'Label':'org.lemonade.bluetooth-hid', 'UserName':'root',
+               'ProgramArguments':['/redwood/bin/lemonade-bt-hid'],
+               'RunAtLoad':True, 'KeepAlive':True, 'ThrottleInterval':10}
+        path = 'LaunchDaemons/org.lemonade.bluetooth-hid.plist'
+        tree[path] = (0o100644, 0, 0, plistlib.dumps(job))
+        mode, uid, gid, conf = tree['etc/inject.conf']
+        tree['etc/inject.conf'] = (mode, uid, gid, conf+b'/redwood/lib/liblemonade-bt-hid.dylib bluetoothd\n')
+        base.validate_tree(tree)
+        for missing in ('bin/lemonade-bt-hid', 'lib/liblemonade-bt-hid.dylib', path):
+            changed = dict(tree);del changed[missing]
+            with self.subTest(missing=missing), self.assertRaises(ValueError):base.validate_tree(changed)
+        for key, value in (('UserName','mobile'),('ProgramArguments',['/usr/bin/other']),
+                           ('MachServices',{'com.apple.fake':True}),('KeepAlive',False)):
+            changed = dict(tree);bad = dict(job);bad[key] = value
+            changed[path] = (0o100644, 0, 0, plistlib.dumps(bad))
+            with self.subTest(key=key), self.assertRaises(ValueError):base.validate_tree(changed)
+
+    def test_keyboard_activation_is_bound_to_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory);manifest = self.package(folder)
+            manifest['boot_arguments'] = base.launch.BASE_ARGUMENTS+['lemonade_bt_hid=1']
+            (folder/'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaises(SystemExit):base.launch.verify(folder)
+            manifest['bluetooth']['board_hid'] = {'profile':'lemonade-bluetooth-keyboard-v1'}
+            (folder/'manifest.json').write_text(json.dumps(manifest));base.launch.verify(folder)
+            manifest['boot_arguments'] = base.launch.BASE_ARGUMENTS
+            (folder/'manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaises(SystemExit):base.launch.verify(folder)
+
     def test_workloads_helpers_and_credentials_rejected(self):
         for p in ('bin/gl_test', 'bin/rwtouch', 'bin/lemonade-bt-client', 'lib/liblemonade-bt-trace.dylib', 'etc/rc.jobs', 'share/pattern.bin', 'fw/lemonade-network', 'share/test.metallib'):
             with self.subTest(path=p), self.assertRaises(ValueError):

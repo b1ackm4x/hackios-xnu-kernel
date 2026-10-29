@@ -20,6 +20,30 @@ def add_injection(entries, line):
         entries['etc/inject.conf'] = (mode, uid, gid, conf.rstrip(b'\n') + b'\n' + line + b'\n')
 
 
+def keyboard_entries(entries):
+    """Add only the source-bound keyboard helper and its native-daemon adapter."""
+    folder = ROOT / 'out/lemonade-bt-hid'
+    receipt = json.loads((folder / 'build.json').read_text())
+    if receipt.get('profile') != 'lemonade-bluetooth-keyboard-v1':
+        raise ValueError('Unexpected keyboard build profile')
+    for name, expected in receipt['sources'].items():
+        if digest(ROOT / name) != expected:
+            raise ValueError('Keyboard source changed after build: ' + name)
+    for name, key, target in (
+            ('lemonade-bt-hid', 'helper_sha256', 'bin/lemonade-bt-hid'),
+            ('liblemonade-bt-hid.dylib', 'sha256', 'lib/liblemonade-bt-hid.dylib')):
+        if digest(folder / name) != receipt[key]:
+            raise ValueError('Keyboard binary differs from build receipt')
+        entries[target] = (0o100755, 0, 0, (folder / name).read_bytes())
+    job = {'Label': 'org.lemonade.bluetooth-hid', 'UserName': 'root',
+           'ProgramArguments': ['/redwood/bin/lemonade-bt-hid'],
+           'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 10,
+           'StandardOutPath': '/dev/console', 'StandardErrorPath': '/dev/console'}
+    entries['LaunchDaemons/org.lemonade.bluetooth-hid.plist'] = (0o100644, 0, 0, plistlib.dumps(job))
+    add_injection(entries, b'/redwood/lib/liblemonade-bt-hid.dylib bluetoothd')
+    return receipt
+
+
 def runtime_entries(before, system, identity, args):
     """Build verified Bluetooth entries; diagnostic options are explicit."""
     stock = ROOT / 'local/lemonade/bluetooth-20261026/stock-firmware'
@@ -57,7 +81,12 @@ def runtime_entries(before, system, identity, args):
     native_changes = set()
     native_services = {}
     trace_record = None
+    hid_record = None
     bootstrap_record = None
+    if getattr(args, 'board_hid', False):
+        hid_record = keyboard_entries(entries)
+        native_changes.update({'bin/lemonade-bt-hid', 'lib/liblemonade-bt-hid.dylib',
+                              'LaunchDaemons/org.lemonade.bluetooth-hid.plist', 'etc/inject.conf'})
     if args.board_bootstrap:
         bootstrap = ROOT / 'out/lemonade-bt-bootstrap'
         bootstrap_record = json.loads((bootstrap / 'build.json').read_text())
@@ -181,6 +210,7 @@ def runtime_entries(before, system, identity, args):
              'native_ui_trace': ui_record,
              'board_bootstrap': bootstrap_record,
              'board_compat': compat_record,
+             'board_hid': hid_record,
              'native_trace': trace_record,
              'native_services': native_services, 'native_h4_contract': 'H4:POSIX:com.apple.uart.bluetooth,115200' if args.native else None}
     return entries, image
@@ -196,6 +226,7 @@ def main():
     parser.add_argument('--settings-launch', action='store_true', help='include a one-shot Settings launcher without Bluetooth requests')
     parser.add_argument('--board-bootstrap', action='store_true', help='use the real Qualcomm kernel firmware readiness service')
     parser.add_argument('--board-compat', action='store_true', help='gate optional native initialization by real controller capabilities')
+    parser.add_argument('--board-hid', action='store_true', help='include the keyboard input helper; boot also requires lemonade_bt_hid=1')
     parser.add_argument('--ui-trace', action='store_true', help='include a bounded, observation-only native Settings probe')
     args = parser.parse_args()
     if args.native_client and not args.native:
@@ -210,6 +241,8 @@ def main():
         parser.error('--board-bootstrap requires --native')
     if args.board_compat and not (args.native and args.board_bootstrap):
         parser.error('--board-compat requires --native and --board-bootstrap')
+    if args.board_hid and not (args.native and args.board_bootstrap and args.board_compat):
+        parser.error('--board-hid requires --native, --board-bootstrap and --board-compat')
     os.umask(0o077)
     output = args.output.resolve()
     if output.exists() or not output.is_relative_to(ROOT / 'out'):

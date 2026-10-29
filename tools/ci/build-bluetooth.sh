@@ -16,18 +16,24 @@ CC=(/usr/bin/clang -target arm64-apple-ios16.5 --ld-path="$XNUDEPS/host/bin/ld64
 for binary in lemonade-bt-bootstrap liblemonade-bt-compat.dylib; do
     "$THEOS/toolchain/linux/iphone/bin/ldid" -S "$OUT/$binary"
 done
+bash devices/oneplus-9/tools/lemonade-build-bt-hid.sh
+cp out/lemonade-bt-hid/lemonade-bt-hid out/lemonade-bt-hid/liblemonade-bt-hid.dylib "$OUT/"
 python3 - <<'PY'
 import hashlib,json,struct
 from pathlib import Path
 out=Path('out/lemonade-bt-runtime')
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 artifacts={}
-for name in ('lemonade-bt-bootstrap','liblemonade-bt-compat.dylib'):
+for name in ('lemonade-bt-bootstrap','liblemonade-bt-compat.dylib',
+             'lemonade-bt-hid','liblemonade-bt-hid.dylib'):
     path=out/name; data=path.read_bytes()
     if struct.unpack_from('<4I',data)!=(0xfeedfacf,0x100000c,0,6 if name.endswith('.dylib') else 2):
         raise SystemExit('Expected an ARM64 Mach-O: '+name)
     artifacts[name]={'sha256':digest(path),'bytes':len(data)}
 sources=('userland/src/lemonade_bt_bootstrap.c','userland/src/lemonade_bt_compat.c',
+         'userland/src/lemonade_bt_hid.c','userland/src/lemonade_bt_hid_report.h',
+         'userland/src/lemonade_bt_hid_ipc.h','userland/src/lemonade_bt_hid.entitlements.plist',
+         'devices/oneplus-9/tools/lemonade-build-bt-hid.sh',
          'tools/ci/build-bluetooth.sh')
 (out/'build.json').write_text(json.dumps({
     'profile':'lemonade-bluetooth-components-v1','hardware_verified':False,

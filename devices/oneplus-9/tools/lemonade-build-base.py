@@ -132,9 +132,26 @@ def checked_receipt(directory):
     return receipt
 
 
+def validate_injection_config(data):
+    # Match configure_inject() and the sealed kernel's exec_inject_conf[512].
+    # init sends a trailing NUL, and sysctl_io_string requires newlen < capacity.
+    if b'\0' in data or len(data) >= 4096:
+        raise ValueError('Invalid library injection configuration')
+    normalized = data.rstrip(b'\n ').replace(b'\n', b';')
+    if len(normalized) + 1 >= 512:
+        raise ValueError('Library injection configuration exceeds the kernel limit')
+
+
 def validate_tree(tree):
+    keyboard = 'bin/lemonade-bt-hid' in tree
+    applications = 'bin/lemonade-apps' in tree
     binaries = {p for p in tree if p.startswith(('bin/', 'sbin/'))}
-    if binaries != {'bin/metal-enable', 'sbin/init', 'bin/lemonade-bt-bootstrap'}:
+    expected_binaries = {'bin/metal-enable', 'sbin/init', 'bin/lemonade-bt-bootstrap'}
+    if keyboard:
+        expected_binaries.add('bin/lemonade-bt-hid')
+    if applications:
+        expected_binaries.add('bin/lemonade-apps')
+    if binaries != expected_binaries:
         raise ValueError('Base contains unexpected helper/test executables')
     if 'etc/rc.jobs' in tree or 'share/pattern.bin' in tree or 'fw/lemonade-network' in tree:
         raise ValueError('Base contains a test workload or private network input')
@@ -151,11 +168,28 @@ def validate_tree(tree):
             if job.get('Label') in REMOVED_JOBS or any(k in job.get('EnvironmentVariables', {}) for k in DEBUG_ENV):
                 raise ValueError('Test job or tracing environment in base')
             program = job.get('Program') or job.get('ProgramArguments', [''])[0]
-            if program.startswith('/redwood/') and not (
+            bootstrap_job = (
                     relative == 'LaunchDaemons/org.lemonade.bluetooth-bootstrap.plist' and
                     job.get('Label') == 'org.lemonade.bluetooth-bootstrap' and
                     job.get('ProgramArguments') == ['/redwood/bin/lemonade-bt-bootstrap'] and
-                    job.get('MachServices') == {'com.apple.BlueTool': True}):
+                    job.get('MachServices') == {'com.apple.BlueTool': True})
+            keyboard_job = (keyboard and relative == 'LaunchDaemons/org.lemonade.bluetooth-hid.plist' and
+                    job.get('Label') == 'org.lemonade.bluetooth-hid' and job.get('UserName') == 'root' and
+                    job.get('ProgramArguments') == ['/redwood/bin/lemonade-bt-hid'] and
+                    not job.get('MachServices') and job.get('RunAtLoad') is True and
+                    job.get('KeepAlive') is True and job.get('ThrottleInterval') == 10)
+            if relative == 'LaunchDaemons/org.lemonade.bluetooth-hid.plist' and not keyboard_job:
+                raise ValueError('Invalid keyboard helper job')
+            apps_job = False
+            for action,user in (('bootstrap','root'),('install','mobile')):
+                label='org.lemonade.apps-'+action
+                if relative == 'LaunchDaemons/'+label+'.plist':
+                    apps_job=(applications and job.get('Label')==label and job.get('UserName')==user and
+                        job.get('ProgramArguments')==['/redwood/bin/lemonade-apps','--'+action] and
+                        job.get('RunAtLoad') is True and job.get('ProcessType')=='Interactive' and
+                        not any(key in job for key in ('MachServices','KeepAlive','EnvironmentVariables')))
+                    if not apps_job:raise ValueError('Invalid offline app restore job')
+            if program.startswith('/redwood/') and not (bootstrap_job or keyboard_job or apps_job):
                 raise ValueError('Unwanted automatic helper in base: ' + program)
     for name in ('hpbtfw10.tlv', 'hpnv10.bin', 'bt-address'):
         if 'fw/' + name not in tree or tree['fw/' + name][:3] != (0o100600, 0, 0):
@@ -163,8 +197,21 @@ def validate_tree(tree):
     if len(tree['fw/bt-address'][3]) != 6:
         raise ValueError('Invalid private Bluetooth address')
     injection = tree.get('etc/inject.conf', (0, 0, 0, b''))[3]
+    validate_injection_config(injection)
     if b'/redwood/lib/liblemonade-bt-compat.dylib bluetoothd' not in injection.splitlines():
         raise ValueError('Native Bluetooth compatibility is missing')
+    hid_paths = {'bin/lemonade-bt-hid', 'lib/liblemonade-bt-hid.dylib',
+                 'LaunchDaemons/org.lemonade.bluetooth-hid.plist'}
+    hid_injection = b'/redwood/lib/liblemonade-bt-hid.dylib bluetoothd' in injection.splitlines()
+    if (hid_paths.intersection(tree) or hid_injection) and not (
+            keyboard and hid_paths.issubset(tree) and hid_injection):
+        raise ValueError('Incomplete keyboard input service')
+    apps_paths={'bin/lemonade-apps','lib/apps.dylib',
+                'LaunchDaemons/org.lemonade.apps-bootstrap.plist','LaunchDaemons/org.lemonade.apps-install.plist'}
+    apps_injection=b'/redwood/lib/apps.dylib TrollApps Delta' in injection.splitlines()
+    if (apps_paths.intersection(tree) or apps_injection) and not (
+            applications and apps_paths.issubset(tree) and apps_injection):
+        raise ValueError('Incomplete offline app restoration')
     if any('bt-trace' in p or 'bt-ui-trace' in p or 'bt-client' in p for p in tree):
         raise ValueError('Bluetooth diagnostic artifact in base')
     if b'bt-trace' in injection or b'bt-ui-trace' in injection:
@@ -179,6 +226,8 @@ def validate_tree(tree):
 
 
 def pack_tree(entries, destination):
+    if 'etc/inject.conf' in entries:
+        validate_injection_config(entries['etc/inject.conf'][3])
     with tempfile.TemporaryDirectory(prefix='pack-', dir=destination.parent) as temporary:
         work = Path(temporary)
         tree = work / 'root'
@@ -217,10 +266,36 @@ def checksums(folder):
     (folder / 'SHA256SUMS').write_text(''.join(digest(folder / n) + '  ' + n + '\n' for n in names))
 
 
+def application_runtime(tree, directory):
+    receipt=json.loads((directory/'build.json').read_text())
+    original=json.loads((ROOT/'local/lemonade/images.json').read_text())['userland/system.apfs']['sha256']
+    if (receipt.get('profile')!='lemonade-apps-system-v1' or receipt.get('original_system_sha256')!=original or
+            digest(directory/'system.apfs')!=receipt['system_sha256'] or
+            not receipt.get('original_entries_verified') or receipt.get('credentials_included') or
+            receipt.get('foreground_launches')):
+        raise ValueError('Unverified offline app System image')
+    for name,expected in receipt['sources'].items():
+        if digest(ROOT/name)!=expected:raise ValueError('App System builder changed after packaging')
+    runtime_dir=ROOT/'out/lemonade-apps-runtime';runtime=checked_receipt(runtime_dir)
+    if runtime.get('profile')!='lemonade-apps-runtime-v1':raise ValueError('Unexpected app runtime receipt')
+    tree['bin/lemonade-apps']=(0o100755,0,0,(runtime_dir/'lemonade-apps').read_bytes())
+    tree['lib/apps.dylib']=(0o100755,0,0,(runtime_dir/'apps.dylib').read_bytes())
+    for action,user in (('bootstrap','root'),('install','mobile')):
+        label='org.lemonade.apps-'+action
+        job={'Label':label,'UserName':user,'ProgramArguments':['/redwood/bin/lemonade-apps','--'+action],
+             'RunAtLoad':True,'ProcessType':'Interactive','StandardOutPath':'/dev/console','StandardErrorPath':'/dev/console'}
+        tree['LaunchDaemons/'+label+'.plist']=(0o100644,0,0,plistlib.dumps(job))
+    mode,uid,gid,data=tree['etc/inject.conf']
+    tree['etc/inject.conf']=(mode,uid,gid,data.rstrip(b'\n')+b'\n/redwood/lib/apps.dylib TrollApps Delta\n')
+    return {'system':receipt,'runtime':runtime,'automatic_restore':True,'verified':False}
+
+
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', default=launch.BASE_VERSION)
+    parser.add_argument('--keyboard', action='store_true', help='include the Bluetooth keyboard input service')
+    parser.add_argument('--apps', type=Path, help='local output directory from lemonade-build-apps.py')
     args = parser.parse_args()
     if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}', args.version):
         parser.error('Use a simple version identifier')
@@ -290,7 +365,8 @@ def main():
     bluetooth = module('base_bluetooth', 'lemonade-build-bt-firmware.py')
     tree, bluetooth_receipt = bluetooth.runtime_entries(tree, ROOT / 'userland/system.apfs',
         baseline['hardware_serial_sha256'], argparse.Namespace(native=True, board_bootstrap=True,
-            board_compat=True, native_trace=False, native_client=False, settings_launch=False, ui_trace=False))
+            board_compat=True, board_hid=args.keyboard, native_trace=False, native_client=False, settings_launch=False, ui_trace=False))
+    apps_receipt=application_runtime(tree,args.apps.resolve()) if args.apps else None
     validate_tree(tree)
     pack_tree(tree, destination / 'root.apfs')
     boot = json.loads((ROOT / 'out/lemonade-boot.manifest.json').read_text())
@@ -300,7 +376,7 @@ def main():
             boot.get('dtb_sha256') != panel['dtb_sha256']):
         raise SystemExit('Loader boot image differs from its manifest or verified panel DTB')
     for source, target in [('out/lemonade-boot.img', 'boot.img'), ('out/lemonade-kernel', 'kernel'),
-                           ('userland/system.apfs', 'system.apfs'), ('devices/oneplus-9/tools/lemonade-base-launch.py', 'launch.py'),
+                           (str(args.apps.resolve()/'system.apfs') if args.apps else 'userland/system.apfs', 'system.apfs'), ('devices/oneplus-9/tools/lemonade-base-launch.py', 'launch.py'),
                            ('xnuloader/mkpayload.py', 'mkpayload.py')]:
         shutil.copy2(ROOT / source, destination / target)
     for name, action in (('Start.command', 'start'), ('Return-to-Android.command', 'android')):
@@ -325,17 +401,23 @@ Mac 安装好 Python 3.11+、adb 和 fastboot，将这台 LE2110 通过 USB 接�
 
 Wi-Fi 驱动与系统网络服务已集成；联网验收使用临时验证副本覆盖关联、地址获取、DNS、HTTP 和断线重连。正式包不包含该联网程序或网络配置；原生设置中首次输入密码的完整流程尚未单独验收。
 
-蓝牙使用本机控制器和原生“设置 → 蓝牙”页面。启动器会在 Android 中暂时关闭蓝牙以完成冷启动，正常返回 Android 时恢复原设置。再次启动时，启动器会先返回 Android 后重新进行冷启动；当前不复用已经运行过系统的 RAM 加载器。蓝牙配对、音频及外设数据仍未验收。
+蓝牙使用本机控制器和原生“设置 → 蓝牙”页面。启动器会在 Android 中暂时关闭蓝牙以完成冷启动，正常返回 Android 时恢复原设置。再次启动时，启动器会先返回 Android 后重新进行冷启动；当前不复用已经运行过系统的 RAM 加载器。{'本候选包含键盘输入适配；K380 已在开发镜像完成配对、实际输入和自动重连，当前包的验收状态以 manifest.json 为准。' if args.keyboard else '本版本仅验收了发现设备。'}音频、其他 HID 设备和长期稳定性仍未验收。
 
 Sileo 在开机时准备并注册 rootless 软件环境，图标可能稍后出现。软件安装在 RAM 中，重启后不保留。已修复安装触发图标缓存更新时退出以及 bootstrap 特殊权限丢失的问题；本包不自动安装测试应用。
 
+{'本包从只读镜像离线恢复 TrollStore 2.1.1、TrollApps 2.3、Delta 1.7.1 和 B站 8.89.0，约在桌面出现后两分钟内完成。不会自动打开应用或运行游戏。重启会重新恢复应用包，账号、游戏存档和个人数据仍不保留。TrollApps 首次打开会保留已有源并添加选定的 7 个公开软件源；Delta 首次打开会导入作者免费发布的 Vulkanon。B站使用本机之前验证的第三方脱壳、去附加插件、预签名包。游戏运行和音视频兼容范围以版本说明为准。' if args.apps else ''}
+
 电池数据每 5 秒从原厂电量计读取，交由 iOS 原生电源服务显示；仅采集状态，不操作充电启停或快充。单独实测已确认真实电量及接电满电显示；物理 USB 拔插后日志通道重连失败，拔插状态切换和未满电充电图标尚未完成验收。采样中断时内核会撤回过期读数，但 powerd 仍可能保留最后值。
 
-原作者为 hackios 项目的 oosexgang；本包是 b1ackm4x 的 OnePlus 9 适配版本。它包含本机系统与固件材料，仅留在本机使用，不作为可公开转发的固件下载包。源代码分别维护在 hackios-xnu-kernel 与 hackios-xnu-userland 公开仓库。
+原作者为 hackios 项目的 oosexgang；本包是 b1ackm4x 的 OnePlus 9 适配版本。它包含本机系统与固件材料，仅留在本机使用，不作为可公开转发的固件下载包。内核和用户态源码统一维护在 b1ackm4x/hackios-xnu-kernel 仓库。
 '''
     (destination / 'README.md').write_text(readme)
+    source_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip()
+    source_dirty=bool(subprocess.check_output(['git','status','--porcelain'],cwd=ROOT,text=True).strip())
     manifest = {'profile': 'lemonade-base-v1', 'version': args.version, 'device': 'OnePlus 9 LE2110',
-        'hardware_serial_sha256': baseline['hardware_serial_sha256'], 'boot_arguments': launch.BASE_ARGUMENTS,
+        'source_commit':source_commit,'source_tree_clean':not source_dirty,
+        'hardware_serial_sha256': baseline['hardware_serial_sha256'],
+        'boot_arguments': launch.BASE_ARGUMENTS + (['lemonade_bt_hid=1'] if args.keyboard else []),
         'default_display_hz': 120, 'refresh_panel': panel,
         'battery_telemetry_supported': launch.BATTERY_TELEMETRY,
         'charger_control': False,
@@ -354,6 +436,7 @@ Sileo 在开机时准备并注册 rootless 软件环境，图标可能稍后出�
         'wifi_firmware': selected, 'widget_service': {k:v for k,v in widget_receipt.items() if k!='job_sha256'},
         'desktop_services': desktop_receipts,
         'jailbreak_bootstrap': jailbreak_receipt,
+        'applications': apps_receipt,
         'root_file_inventory': {p: {'mode': oct(v[0]), 'uid': v[1], 'gid': v[2], 'sha256': hashlib.sha256(v[3]).hexdigest()}
                                 for p,v in sorted(tree.items())},
         'files': {p.name: {'sha256': digest(p), 'bytes': p.stat().st_size} for p in sorted(destination.iterdir()) if p.is_file()}}

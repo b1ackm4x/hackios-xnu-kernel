@@ -8,7 +8,7 @@ CC=${CC:-clang}
 FLAGS=(-std=c11 -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -Wno-sign-compare
        -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -Ixnu/files -Idevices/oneplus-9/tools)
 if [[ $(uname -s) == Linux ]]; then FLAGS+=(-D_DEFAULT_SOURCE); fi
-for suite in protocol firmware queue uart reconnect le-host; do
+for suite in protocol firmware queue uart reconnect le-host hid-report; do
     "$CC" "${FLAGS[@]}" "devices/oneplus-9/tools/test-lemonade-bt-$suite.c" -o "$WORK/$suite"
     "$WORK/$suite"
 done
@@ -21,4 +21,7 @@ if [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then
     "$CC" "${FLAGS[@]}" -framework CoreFoundation -framework IOKit \
         devices/oneplus-9/tools/test-lemonade-bt-compat.c -o "$WORK/compat"
     "$WORK/compat"
+    "$CC" "${FLAGS[@]}" -fblocks -framework CoreFoundation -framework IOKit \
+        devices/oneplus-9/tools/test-lemonade-bt-hid-lifecycle.c -o "$WORK/hid-lifecycle"
+    "$WORK/hid-lifecycle"
 fi

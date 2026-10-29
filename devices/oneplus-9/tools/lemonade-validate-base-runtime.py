@@ -8,7 +8,7 @@ import argparse,hashlib,importlib.util,json,os,re,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[3]
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--version',default='2026.10.27-base.2')
+parser.add_argument('--version',default='2026.10.30-base.1')
 options=parser.parse_args()
 if not re.fullmatch(r'[0-9][0-9A-Za-z.-]{0,55}',options.version):parser.error('Invalid release version')
 PKG=ROOT/'out/releases'/('lemonade-'+options.version)
@@ -39,7 +39,8 @@ def collect(serial,name):
 print('Starting the untouched package through its shipped launcher.',flush=True)
 cli('start');serial=launch.loader(m);started=time.monotonic();live=[];states=[]
 try:
- for i,at in enumerate((0.5,1,2,4,8,15,30,45,60,75,90)):
+ observations=(0.5,1,2,4,8,15,30,45,60,75,90)+( (120,150,180) if m.get('applications') else () )
+ for i,at in enumerate(observations):
   time.sleep(max(0,started+at-time.monotonic()))
   state=launch.fb(serial,'getvar','result');states.append(state)
   if 'running' not in state:raise SystemExit('Clean runtime returned without a host stop')
@@ -54,12 +55,12 @@ args=cmdlines[0].split() if len(cmdlines)==1 else []
 summary=re.findall(r'direct final completed=(\d+) fallbacks=(\d+) failed=(\d+) mapped_pages=(\d+)',raw.decode(errors='replace'))
 checks={
  'unchanged_release_image':launch.digest(PKG/'root.apfs')==m['files']['root.apfs']['sha256'],
- 'actual_default_arguments':validation.runtime_arguments_match(args,launch.BASE_ARGUMENTS),
+ 'actual_default_arguments':validation.runtime_arguments_match(args,m['boot_arguments']),
  'runtime_setup_complete':'init: runtime setup complete; failures=0' in text,
  'no_boot_self_tests':'=== 36 checks' not in text and '64 MB of anonymous memory' not in text,
  'no_test_workloads':not any(x in text for x in ('lemonade-net: RAM-only acceptance','lemonade-battery-test','lemonade_metal_features','lemonade_metal_mps','lemonade_metal_ca','metal_drv_test','/bin/rwtouch')),
  'no_timed_exit':'loader_return_after expired' not in text and not any(a.startswith('loader_return_after=') for a in args),
- 'observed_running_without_timer':len(states)==11 and all('running' in x for x in states),
+ 'observed_running_without_timer':len(states)==len(observations) and all('running' in x for x in states),
  'host_stop_observed':'the host asked for the end of the run: back to the loader' in text,
  'returned_cleanly':bool(re.search(r'result: returned \d+ 0(?:\s|$)',result)),
  'dpu_completed_frames':len(summary)==1 and int(summary[0][0])>0 and summary[0][2]=='0',
@@ -83,6 +84,8 @@ if m.get('bluetooth'):
  stopped=re.findall(r'bt-lemonade: native transport stopped TX=(\d+) RX=(\d+) clean=(\d+)',text)
  checks['bluetooth_transport_stopped_cleanly']=bool(stopped) and all(int(tx)>0 and int(rx)>0 and clean=='1' for tx,rx,clean in stopped)
  checks['no_bluetooth_test_workload']='bt-client:' not in text and 'bt-ui:' not in text and 'bt-trace:' not in text
+if m.get('applications'):
+ checks['offline_apps_restored']=validation.applications_evidence(text,m['applications'])['passed']
 if m.get('display_return_drain'):
  checks['display_drained_before_gpu_stop']=direct.check_return_drain(raw.decode(errors='replace'))
 if m.get('gpu_return_call_drain'):

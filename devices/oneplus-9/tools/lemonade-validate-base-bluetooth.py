@@ -60,9 +60,16 @@ def main():
     options=argparse.Namespace(native=True,board_bootstrap=True,board_compat=True,
         native_trace=False,native_client=True,settings_launch=False,ui_trace=True)
     tree, receipt=bluetooth.runtime_entries(runtime,folder/'system.apfs',manifest['hardware_serial_sha256'],options)
+    # Leave room for the production keyboard/app entries in the kernel's
+    # 512-byte injection configuration. Only the disposable observer is aliased.
+    tree['lib/bu.dylib']=tree.pop('lib/liblemonade-bt-ui-trace.dylib')
+    mode,uid,gid,conf=tree['etc/inject.conf']
+    tree['etc/inject.conf']=(mode,uid,gid,conf.replace(
+        b'/redwood/lib/liblemonade-bt-ui-trace.dylib',b'/redwood/lib/bu.dylib'))
+    build.validate_injection_config(tree['etc/inject.conf'][3])
     changed=sorted(p for p,v in tree.items() if v!=runtime.get(p))
     allowed={'bin/lemonade-bt-client','LaunchDaemons/org.lemonade.bluetooth-client.plist',
-             'lib/liblemonade-bt-ui-trace.dylib','etc/inject.conf'}
+             'lib/bu.dylib','etc/inject.conf'}
     if set(changed)!=allowed or set(runtime)-set(tree):
         raise SystemExit('Unexpected difference from the accepted runtime')
     run_id=str(int(time.time()))
@@ -70,7 +77,7 @@ def main():
         work=Path(temporary)
         image=work/'root.apfs';build.pack_tree(tree,image)
         seconds=180
-        args=launch.BASE_ARGUMENTS+['lemonade_bt_ui=1',f'loader_return_after={seconds}',
+        args=manifest['boot_arguments']+['lemonade_bt_ui=1',f'loader_return_after={seconds}',
             f'epoch={int(time.time())}',f'rec_secs={seconds}','rec_mb=64','rec_ring=1','rec_step=3']
         payload=work/'boot.bin'
         validation.run(['python3','xnuloader/mkpayload.py','-o',str(payload),
@@ -82,8 +89,9 @@ def main():
         validation.run(['python3','devices/oneplus-9/tools/lemonade-usb.py','boot'],evidence/(run_id+'-bt-ui-boot.log'))
         print('Waiting for the cold RAM loader and System upload.',flush=True)
         validation.wait_for_loader(manifest)
-        validation.run(['python3','devices/oneplus-9/tools/lemonade-usb.py','ramdisk'],evidence/(run_id+'-bt-ui-system.log'))
         serial=launch.loader(manifest)
+        launch.fb(serial,'oem','ramdisk')
+        launch.fb(serial,'stage',folder/'system.apfs',timeout=300)
         launch.fb(serial,'stage',payload,timeout=60)
         launch.fb(serial,'oem','run','0')
         print('Original Bluetooth Settings acceptance started with the complete base.',flush=True)
